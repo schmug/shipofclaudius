@@ -1,0 +1,240 @@
+// Reusable issue-RESEARCH fan-out workflow. The middle stage of the pipeline:
+//   issue-triage-fanout (RESEARCH bucket) -> [issue-research-fanout] -> GREEN lanes
+//   -> stacked-impl-lanes
+//
+// Spawns ONE agent per RESEARCH issue. Each reads the issue + actual repo state and
+// does the INVESTIGATION that triage flagged as missing — codebase (Read/Grep/Glob,
+// git log), `gh api` for repo/release facts, AND the web (WebSearch/WebFetch) for
+// external tools/datasets/techniques — then returns a verdict that aims to move the
+// issue to GREEN (implementable now), with a spec concrete enough that
+// stacked-impl-lanes can build it. Verdicts: GREEN / DECISION / BLOCKED /
+// STILL_RESEARCH.
+//
+// READ-ONLY on GitHub/git: agents do NOT edit, comment, relabel, push, merge, or open
+// anything. The orchestrator turns the structured output into action (post the
+// research_comment, relabel research->ready, hand GREEN lanes to stacked-impl-lanes)
+// WITH the user's confirmation — same division of labor as issue-/pr-triage-fanout.
+//
+// THE ONE DELIBERATE DEPARTURE from the triage siblings: these agents MAY use
+// WebSearch/WebFetch, because external research is the whole point of a research
+// fanout. The `workflow-impl-agent-pitfalls` memory forbids web in *impl* fan-out
+// agents (a hung call during a model-unavailability window stalls the worktree agent
+// and trips the 180s no-progress watchdog). We accept that risk here and CONTAIN it:
+// web research is bounded (a handful of searches), so a hung call fails ONE issue,
+// not the run; the run is partial-tolerant (.filter(Boolean)) and re-runnable by
+// number (map a null parallel[idx] back to NUMBERS[idx] and re-invoke just those).
+//
+// Run (chains from triage — pass the RESEARCH numbers):
+//   Workflow({ name: "issue-research-fanout", args: { numbers: [12, 19, 27] } })
+//   - args.numbers:  array of issue numbers to research (the triage RESEARCH bucket).
+//   - args.triaged:  OPTIONAL array of triage result objects ({number, research_context,
+//                    rationale, ...}); when present, each research agent is SEEDED with
+//                    the matching issue's triage findings as a head start.
+//   - args.label:    OPTIONAL label to auto-gather by when no numbers are passed
+//                    (default "research"). Only used on the no-args self-bootstrap path
+//                    — triage itself is read-only and does not apply labels, so this
+//                    only works if you (or a write-back step) label RESEARCH issues.
+//   - args.repo:     "owner/name" (optional; defaults to the gh-resolved repo).
+//   - args.notes:    optional repo-specific context injected into each research prompt.
+//
+// Lessons baked in (from the four sibling workflows + their memories):
+//   - args may arrive as a JSON string (parse-guard).
+//   - the /skill invoke prompt is generated from meta ONLY (the harness never reads
+//     this .js body at invoke time and emits a bare no-args Workflow({ name })), so the
+//     no-args path MUST self-bootstrap in code (gather by label) rather than throw.
+//   - cap schema-forced agents at ~11 per concurrency wave; RESEARCH buckets are
+//     typically single-digit (FLAWD: 66 issues -> 5 RESEARCH) so this rarely bites,
+//     but the run logs a warning past the cap and is re-runnable for a partial result.
+//   - skeptical GREEN bar (disprove-first, from deep-security-scan): the failure mode
+//     is shallow research -> plausible-but-wrong spec -> stacked-impl-lanes builds the
+//     wrong thing. Only GREEN when the spec is genuinely implementable as written.
+
+export const meta = {
+  name: 'issue-research-fanout',
+  description: 'Web-enabled fan-out: one agent per RESEARCH issue investigates (codebase + gh + web) and returns GREEN/DECISION/BLOCKED/STILL_RESEARCH, aiming to move research issues to GREEN with an implementable spec + lane-shaped handoff to stacked-impl-lanes. Read-only on GitHub. Pass args.numbers (the triage RESEARCH bucket).',
+  whenToUse: 'After issue-triage-fanout: resolve the RESEARCH bucket so those issues become GREEN (implementable). Not for triage (use issue-triage-fanout) or implementation (use stacked-impl-lanes).',
+  phases: [
+    { title: 'Gather', detail: 'when no args.numbers: one read-only agent runs gh issue list --label <label> to collect RESEARCH issue numbers' },
+    { title: 'Research', detail: 'one web-enabled agent per issue: read issue + repo state, investigate codebase/gh/web, return a verdict' },
+  ],
+}
+
+const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const REPO = A.repo ? `-R ${A.repo}` : ''
+let NUMBERS = Array.isArray(A.numbers) ? A.numbers : []
+const TRIAGED = Array.isArray(A.triaged) ? A.triaged : []
+const LABEL = (typeof A.label === 'string' && A.label.trim()) ? A.label.trim() : 'research'
+const NOTES = A.notes || ''
+
+// Seed lookup: if the triage result objects were passed, index them by number so each
+// research agent can start from triage's findings instead of re-deriving from scratch.
+const SEED = new Map()
+for (const t of TRIAGED) {
+  if (t && Number.isInteger(t.number)) SEED.set(t.number, t)
+}
+
+// Self-bootstrap: the /skill invoke prompt is generated from meta only and emits a bare
+// `Workflow({ name })` with no args, so when no numbers are passed we gather issues
+// carrying the research label ourselves instead of throwing the old input error.
+const GATHER_LIMIT = 300
+if (NUMBERS.length === 0) {
+  phase('Gather')
+  const gathered = await agent(
+    `You are READ-ONLY (gh/git/grep/read only — do NOT edit, comment, relabel, or open anything).\n` +
+    `Run exactly this command and return its output:\n` +
+    `  gh issue list --state open --label "${LABEL}" --limit ${GATHER_LIMIT} ${REPO} --json number --jq "[.[].number]"\n` +
+    `Return the integer array of open issue numbers carrying the "${LABEL}" label. If none, return an empty array.`,
+    {
+      label: 'gather-research-issues',
+      phase: 'Gather',
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['numbers'],
+        properties: { numbers: { type: 'array', items: { type: 'integer' } } },
+      },
+    }
+  )
+  NUMBERS = (gathered && Array.isArray(gathered.numbers)) ? gathered.numbers : []
+  log(`Gathered ${NUMBERS.length} open "${LABEL}"-labelled issue(s)` +
+    (NUMBERS.length >= GATHER_LIMIT ? ` (hit --limit ${GATHER_LIMIT}; some may be untriaged)` : ''))
+}
+
+if (NUMBERS.length === 0) {
+  throw new Error(
+    `issue-research-fanout: no issues to research — none passed in args.numbers and ` +
+    `\`gh issue list --state open --label "${LABEL}"\` returned none. ` +
+    `Normal use chains from issue-triage-fanout: pass args.numbers with the RESEARCH bucket ` +
+    `(optionally args.triaged with the full triage objects to seed each agent). ` +
+    `Or label your RESEARCH issues "${LABEL}" (or pass args.label) for the auto-gather path.`)
+}
+
+// Concurrency-cap warning (issue-triage-fanout-concurrency-cap memory): schema-forced
+// agents degrade past ~11 concurrent in one wave. RESEARCH buckets are usually small,
+// so we don't auto-batch here; we warn so a partial result is expected and re-runnable.
+const WAVE_CAP = 11
+if (NUMBERS.length > WAVE_CAP) {
+  log(`⚠️ ${NUMBERS.length} issues > ~${WAVE_CAP}/wave — schema-forced agents may fail past the concurrency cap. ` +
+    `Re-run any that come back null by mapping the missing numbers back into args.numbers.`)
+}
+
+const RESEARCH_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['number', 'verdict', 'rationale', 'confidence', 'research_comment'],
+  properties: {
+    number: { type: 'integer' },
+    title: { type: 'string' },
+    verdict: {
+      type: 'string',
+      enum: ['GREEN', 'DECISION', 'BLOCKED', 'STILL_RESEARCH'],
+      description: 'GREEN=research resolved EVERY open question; a competent implementer could build it now from `spec` with no further investigation. DECISION=research surfaced a genuine product/architecture choice with no defensible default — needs a human. BLOCKED=an unavoidable external dependency (secret/API key/repo-admin/paid service/upstream-not-ready) confirmed by research. STILL_RESEARCH=bounded effort did not resolve it — give a NARROWER next_question for a follow-up run.',
+    },
+    rationale: { type: 'string', description: '2-4 sentences citing concrete evidence (files that do/do not exist, doc/source facts, acceptance criteria now met or not).' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Confidence the verdict is right and (for GREEN) the spec is actually implementable as written.' },
+    open_questions: { type: 'array', items: { type: 'string' }, description: 'The questions that blocked this from being implementable — each answered (for GREEN) or carried forward (otherwise).' },
+
+    // GREEN payload — shaped so green_lanes feeds stacked-impl-lanes directly.
+    spec: { type: 'string', description: 'For GREEN: markdown spec ready to implement — problem, the chosen approach, a step-by-step plan, and OBJECTIVE acceptance criteria. Must be buildable as written, no further investigation. Empty otherwise.' },
+    chosen_approach: { type: 'string', description: 'For GREEN: the concrete library/API/technique/dataset selected and WHY over the alternatives considered (not "use a library for X" but "use Y, integrating at Z"). Empty otherwise.' },
+    sources: { type: 'array', items: { type: 'string' }, description: 'For GREEN/STILL_RESEARCH: URLs / doc refs / file paths the conclusion rests on.' },
+    group: { type: 'string', description: 'For GREEN: canonical lane grouping key (same taxonomy as triage: ci, repo-hygiene, security-fix, docs, tooling, tests, feature, ...). Empty otherwise.' },
+    branch: { type: 'string', description: 'For GREEN: suggested branch name for the impl lane (e.g. feat/issue-27-foo). Empty otherwise.' },
+    files: { type: 'array', items: { type: 'string' }, description: 'For GREEN: likely files to create/modify (collision/grouping analysis + impl head start).' },
+    complexity: { type: 'string', enum: ['trivial', 'small', 'medium', 'large'], description: 'Effort to implement once GREEN.' },
+    invariant: { type: 'boolean', description: 'For GREEN: true if implementing it touches security-critical invariants/planes (stacked-impl-lanes runs a security-hardening-reviewer on invariant lanes).' },
+    depends_on: { type: 'array', items: { type: 'integer' }, description: 'Other open issue numbers that must land first.' },
+
+    // DECISION payload.
+    decision_question: { type: 'string', description: 'For DECISION: the single crisp question the human must answer. Empty otherwise.' },
+    decision_options: { type: 'array', items: { type: 'string' }, description: 'For DECISION: 2-4 concrete options, recommended first. Empty otherwise.' },
+
+    // BLOCKED payload.
+    blocker: { type: 'string', description: 'For BLOCKED: the exact external dependency confirmed by research. Empty otherwise.' },
+
+    // STILL_RESEARCH payload.
+    next_question: { type: 'string', description: 'For STILL_RESEARCH: the NARROWER question a follow-up run should answer (research made progress but did not finish). Empty otherwise.' },
+
+    // Always.
+    research_comment: { type: 'string', description: 'Markdown findings — the investigation, sources, and conclusion — ready for the orchestrator to post as an issue comment (with the user\'s confirmation). Self-contained.' },
+  },
+}
+
+const PROMPT = (n) => {
+  const seed = SEED.get(n)
+  const seedBlock = seed
+    ? `\nTRIAGE SEED (from issue-triage-fanout — a head start, verify it, do not just trust it):\n` +
+      `- rationale: ${seed.rationale || '(none)'}\n` +
+      `- research_context: ${seed.research_context || '(none)'}\n` +
+      (Array.isArray(seed.files) && seed.files.length ? `- suspected files: ${seed.files.join(', ')}\n` : '')
+    : ''
+  return `You are doing the RESEARCH that unblocks ONE GitHub issue so it can move to GREEN (implementable now). Triage already classified this issue as RESEARCH: real but underdetermined. Your job is to do the investigation and return a verdict.
+
+You are READ-ONLY on GitHub/git: use gh / git / grep / read only — do NOT edit, comment, relabel, push, merge, or open anything. You MAY (and for external unknowns SHOULD) use WebSearch/WebFetch — this is a research task. If a web tool is not directly callable, it is DEFERRED: load it first via ToolSearch (query \`select:WebSearch,WebFetch\`), then use it; do NOT silently fall back to codebase-only when the issue's open questions are external. Do NOT call advisor. Do NOT poll CI.
+
+Research issue #${n}${A.repo ? ` in ${A.repo}` : ''}.${seedBlock}
+${NOTES ? `\nRepo-specific context: ${NOTES}\n` : ''}
+STEPS (do all):
+1. READ the full issue: \`gh issue view ${n} ${REPO} --json title,body,labels,comments\`. Read the body AND comments — a comment may already record findings, a decision, or a blocker. Capture the title into your "title" field.
+2. FRAME the OPEN QUESTIONS: list exactly what is underdetermined — what must be answered before a competent implementer could build this without further investigation. Put them in open_questions.
+3. INVESTIGATE (bounded — go deep, not wide; a HANDFUL of web searches max, prefer authoritative sources):
+   - Codebase: Read/Grep/Glob + \`git log --oneline -25\`, \`ls\`, \`cat\` — how does the relevant area work today, where would this integrate, what already exists.
+   - Facts: \`gh api\` for repo/release/tag/dependency facts (NOT WebFetch for these).
+   - External: WebSearch/WebFetch ONLY for genuinely external unknowns — which library/API/technique/dataset, current best practice, API shape, version compatibility. Record every source URL.
+4. SKEPTICAL GREEN GATE — decide the verdict. Default to NOT GREEN unless you have earned it:
+   - GREEN only if EVERY open question is answered AND you can write a spec a competent implementer builds with NO further investigation: a CONCRETE approach is chosen (named library/API + the integration point, not "use something for X"), and OBJECTIVE acceptance criteria exist. Fill spec, chosen_approach, sources, group, branch, files, complexity, invariant, depends_on.
+   - DECISION if research surfaced a genuine product/architecture choice with no defensible default. Fill decision_question + 2-4 decision_options (recommended first). Do NOT invent a default to force GREEN.
+   - BLOCKED if research confirms an unavoidable external dependency (secret/API key, repo-admin access, a paid/unavailable service, an upstream that isn't ready). Put the exact blocker in blocker.
+   - STILL_RESEARCH if bounded effort made progress but did not finish. Put the NARROWER follow-up in next_question (and any sources found). Never silently upgrade an unproven assumption to GREEN.
+5. Write research_comment: a self-contained markdown summary (open questions, what you investigated, the sources, and the conclusion) ready to post on the issue.
+
+Be skeptical and concrete; cite evidence. The cost of a wrong GREEN is high (stacked-impl-lanes will build the wrong thing). Return the structured object.`
+}
+
+phase('Research')
+
+const results = await parallel(
+  NUMBERS.map((n) => () =>
+    agent(PROMPT(n), { label: `research:#${n}`, phase: 'Research', schema: RESEARCH_SCHEMA })
+  )
+)
+
+// Partial-tolerant: log which issues came back null so a re-run can target just those
+// (map a null parallel[idx] back to NUMBERS[idx]; a fresh invocation gets its own budget).
+const clean = []
+const missing = []
+results.forEach((r, i) => { if (r) clean.push(r); else missing.push(NUMBERS[i]) })
+if (missing.length) {
+  log(`⚠️ ${missing.length} issue(s) returned no result (re-run with args.numbers: [${missing.join(', ')}]): ` +
+    missing.map((n) => `#${n}`).join(', '))
+}
+
+const counts = {}
+for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
+
+// GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief})
+// so triage -> research -> impl chains cleanly through the orchestrator (with a review
+// gate at each hop). brief = the implementable spec produced by the research.
+const green = clean.filter((r) => r.verdict === 'GREEN')
+const green_lanes = green.map((r) => ({
+  key: r.group || `issue-${r.number}`,
+  branch: r.branch || `feat/issue-${r.number}`,
+  // issues = ONLY what this lane CLOSES. stacked-impl-lanes emits `Closes #n` for every
+  // entry here, so depends_on (must-land-first, not closed-by-this-PR) must NOT enter it
+  // — otherwise a dependency gets falsely closed and, if itself GREEN, double-implemented.
+  issues: [r.number],
+  invariant: !!r.invariant,
+  brief: r.spec || r.chosen_approach || r.rationale || '',
+  // Sequencing hint for the orchestrator only (kept off `issues`): order lanes so deps land first.
+  depends_on: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((n) => n !== r.number),
+}))
+
+log(`Researched ${clean.length}/${NUMBERS.length}: ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
+
+return {
+  researched: clean,
+  counts,
+  green_lanes,
+  missing,
+  total: NUMBERS.length,
+}

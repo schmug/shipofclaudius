@@ -1,0 +1,15 @@
+# Dependencies (none today — backstop)
+node_modules/
+
+# Workflow run artifacts
+.security-scans/
+*.bak
+
+# Secrets — never commit
+.env
+.env.*
+.dev.vars
+
+# OS / editor cruft
+.DS_Store
+*.log

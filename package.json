@@ -1,0 +1,11 @@
+{
+  "name": "shipofcladius",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Curated collection of dynamic workflows for the Claude Code Workflow tool",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/dss-sim.test.mjs && node tests/defense-scan.test.mjs"
+  },
+  "license": "UNLICENSED"
+}
