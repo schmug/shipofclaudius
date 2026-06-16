@@ -434,7 +434,7 @@ test('args may arrive as a JSON string (parse-guard, like Phase A)', async () =>
 })
 
 test('layer 1 ran with candidates but its sub-report agent died: coverage must NOT claim "no candidates"', async () => {
-  // Real case from the 2026-06-13 re-run: L1 found 1 reportable + 11 appendix, but its
+  // Real case from a re-run: L1 found 1 reportable + 11 appendix, but its
   // report agent hit an API socket error, so l1.report/report_html came back null.
   const map = { l1: { ...L1_RESULT, report: null, report_html: null, report_dir: null, report_md: null } }
   const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
@@ -470,15 +470,15 @@ test('report agent is called with a satisfiable schema that captures report_md +
 test('orchestrator surfaces report_dir / report_html / report_md from the structured result', async () => {
   const map = {
     report: {
-      output_dir: '/Users/cory/clodcast/.security-scans/Z-defense',
-      report_html_path: '/Users/cory/clodcast/.security-scans/Z-defense/report.html',
+      output_dir: '/tmp/fake/.security-scans/Z-defense',
+      report_html_path: '/tmp/fake/.security-scans/Z-defense/report.html',
       report_md: '# merged report\n\n## Coverage\nLayer 1 RAN...',
       html_written: true,
     },
   }
-  const { result } = await runScript({ args: { target: '/Users/cory/clodcast' }, map })
-  assert.equal(result.report_dir, '/Users/cory/clodcast/.security-scans/Z-defense', 'report_dir surfaced for the caller')
-  assert.equal(result.report_html, '/Users/cory/clodcast/.security-scans/Z-defense/report.html', 'report_html path surfaced')
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  assert.equal(result.report_dir, '/tmp/fake/.security-scans/Z-defense', 'report_dir surfaced for the caller')
+  assert.equal(result.report_html, '/tmp/fake/.security-scans/Z-defense/report.html', 'report_html path surfaced')
   assert.ok(result.report_md && result.report_md.includes('# merged report'), 'full report_md text surfaced so the caller can persist it')
 })
 

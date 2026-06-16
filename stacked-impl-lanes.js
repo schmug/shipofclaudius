@@ -14,8 +14,8 @@
 //                  args: { mode: "sequential", base: "main", lanes: [...] } })
 //   lane = { key, branch, issues:[...], invariant:bool, brief:"..." }
 //
-// HARD RULES baked into every agent prompt (learned the hard way on FLAWD
-// 2026-06-01): no advisor calls, no WebFetch/WebSearch, no CI polling
+// HARD RULES baked into every agent prompt (learned the hard way on a large
+// multi-lane run): no advisor calls, no WebFetch/WebSearch, no CI polling
 // (gh pr checks / sleep-loops blow the 180s no-progress watchdog), no merging,
 // no --admin, no push to main. Agents open the PR and RETURN; the orchestrator
 // drives CI-gated merges afterward. NOTE: stacked squash-merges require the
