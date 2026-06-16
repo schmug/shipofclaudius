@@ -5,6 +5,8 @@ A curated collection of **dynamic workflows** for the Claude Code [Workflow tool
 Each workflow is a self-contained JavaScript file that begins with an `export const meta = {…}` block and drives a body of `agent()` / `parallel()` / `pipeline()` / `phase()` / `workflow()` calls. They run in the background under the Workflow tool and report progress through `/workflows`.
 
 > These are snapshots of the author's global workflows that normally live in `~/.claude/workflows/`. This repo is the versioned, shareable home for them — the live copies stay in place and are kept in sync by hand.
+>
+> *Hence the name. Replace every plank of a ship over the years and philosophers ask whether it's still the [Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus). Hand-sync every workflow out of `~/.claude/workflows/` into this repo, plank by plank, and you get the Ship of **Cladius** — same paradox, more Claude. Whether it's still the same ship is left as an exercise for the agents.*
 
 ## Workflows
 
