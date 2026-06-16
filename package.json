@@ -4,8 +4,9 @@
   "private": true,
   "description": "Curated collection of dynamic workflows for the Claude Code Workflow tool",
   "type": "module",
+  "author": "schmug",
   "scripts": {
-    "test": "node tests/dss-sim.test.mjs && node tests/defense-scan.test.mjs"
+    "test": "node tests/dss-sim.test.mjs && node tests/defense-scan.test.mjs && node tests/pr-triage-sim.test.mjs"
   },
-  "license": "UNLICENSED"
+  "license": "SEE LICENSE IN LICENSE"
 }

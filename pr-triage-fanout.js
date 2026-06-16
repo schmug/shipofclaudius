@@ -12,23 +12,25 @@
 // trip the 180s no-progress watchdog). The workflow NEVER acts; it only classifies.
 //
 // AUTHOR FILTER — the one thing that makes this different from a generic PR triage:
-//   Only PRs authored by `schmug` are triaged. Every other author (bots like
-//   app/dependabot and app/cursor, and any other human) is EXCLUDED. Your own
-//   Claude-Code PRs are authored as `schmug`, so they stay in (= "my PRs").
-//   The filter is applied IN CODE (not hidden in an agent) so it is auditable, and
-//   the dropped PRs are log()'d by number + author — never silently filtered.
+//   Only PRs authored by ONE login are triaged — by default the authenticated gh
+//   user (resolved at runtime via `gh api user`), or an explicit args.author. Every
+//   other author (bots like app/dependabot and app/cursor, and any other human) is
+//   EXCLUDED. Your own Claude-Code PRs are authored as you, so they stay in (= "my
+//   PRs"). The filter is applied IN CODE (not hidden in an agent) so it is auditable,
+//   and the dropped PRs are log()'d by number + author — never silently filtered.
 //   The filter applies on BOTH paths: the auto-gather path AND when args.numbers
-//   is passed explicitly (each passed number's author is verified and dropped if
-//   not schmug).
+//   is passed explicitly (each passed number's author is verified and dropped if it
+//   does not match).
 //
 // Run (NO ARGS NEEDED):  Workflow({ name: "pr-triage-fanout" })
 //   When no args.numbers is passed, the workflow AUTO-GATHERS every open PR itself
-//   (one read-only agent runs `gh pr list`), filters to schmug, and triages those.
+//   (one read-only agent runs `gh pr list`), filters to the author, and triages those.
 //   - args.numbers: OPTIONAL array of PR numbers to triage a SUBSET. If omitted or
-//                   empty, ALL open PRs are gathered automatically. Non-schmug
-//                   numbers passed here are still dropped (with a log line).
+//                   empty, ALL open PRs are gathered automatically. Numbers whose
+//                   author does not match are still dropped (with a log line).
 //   - args.repo:    "owner/name" (optional; defaults to the gh-resolved repo).
-//   - args.author:  OPTIONAL author login to filter on (defaults to "schmug").
+//   - args.author:  OPTIONAL author login to filter on. Defaults to the authenticated
+//                   gh user, auto-detected at runtime via `gh api user --jq .login`.
 //   - args.notes:   optional string of repo-specific context injected into each
 //                   triage prompt (e.g. "ignore the `claude-review` check").
 //
@@ -61,16 +63,16 @@
 
 export const meta = {
   name: 'pr-triage-fanout',
-  description: 'Read-only fan-out: one agent per open PR → MERGE/CLOSE/REBASE/FIX_CI/COMMENT/AWAITING_HUMAN/ESCALATE with CI verdict, mergeability, and comment state. Triages only schmug-authored PRs (bots & other authors excluded). Auto-gathers all open PRs when none are passed.',
+  description: 'Read-only fan-out: one agent per open PR → MERGE/CLOSE/REBASE/FIX_CI/COMMENT/AWAITING_HUMAN/ESCALATE with CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated gh user by default, or args.author; bots & other authors excluded). Auto-gathers all open PRs when none are passed.',
   phases: [
-    { title: 'Gather', detail: 'one read-only agent lists open PRs (or views the passed numbers); the schmug author filter is applied in code' },
+    { title: 'Gather', detail: 'one read-only agent lists open PRs (or views the passed numbers) + resolves the gh user; the author filter is applied in code' },
     { title: 'Triage', detail: 'one read-only agent per kept PR: read PR + CI snapshot + comments, classify' },
   ],
 }
 
 const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
 const REPO = A.repo ? `-R ${A.repo}` : ''
-const AUTHOR = (typeof A.author === 'string' && A.author.trim()) ? A.author.trim() : 'schmug'
+const AUTHOR_ARG = (typeof A.author === 'string' && A.author.trim()) ? A.author.trim() : ''
 const NOTES = A.notes || ''
 const EXPLICIT = Array.isArray(A.numbers) ? A.numbers : []
 
@@ -86,6 +88,7 @@ const CANDIDATE_SCHEMA = {
   required: ['prs'],
   properties: {
     repo: { type: 'string', description: 'The owner/name the gh commands actually queried (for visibility, so a wrong fork/upstream resolve is logged).' },
+    viewer: { type: 'string', description: 'The authenticated GitHub login from `gh api user --jq .login` — the default author filter when args.author is not set.' },
     prs: {
       type: 'array',
       items: {
@@ -94,7 +97,7 @@ const CANDIDATE_SCHEMA = {
         required: ['number', 'author'],
         properties: {
           number: { type: 'integer' },
-          author: { type: 'string', description: 'The PR author login (the .author.login field), e.g. "schmug" or "app/dependabot".' },
+          author: { type: 'string', description: 'The PR author login (the .author.login field), e.g. "octocat" or "app/dependabot".' },
           state: { type: 'string', description: 'PR state from gh: "OPEN", "MERGED", or "CLOSED".' },
           isDraft: { type: 'boolean' },
           title: { type: 'string' },
@@ -107,22 +110,39 @@ const CANDIDATE_SCHEMA = {
 const REPO_FIELD_INSTR = `Also set the top-level "repo" field to the owner/name you queried (` +
   (A.repo ? `it is "${A.repo}"` : 'resolve it with `gh repo view --json nameWithOwner -q .nameWithOwner`') + `).`
 
+// When no explicit author is passed, the author filter defaults to the authenticated
+// gh user — so the gather agent (already running read-only gh) also looks it up.
+const VIEWER_INSTR = AUTHOR_ARG
+  ? ''
+  : ` Also set the top-level "viewer" field by running \`gh api user --jq .login\` and returning its exact output (the authenticated GitHub login).`
+
 const GATHER_PROMPT = EXPLICIT.length
   ? `You are READ-ONLY (gh/git/grep/read only — do NOT edit, comment, merge, or open anything).\n` +
     `For EACH of these PR numbers — ${EXPLICIT.join(', ')} — run:\n` +
     `  gh pr view <n> ${REPO} --json number,author,state,isDraft,title\n` +
     `and return one object per PR with: number, author (the author.login string), state ("OPEN"/"MERGED"/"CLOSED"), isDraft, title.\n` +
-    `If a number is not a real PR, omit it. ${REPO_FIELD_INSTR}\nReturn as {repo, prs:[...]}.`
+    `If a number is not a real PR, omit it. ${REPO_FIELD_INSTR}${VIEWER_INSTR}\nReturn as {repo, viewer, prs:[...]}.`
   : `You are READ-ONLY (gh/git/grep/read only — do NOT edit, comment, merge, or open anything).\n` +
-    `Run exactly this command and return its output as {repo, prs:[...]}:\n` +
+    `Run exactly this command and return its output as {repo, viewer, prs:[...]}:\n` +
     `  gh pr list --state open --limit ${GATHER_LIMIT} ${REPO} --json number,author,state,isDraft,title\n` +
-    `For each PR return: number, author (the author.login string, e.g. "schmug" or "app/dependabot"), state ("OPEN"), isDraft, title.\n` +
-    `${REPO_FIELD_INSTR}\nIf there are no open PRs, return {repo, prs:[]}.`
+    `For each PR return: number, author (the author.login string, e.g. "octocat" or "app/dependabot"), state ("OPEN"), isDraft, title.\n` +
+    `${REPO_FIELD_INSTR}${VIEWER_INSTR}\nIf there are no open PRs, return {repo, viewer, prs:[]}.`
 
 const gathered = await agent(GATHER_PROMPT, { label: 'gather-open-prs', phase: 'Gather', schema: CANDIDATE_SCHEMA })
 const CANDIDATES = (gathered && Array.isArray(gathered.prs)) ? gathered.prs : []
 const QUERIED_REPO = A.repo || (gathered && typeof gathered.repo === 'string' ? gathered.repo : '')
 log(`Triaging repo: ${QUERIED_REPO || '(gh default in cwd)'}`)
+
+// ── Resolve the author to filter on: explicit args.author wins; otherwise the
+// authenticated gh user the gather agent looked up. If neither resolves, throw
+// rather than silently triaging EVERYONE's PRs. ─────────────────────────────────
+const AUTHOR = AUTHOR_ARG || (gathered && typeof gathered.viewer === 'string' ? gathered.viewer.trim() : '')
+if (!AUTHOR) {
+  throw new Error(
+    'pr-triage-fanout: could not resolve an author to filter on. Pass args.author explicitly, ' +
+    'or ensure `gh api user` works (gh is authenticated) so the current login auto-detects.')
+}
+log(`Author filter: ${AUTHOR} (${AUTHOR_ARG ? 'from args.author' : 'auto-detected gh user'})`)
 
 // ── State filter: this is OPEN-PR triage. The explicit-numbers path uses
 // `gh pr view` (which also returns merged/closed PRs), and a PR can merge between

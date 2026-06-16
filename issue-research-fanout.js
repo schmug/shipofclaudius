@@ -43,7 +43,7 @@
 //     this .js body at invoke time and emits a bare no-args Workflow({ name })), so the
 //     no-args path MUST self-bootstrap in code (gather by label) rather than throw.
 //   - cap schema-forced agents at ~11 per concurrency wave; RESEARCH buckets are
-//     typically single-digit (FLAWD: 66 issues -> 5 RESEARCH) so this rarely bites,
+//     typically single-digit (e.g. 66 issues -> 5 RESEARCH) so this rarely bites,
 //     but the run logs a warning past the cap and is re-runnable for a partial result.
 //   - skeptical GREEN bar (disprove-first, from deep-security-scan): the failure mode
 //     is shallow research -> plausible-but-wrong spec -> stacked-impl-lanes builds the

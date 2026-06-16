@@ -21,7 +21,7 @@
 //   To triage a subset:
 //     Workflow({ name: "issue-triage-fanout", args: { numbers: [16, 17, 18] } })
 //
-// First derived from the FLAWD 2026-06-01 fan-out (66 issues -> 37/16/5/4/4).
+// First derived from a real 66-issue fan-out (37 GREEN / 16 DECISION / 5 RESEARCH / 4 DONE / 4 BLOCKED).
 // Lessons baked in: args may arrive as a JSON string (parse-guard); embed the
 // number list rather than relying on shared state. CRITICAL: the /skill invoke
 // prompt is generated from meta ONLY (the harness never reads this .js body or

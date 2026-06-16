@@ -33,7 +33,7 @@
 // Phase 0 runs a deterministic scanner (foxguard: SAST taint rules, secrets, OSV
 // SCA, PQC) whose findings enter the same merge ahead of agent candidates, so
 // exact-line tool findings win dedup ties. Validators are TRACE-ONLY (no builds/
-// tests/servers — concurrent builds stalled the gitdot run, 2026-06-09) and run
+// tests/servers — concurrent builds stalled an earlier large run) and run
 // in chunks of 8.
 
 export const meta = {
@@ -224,7 +224,7 @@ if (unique.length === 0) {
 // ---- Phase 2: disprove-first validation (barrier: report needs all verdicts) ----
 phase('Validate')
 // Chunked: dozens of concurrent validators thrashed a large workspace and
-// tripped the no-progress watchdog (gitdot, 2026-06-09). 8 at a time is the
+// tripped the no-progress watchdog on a large workspace. 8 at a time is the
 // proven-safe ceiling; the report barrier below is unaffected.
 const VALIDATE_CHUNK = 8
 const validated = []
