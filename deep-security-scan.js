@@ -6,7 +6,7 @@
 // comes from diverse independent framings + a merge — one pass gets unlucky and misses
 // things; N lenses don't miss the same things.
 //
-// Repository / scoped-path audits only (for a diff/PR, use the security-diff-scan skill).
+// Repository / scoped-path audits only (for a diff/PR, use the security-diff-scan workflow).
 // This is the heavyweight sibling of the security-scan skill and reuses its HTML report
 // template at ~/.claude/skills/security-scan/assets/report-template.html.
 //
