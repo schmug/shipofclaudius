@@ -6,7 +6,7 @@
   "type": "module",
   "author": "schmug",
   "scripts": {
-    "test": "node tests/dss-sim.test.mjs && node tests/defense-scan.test.mjs && node tests/issue-triage-sim.test.mjs && node tests/issue-research-sim.test.mjs && node tests/pr-triage-sim.test.mjs && node tests/stacked-impl-sim.test.mjs"
+    "test": "node tests/dss-sim.test.mjs && node tests/defense-scan.test.mjs && node tests/issue-triage-sim.test.mjs && node tests/issue-research-sim.test.mjs && node tests/pr-triage-sim.test.mjs && node tests/stacked-impl-sim.test.mjs && node tests/stacked-merge-sim.test.mjs"
   },
   "license": "SEE LICENSE IN LICENSE"
 }
