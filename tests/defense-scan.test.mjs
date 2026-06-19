@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 
-const SRC_PATH = new URL('../defense-scan.js', import.meta.url)
+const SRC_PATH = new URL('../.claude/workflows/defense-scan.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 function assertSatisfiable(schema, label) {

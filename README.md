@@ -4,32 +4,48 @@ A curated collection of **dynamic workflows** for the Claude Code [Workflow tool
 
 Each workflow is a self-contained JavaScript file that begins with an `export const meta = {…}` block and drives a body of `agent()` / `parallel()` / `pipeline()` / `phase()` / `workflow()` calls. They run in the background under the Workflow tool and report progress through `/workflows`.
 
-> These are snapshots of the author's global workflows that normally live in `~/.claude/workflows/`. This repo is the versioned, shareable home for them — the live copies stay in place and are kept in sync by hand.
+> The workflows live in [`.claude/workflows/`](.claude/workflows/) — the [Anthropic-supported, project-level location](https://code.claude.com/docs/en/workflows#save-the-workflow-for-reuse) for sharing dynamic workflows. Clone the repo and they're available as `/<name>` commands in any session opened here — no copy step, nothing to keep in sync. (To make one available in *every* project on your machine instead, copy it into `~/.claude/workflows/`; see [Install](#install).)
 >
-> *Hence the name. Replace every plank of a ship over the years and philosophers ask whether it's still the [Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus). Hand-sync every workflow out of `~/.claude/workflows/` into this repo, plank by plank, and you get the Ship of **Cladius** — same paradox, more Claude. Whether it's still the same ship is left as an exercise for the agents.*
+> *Hence the name. Replace every plank of a ship over the years and philosophers ask whether it's still the [Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus). Carry every workflow, plank by plank, and you get the Ship of **Cladius** — same paradox, more Claude. Whether it's still the same ship is left as an exercise for the agents.*
 
 ## Workflows
 
 | File | Name | What it does |
 |------|------|--------------|
-| [`deep-security-scan.js`](deep-security-scan.js) | `deep-security-scan` | Higher-recall repo security audit: a deterministic prefilter (foxguard: SAST/secrets/SCA) feeds K independent threat-model-lensed discovery workers → semantic merge → disprove-first validation → one HTML + markdown report. For a whole repo or a scoped path — **not** diffs/PRs. |
-| [`defense-scan.js`](defense-scan.js) | `defense-scan` | Defense-in-depth orchestrator. Composes `deep-security-scan` (code-at-rest) with opt-in layers — supply-chain (bumblebee), DAST (vigolium), LLM red-team (garak), network/template scan (nuclei), and project-posture/governance (OpenSSF Scorecard vs. the OSPS Baseline) — into one merged report with a per-layer coverage statement. |
-| [`security-diff-scan.js`](security-diff-scan.js) | `security-diff-scan` | Change-scoped security review: resolves one code change (a git range, a PR, or the uncommitted working tree), fans out K threat-model-lensed discovery workers over **only the diff** → semantic merge → disprove-first validation (with a change-scope gate that drops pre-existing issues) → one HTML + markdown report with a coverage statement of which files/hunks were in scope. The diff/PR sibling of `deep-security-scan`. |
-| [`issue-triage-fanout.js`](issue-triage-fanout.js) | `issue-triage-fanout` | Read-only fan-out: one agent per open GitHub issue → `GREEN` / `DECISION` / `RESEARCH` / `DONE` / `BLOCKED`, with grouping and dependencies. Auto-gathers open issues when none are passed. |
-| [`issue-research-fanout.js`](issue-research-fanout.js) | `issue-research-fanout` | Web-enabled fan-out over the `RESEARCH` bucket: one agent per issue investigates (codebase + `gh` + web) and returns a verdict, aiming to move research issues to `GREEN` with an implementable spec. Read-only on GitHub. |
-| [`pr-triage-fanout.js`](pr-triage-fanout.js) | `pr-triage-fanout` | Read-only fan-out: one agent per open PR → `MERGE` / `CLOSE` / `REBASE` / `FIX_CI` / `COMMENT` / `AWAITING_HUMAN` / `ESCALATE`, with a CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated `gh` user by default). |
-| [`pr-review-fanout.js`](pr-review-fanout.js) | `pr-review-fanout` | Read-only deep review of **one** PR's diff (the canonical review pattern: fan out review dimensions → adversarially verify each finding → synthesize). One review agent per dimension (correctness, security, error-handling, tests, types/API, perf) finds findings over the resolved diff; each finding is independently verified by a skeptic (refuted/low-confidence dropped); survivors are deduped, confidence-filtered, and written to one HTML + markdown review, every finding traced to `file:line`. Sits behind pr-triage's `COMMENT` verdict — reviews and reports only, never comments/merges. |
-| [`stacked-impl-lanes.js`](stacked-impl-lanes.js) | `stacked-impl-lanes` | Implements issue-lanes into review-only PRs (parallel if disjoint, sequential + stacked if hub-coupled), then runs a security-hardening review on each invariant-touching lane. |
-| [`stacked-merge-walk.js`](stacked-merge-walk.js) | `stacked-merge-walk` | Lands a chain of stacked PRs onto a moving base: walks base-first, re-verifies mergeability + the required-check rollup read-only, rebases each child's own commits `--onto` the base after its parent squash-merges, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges, and prunes branches only once the whole stack lands. The terminal **write** step after `stacked-impl-lanes` opens the stack and `pr-triage-fanout` classifies it. |
+| [`deep-security-scan.js`](.claude/workflows/deep-security-scan.js) | `deep-security-scan` | Higher-recall repo security audit: a deterministic prefilter (foxguard: SAST/secrets/SCA) feeds K independent threat-model-lensed discovery workers → semantic merge → disprove-first validation → one HTML + markdown report. For a whole repo or a scoped path — **not** diffs/PRs. |
+| [`defense-scan.js`](.claude/workflows/defense-scan.js) | `defense-scan` | Defense-in-depth orchestrator. Composes `deep-security-scan` (code-at-rest) with opt-in layers — supply-chain (bumblebee), DAST (vigolium), LLM red-team (garak), network/template scan (nuclei), and project-posture/governance (OpenSSF Scorecard vs. the OSPS Baseline) — into one merged report with a per-layer coverage statement. |
+| [`security-diff-scan.js`](.claude/workflows/security-diff-scan.js) | `security-diff-scan` | Change-scoped security review: resolves one code change (a git range, a PR, or the uncommitted working tree), fans out K threat-model-lensed discovery workers over **only the diff** → semantic merge → disprove-first validation (with a change-scope gate that drops pre-existing issues) → one HTML + markdown report with a coverage statement of which files/hunks were in scope. The diff/PR sibling of `deep-security-scan`. |
+| [`issue-triage-fanout.js`](.claude/workflows/issue-triage-fanout.js) | `issue-triage-fanout` | Read-only fan-out: one agent per open GitHub issue → `GREEN` / `DECISION` / `RESEARCH` / `DONE` / `BLOCKED`, with grouping and dependencies. Auto-gathers open issues when none are passed. |
+| [`issue-research-fanout.js`](.claude/workflows/issue-research-fanout.js) | `issue-research-fanout` | Web-enabled fan-out over the `RESEARCH` bucket: one agent per issue investigates (codebase + `gh` + web) and returns a verdict, aiming to move research issues to `GREEN` with an implementable spec. Read-only on GitHub. |
+| [`pr-triage-fanout.js`](.claude/workflows/pr-triage-fanout.js) | `pr-triage-fanout` | Read-only fan-out: one agent per open PR → `MERGE` / `CLOSE` / `REBASE` / `FIX_CI` / `COMMENT` / `AWAITING_HUMAN` / `ESCALATE`, with a CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated `gh` user by default). |
+| [`pr-review-fanout.js`](.claude/workflows/pr-review-fanout.js) | `pr-review-fanout` | Read-only deep review of **one** PR's diff (the canonical review pattern: fan out review dimensions → adversarially verify each finding → synthesize). One review agent per dimension (correctness, security, error-handling, tests, types/API, perf) finds findings over the resolved diff; each finding is independently verified by a skeptic (refuted/low-confidence dropped); survivors are deduped, confidence-filtered, and written to one HTML + markdown review, every finding traced to `file:line`. Sits behind pr-triage's `COMMENT` verdict — reviews and reports only, never comments/merges. |
+| [`stacked-impl-lanes.js`](.claude/workflows/stacked-impl-lanes.js) | `stacked-impl-lanes` | Implements issue-lanes into review-only PRs (parallel if disjoint, sequential + stacked if hub-coupled), then runs a security-hardening review on each invariant-touching lane. |
+| [`stacked-merge-walk.js`](.claude/workflows/stacked-merge-walk.js) | `stacked-merge-walk` | Lands a chain of stacked PRs onto a moving base: walks base-first, re-verifies mergeability + the required-check rollup read-only, rebases each child's own commits `--onto` the base after its parent squash-merges, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges, and prunes branches only once the whole stack lands. The terminal **write** step after `stacked-impl-lanes` opens the stack and `pr-triage-fanout` classifies it. |
 
 ## Install
 
-These run **inside Claude Code**, not as standalone Node programs. Make a workflow available by copying (or symlinking) its `.js` file into your global workflows directory:
+These run **inside Claude Code**, not as standalone Node programs. There are two ways to make them available, depending on the scope you want.
+
+### Per-project (no install — just clone)
+
+The workflows already live in this repo's [`.claude/workflows/`](.claude/workflows/), the [Anthropic-supported project-level location](https://code.claude.com/docs/en/workflows#save-the-workflow-for-reuse). Clone the repo and open a Claude Code session in it — Claude Code loads every `.js` file there and exposes each by its `meta.name`, listed under `/workflows` and runnable as `/<name>`. Nothing to copy, nothing to keep in sync.
 
 ```bash
-cp deep-security-scan.js ~/.claude/workflows/
+git clone https://github.com/schmug/shipofcladius
+cd shipofcladius
+# open Claude Code here; /deep-security-scan, /pr-triage-fanout, … are available
+```
+
+To use them in *another* project, drop a copy of `.claude/workflows/` into that repo (project workflows are shared with everyone who clones it; a project workflow shadows a personal one of the same name).
+
+### Machine-wide (every project)
+
+To make a workflow available in **all** your projects, copy (or symlink) it into your personal global directory:
+
+```bash
+cp .claude/workflows/deep-security-scan.js ~/.claude/workflows/
 # or symlink so edits here are picked up live:
-ln -s "$PWD/deep-security-scan.js" ~/.claude/workflows/deep-security-scan.js
+ln -s "$PWD/.claude/workflows/deep-security-scan.js" ~/.claude/workflows/deep-security-scan.js
 ```
 
 Once a file is in `~/.claude/workflows/`, Claude Code exposes it to the Workflow tool by its `meta.name` and lists it under `/workflows`. Several are also surfaced as user-invocable skills (e.g. `/deep-security-scan`, `/defense-scan`).
@@ -139,15 +155,17 @@ Requires Node ≥ 18 (developed on Node 22). Current status: **165 passing** (16
 ```
 shipofcladius/
 ├── LICENSE
-├── deep-security-scan.js
-├── defense-scan.js
-├── issue-research-fanout.js
-├── issue-triage-fanout.js
-├── pr-review-fanout.js
-├── pr-triage-fanout.js
-├── security-diff-scan.js
-├── stacked-impl-lanes.js
-├── stacked-merge-walk.js
+├── .claude/
+│   └── workflows/                 # Anthropic-supported project-level workflow location
+│       ├── deep-security-scan.js
+│       ├── defense-scan.js
+│       ├── issue-research-fanout.js
+│       ├── issue-triage-fanout.js
+│       ├── pr-review-fanout.js
+│       ├── pr-triage-fanout.js
+│       ├── security-diff-scan.js
+│       ├── stacked-impl-lanes.js
+│       └── stacked-merge-walk.js
 └── tests/
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
     ├── defense-scan.test.mjs       # simulates defense-scan.js
@@ -160,7 +178,7 @@ shipofcladius/
     └── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
 ```
 
-The test files resolve their target with `new URL('../<workflow>.js', import.meta.url)`, so `tests/` must stay a sibling of the workflow files.
+Each test resolves its target with `new URL('../.claude/workflows/<workflow>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
 
 ## License
 
