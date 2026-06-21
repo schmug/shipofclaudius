@@ -51,7 +51,7 @@ function greenResearch(n) {
 
 async function runScript({ args, gather, fetch, research } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '' }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', parallelBatches: [] }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -68,7 +68,10 @@ async function runScript({ args, gather, fetch, research } = {}) {
     }
     throw new Error('unexpected agent label: ' + label)
   }
-  const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  const parallel = (thunks) => {
+    calls.parallelBatches.push(thunks.length)
+    return Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  }
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
@@ -151,6 +154,80 @@ test('the triage SEED is still threaded into the research prompt when provided',
   const { calls } = await runScript({ args: { numbers: [12], triaged: [seed] } })
   const r = byPrefix(calls, 'research:#')[0]
   assert.ok(/TRIAGE SEED/i.test(r.prompt) && r.prompt.includes('look into Y'), 'seed findings seed the research prompt')
+})
+
+// ===================== SPINE PHASE 3 (batching / web-stall timeout) =====================
+
+test('research issues run in sequential waves of <= batchSize (default 8), never one giant parallel()', async () => {
+  const numbers = Array.from({ length: 19 }, (_, i) => i + 1)
+  const { calls } = await runScript({ args: { numbers } })
+  assert.deepEqual(calls.parallelBatches, [8, 8, 3], '19 issues at batchSize 8 -> waves of 8, 8, 3')
+  assert.ok(Math.max(...calls.parallelBatches) <= 8, 'no wave exceeds the default batchSize (concurrency-cliff guard)')
+  assert.equal(byPrefix(calls, 'fetch:#').length, 19)
+  assert.equal(byPrefix(calls, 'research:#').length, 19)
+})
+
+test('args.batchSize tunes the wave size', async () => {
+  const numbers = Array.from({ length: 12 }, (_, i) => i + 1)
+  const { calls } = await runScript({ args: { numbers, batchSize: 5 } })
+  assert.deepEqual(calls.parallelBatches, [5, 5, 2], '12 issues at batchSize 5 -> waves of 5, 5, 2')
+})
+
+test('per-wave progress is logged (visible batching, not a silent fan-out)', async () => {
+  const numbers = Array.from({ length: 19 }, (_, i) => i + 1)
+  const { calls } = await runScript({ args: { numbers } })
+  const waveLogs = calls.logs.filter((m) => /wave\s*\d+\s*\/\s*3/i.test(m))
+  assert.equal(waveLogs.length, 3, 'one progress log per wave')
+})
+
+test('a web-stalled research agent times out -> that issue drops to missing, the run continues', async () => {
+  // #13's research agent never resolves (simulating a hung WebSearch/WebFetch). A short
+  // args.webTimeoutMs bounds it so it fails ONE issue, not the whole run.
+  const { result, calls } = await runScript({
+    args: { numbers: [12, 13], webTimeoutMs: 20 },
+    research: (n) => (n === 13 ? new Promise(() => {}) : greenResearch(n)),
+  })
+  assert.deepEqual(result.missing, [13], 'the stalled issue is surfaced in missing[] for a re-run')
+  assert.equal(result.researched.length, 1, 'the other issue still completes')
+  const stallLog = calls.logs.find((m) => /\b13\b/.test(m) && /stall|timed?[- ]?out|exceeded/i.test(m))
+  assert.ok(stallLog, 'logs that #13 stalled / timed out')
+})
+
+test('the fetch relay is NOT subject to the web timeout sentinel leaking into results', async () => {
+  // A normal (fast) run must be unaffected by the timeout wrapper: every issue researched.
+  const { result } = await runScript({ args: { numbers: [12, 14], webTimeoutMs: 5000 } })
+  assert.equal(result.researched.length, 2, 'both issues researched within the timeout')
+  assert.deepEqual(result.missing, [], 'no spurious timeouts')
+})
+
+test('SPINE_VERSION is stamped as a constant + returned (keeps hand-synced copies aligned)', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(/const\s+SPINE_VERSION\s*=/.test(src), 'a SPINE_VERSION constant is declared')
+  const { result } = await runScript({ args: { numbers: [12] } })
+  assert.equal(typeof result.spineVersion, 'string', 'spineVersion stamped into the return (additive)')
+})
+
+test('return shape is additive: existing keys (researched/counts/green_lanes/missing/total) preserved', async () => {
+  const { result } = await runScript({ args: { numbers: [12] } })
+  for (const k of ['researched', 'counts', 'green_lanes', 'missing', 'total']) {
+    assert.ok(k in result, `existing key '${k}' preserved`)
+  }
+})
+
+test('batching does not weaken the injection-hardening call shapes', async () => {
+  const { calls } = await runScript({ args: { numbers: [12, 13] } })
+  assert.equal(byPrefix(calls, 'fetch:#').length, 2, 'one relay per issue')
+  assert.equal(byPrefix(calls, 'research:#').length, 2, 'one research agent per issue')
+  for (const n of [12, 13]) {
+    const f = byPrefix(calls, `fetch:#${n}`)[0]
+    const r = byPrefix(calls, `research:#${n}`)[0]
+    assert.ok(new RegExp(`gh issue view ${n}\\b`).test(f.prompt), `relay #${n} runs the fixed gh issue view`)
+    assert.ok(r.prompt.includes(`nonce-${n}-cafef00d`), `research #${n} fences with the relay nonce`)
+    assert.ok(r.prompt.includes(INJECTION), `research #${n} carries the untrusted bytes as fenced data`)
+    assert.ok(/never (obey|follow)/i.test(r.prompt), `research #${n} keeps the anti-injection preamble`)
+    assert.ok(!/gh issue view/.test(r.prompt), `research #${n} never re-fetches live`)
+  }
+  for (const a of calls.agents) assert.equal(a.opts.agentType, 'Explore', `${a.opts.label} stays read-only`)
 })
 
 // ---- runner ----
