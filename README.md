@@ -50,6 +50,17 @@ ln -s "$PWD/.claude/workflows/deep-security-scan.js" ~/.claude/workflows/deep-se
 
 Once a file is in `~/.claude/workflows/`, Claude Code exposes it to the Workflow tool by its `meta.name` and lists it under `/workflows`. Several are also surfaced as user-invocable skills (e.g. `/deep-security-scan`, `/defense-scan`).
 
+### As a plugin (one install, every project, zero drift)
+
+Install the repo as a Claude Code plugin and the workflows run **in place** from the plugin — no copy into `~/.claude/workflows/`, nothing to keep in sync:
+
+```bash
+claude plugin marketplace add schmug/shipofclaudius
+claude plugin install shipofclaudius@shipofclaudius
+```
+
+Each workflow is exposed as a wrapper skill (`/shipofclaudius:<name>`, e.g. `/shipofclaudius:deep-security-scan`) and by natural language (*"run a deep security scan"*). The wrapper calls the Workflow tool with the bundled script at `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js`, so an update to the plugin updates the workflows everywhere with no manual step.
+
 ## Using a workflow
 
 ### As a user (in a Claude Code session)
