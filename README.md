@@ -1,4 +1,4 @@
-# shipofcladius
+# shipofclaudius
 
 A curated collection of **dynamic workflows** for the Claude Code [Workflow tool](https://docs.claude.com/en/docs/claude-code) — deterministic, multi-agent orchestration scripts that fan out subagents, verify their findings, and synthesize results.
 
@@ -6,7 +6,7 @@ Each workflow is a self-contained JavaScript file that begins with an `export co
 
 > The workflows live in [`.claude/workflows/`](.claude/workflows/) — the [Anthropic-supported, project-level location](https://code.claude.com/docs/en/workflows#save-the-workflow-for-reuse) for sharing dynamic workflows. Clone the repo and they're available as `/<name>` commands in any session opened here — no copy step, nothing to keep in sync. (To make one available in *every* project on your machine instead, copy it into `~/.claude/workflows/`; see [Install](#install).)
 >
-> *Hence the name. Replace every plank of a ship over the years and philosophers ask whether it's still the [Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus). Carry every workflow, plank by plank, and you get the Ship of **Cladius** — same paradox, more Claude. Whether it's still the same ship is left as an exercise for the agents.*
+> *Hence the name. Replace every plank of a ship over the years and philosophers ask whether it's still the [Ship of Theseus](https://en.wikipedia.org/wiki/Ship_of_Theseus). Carry every workflow, plank by plank, and you get the Ship of **Claudius** — same paradox, more Claude (it's right there in the name now). Whether it's still the same ship is left as an exercise for the agents.*
 
 ## Workflows
 
@@ -31,8 +31,8 @@ These run **inside Claude Code**, not as standalone Node programs. There are two
 The workflows already live in this repo's [`.claude/workflows/`](.claude/workflows/), the [Anthropic-supported project-level location](https://code.claude.com/docs/en/workflows#save-the-workflow-for-reuse). Clone the repo and open a Claude Code session in it — Claude Code loads every `.js` file there and exposes each by its `meta.name`, listed under `/workflows` and runnable as `/<name>`. Nothing to copy, nothing to keep in sync.
 
 ```bash
-git clone https://github.com/schmug/shipofcladius
-cd shipofcladius
+git clone https://github.com/schmug/shipofclaudius
+cd shipofclaudius
 # open Claude Code here; /deep-security-scan, /pr-triage-fanout, … are available
 ```
 
@@ -92,7 +92,7 @@ Workflow({ scriptPath: "~/.claude/workflows/pr-triage-fanout.js" })
 
 ## Security model
 
-The six GitHub workflows (`issue-triage-fanout`, `issue-research-fanout`, `pr-triage-fanout`, `pr-review-fanout`, `stacked-impl-lanes`, `stacked-merge-walk`) read text an attacker can write — issue/PR **bodies, comments, and reviews**. (PR triage only restricts the PR *author*; commenters and reviewers are unrestricted. Triage is explicitly meant to run against repos whose issues/PRs outsiders can write to.) That makes them a target for **indirect prompt injection**: hostile text trying to get a tool-capable agent to run a command, write a file, or exfiltrate secrets. `security-diff-scan` joins them **in PR mode only**: reviewing a PR (`args.pr`) reads the attacker-writable PR **title/body** (plus the diff itself) to scope the review, so it uses the same defenses; its local-diff modes (base/head/working tree) read only local git bytes and need no relay (the diff is still treated as data and HTML-escaped). The defenses (added for [#3](https://github.com/schmug/shipofcladius/issues/3)):
+The six GitHub workflows (`issue-triage-fanout`, `issue-research-fanout`, `pr-triage-fanout`, `pr-review-fanout`, `stacked-impl-lanes`, `stacked-merge-walk`) read text an attacker can write — issue/PR **bodies, comments, and reviews**. (PR triage only restricts the PR *author*; commenters and reviewers are unrestricted. Triage is explicitly meant to run against repos whose issues/PRs outsiders can write to.) That makes them a target for **indirect prompt injection**: hostile text trying to get a tool-capable agent to run a command, write a file, or exfiltrate secrets. `security-diff-scan` joins them **in PR mode only**: reviewing a PR (`args.pr`) reads the attacker-writable PR **title/body** (plus the diff itself) to scope the review, so it uses the same defenses; its local-diff modes (base/head/working tree) read only local git bytes and need no relay (the diff is still treated as data and HTML-escaped). The defenses (added for [#3](https://github.com/schmug/shipofclaudius/issues/3)):
 
 1. **Untrusted text is fetched by a dedicated read-only relay, never live by the agent that reasons over it.** A small relay agent runs a *fixed* `gh issue view` / `gh pr view` (or, for `security-diff-scan`, a fixed `gh pr diff` / `git diff`), generates a fresh random nonce, and returns the raw bytes verbatim. The orchestrator wraps those bytes in a **nonce-marked fence** (`<<<UNTRUSTED_GH_DATA_<nonce>>>> … <<<END…>>>`, and `<<<UNTRUSTED_DIFF_DATA_<nonce>>>>` for the diff scanner) and drops them into the reasoning agent's prompt as clearly-labelled `UNTRUSTED DATA`. The reasoning agent no longer fetches the body/comments/reviews/diff itself. The nonce is generated *after* the attacker wrote their text and never appears in this source, so fenced content can't forge the closing delimiter.
 2. **Every subagent runs through a read-only `agentType`.** Default is the built-in **`Explore`** (no `Edit` / `Write` / `NotebookEdit` / sub-`Agent`), so tool access is restricted by the runtime regardless of what the fenced text says. Override with `args.readonlyAgent: "<your-agent>"` to use a stricter custom read-only agent. (The two **write** workflows are the exception — their actors **must** keep write tools: `stacked-impl-lanes`' impl agent pushes and opens PRs, and `stacked-merge-walk`' land/cleanup actors rebase, force-push-with-lease, and merge. So `readonlyAgent` scopes only their *read-only* relays — `stacked-impl-lanes`' issue-text relays, and `stacked-merge-walk`' PR-text relays **and** its read-only verify gate — never the write actor. Their mitigation is the fence + preamble, plus `stacked-impl-lanes`' `security-hardening-reviewer` gate on invariant lanes and `stacked-merge-walk`' read-only verify gate + the deliberate choice to keep untrusted PR text out of the land actor entirely. `security-diff-scan` is the same shape: its resolve/discovery/validation agents are read-only; only its final **report** agent keeps write tools to create `report.html`, and that agent sees only already-validated findings — never the raw untrusted diff/PR text unescaped.)
@@ -153,7 +153,7 @@ Requires Node ≥ 18 (developed on Node 22). Current status: **165 passing** (16
 ## Layout
 
 ```
-shipofcladius/
+shipofclaudius/
 ├── LICENSE
 ├── .claude/
 │   └── workflows/                 # Anthropic-supported project-level workflow location
