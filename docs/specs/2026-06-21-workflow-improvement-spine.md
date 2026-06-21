@@ -31,8 +31,11 @@ those copies are hand-synced snapshots and have drifted.
   2. Edit the workflow `.js` **and** add/extend its `tests/<wf>-sim.test.mjs`.
   3. `npm test` must stay green (baseline **93 passing**; the number only goes up).
   4. Open a **PR** (never push `main`), conventional-commit prefixes, `Co-Authored-By: Claude`.
-  5. On merge, **hand-sync** the `.js` into `~/.claude/workflows/` (that is what the
-     Workflow runtime loads).
+  5. The repo's `.claude/workflows/` is the Anthropic-supported **project-level** location;
+     Claude Code auto-loads it for anyone working in the repo (v2.1.178+; a project workflow
+     shadows a personal one of the same name), so a merge needs **no sync**. *(Optional)* for
+     machine-wide use in OTHER repos, copy or symlink the `.js` into `~/.claude/workflows/` —
+     those personal copies are snapshots that can drift.
 - **Single self-contained file per workflow** — scripts cannot `import`. Shared "spine"
   helpers are **inlined** and stamped with a `SPINE_VERSION` constant so copies stay in sync.
 - **Preserve existing return-shape keys** (additive changes only) — the workflows chain
@@ -164,4 +167,6 @@ repeat them:
 - `tests/<wf>-sim.test.mjs` extended; `npm test` green (≥ prior count).
 - Injection-hardening call shapes unchanged (assert in test).
 - PR opened (not `main`), conventional commit, `Co-Authored-By: Claude`.
-- After merge: `.js` hand-synced into `~/.claude/workflows/`.
+- In-repo use needs **no sync** — the merged `.js` auto-loads from the project-level
+  `.claude/workflows/`. *(Optional)* machine-wide install: copy or symlink it into
+  `~/.claude/workflows/` for use in OTHER repos.
