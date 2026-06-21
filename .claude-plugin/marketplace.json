@@ -1,0 +1,11 @@
+{
+  "name": "shipofclaudius",
+  "owner": { "name": "schmug" },
+  "plugins": [
+    {
+      "name": "shipofclaudius",
+      "source": "./",
+      "description": "Curated dynamic workflows as run-in-place wrapper skills."
+    }
+  ]
+}
