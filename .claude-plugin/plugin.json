@@ -1,0 +1,5 @@
+{
+  "name": "shipofclaudius",
+  "version": "0.1.0",
+  "description": "Curated dynamic workflows (issue/PR triage, research, stacked impl + merge, and security scans) as run-in-place wrapper skills."
+}
