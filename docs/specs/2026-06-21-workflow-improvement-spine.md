@@ -1,7 +1,7 @@
 # Dynamic Workflow Improvement Spine — Design Spec
 
 **Date:** 2026-06-21
-**Repo:** `schmug/shipofcladius` (this repo is the canonical source of truth)
+**Repo:** `schmug/shipofclaudius` (this repo is the canonical source of truth)
 **Status:** Design approved in principle; this doc is the handoff source of truth for a fresh agent.
 
 ---
@@ -23,7 +23,7 @@ those copies are hand-synced snapshots and have drifted.
 
 ## 1. Source of truth & editing process (READ FIRST)
 
-- **Canonical = this repo (`~/shipofcladius`).** The live copies in `~/.claude/workflows/*.js`
+- **Canonical = this repo (`~/shipofclaudius`).** The live copies in `~/.claude/workflows/*.js`
   are hand-synced snapshots (see README "Install"). They have **drifted in both directions** —
   do not treat them as truth.
 - **Editing loop for every change:**
