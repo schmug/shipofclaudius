@@ -47,15 +47,26 @@ function defaultFetch(n) {
 // `gather` is what 'gather-open-prs' returns ({repo, viewer?, prs:[...]}); `fetch(n)`
 // returns the per-PR untrusted-text relay payload ({raw, nonce}); `triage(n)` returns
 // the per-PR classification object.
-async function runScript({ args, gather, fetch, triage } = {}) {
+function defaultSynth() {
+  return {
+    buckets: { MERGE: [], CLOSE: [], REBASE: [], FIX_CI: [], COMMENT: [], AWAITING_HUMAN: [], ESCALATE: [] },
+    mergeReady: [], decisionsOwed: [], markdown: '# PR roadmap\n\n(report)', summary: 'Synthesized PR roadmap.',
+  }
+}
+
+async function runScript({ args, gather, fetch, triage, discover, synth } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '' }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', discoverPrompt: '', synthPrompt: '', parallelBatches: [] }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const label = opts.label || ''
     await new Promise((r) => setTimeout(r, 1))
     if (label === 'gather-open-prs') { calls.gatherPrompt = prompt; return gather }
+    if (label.startsWith('discover')) {
+      calls.discoverPrompt = prompt
+      return discover ?? { defaultBranch: 'main', requiredContexts: ['ci/test'], found: true }
+    }
     if (label.startsWith('fetch:#')) {
       const n = Number(label.slice('fetch:#'.length))
       return fetch ? fetch(n) : defaultFetch(n)
@@ -65,9 +76,13 @@ async function runScript({ args, gather, fetch, triage } = {}) {
       return triage ? triage(n)
         : { number: n, action: 'AWAITING_HUMAN', ci_status: 'PASSING', mergeability: 'CLEAN', rationale: 'canned' }
     }
+    if (label.startsWith('synth')) { calls.synthPrompt = prompt; return synth ? synth() : defaultSynth() }
     throw new Error('unexpected agent label: ' + label)
   }
-  const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  const parallel = (thunks) => {
+    calls.parallelBatches.push(thunks.length)
+    return Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  }
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
@@ -202,6 +217,122 @@ test('a failed fetch (null) drops that PR rather than classifying empty data', a
   const { result, calls } = await runScript({ args: {}, gather, fetch: (n) => (n === 2 ? null : defaultFetch(n)) })
   assert.equal(byPrefix(calls, 'triage:#').length, 1, 'no classify agent for the failed fetch')
   assert.equal(result.triaged.length, 1, 'only the fetched PR triaged')
+})
+
+// ===================== SPINE PHASE 2 (batching / missing / discover-once / synthesis) =====================
+const manyAlice = (n) => ({ repo: 'o/r', viewer: 'alice', prs: Array.from({ length: n }, (_, i) => ({ number: i + 1, author: 'alice', state: 'OPEN' })) })
+
+test('kept PRs are triaged in sequential waves of <= batchSize (default 8), never one giant parallel()', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(19) })
+  // runWaves is the only parallel() caller, so each recorded batch is a wave.
+  assert.deepEqual(calls.parallelBatches, [8, 8, 3], '19 kept PRs at batchSize 8 -> waves of 8, 8, 3')
+  assert.ok(Math.max(...calls.parallelBatches) <= 8, 'no wave exceeds the default batchSize (concurrency-cliff guard)')
+  assert.equal(byPrefix(calls, 'fetch:#').length, 19)
+  assert.equal(byPrefix(calls, 'triage:#').length, 19)
+})
+
+test('args.batchSize tunes the wave size', async () => {
+  const { calls } = await runScript({ args: { batchSize: 5 }, gather: manyAlice(12) })
+  assert.deepEqual(calls.parallelBatches, [5, 5, 2], '12 kept PRs at batchSize 5 -> waves of 5, 5, 2')
+})
+
+test('per-wave progress is logged (visible batching, not a silent fan-out)', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(19) })
+  const waveLogs = calls.logs.filter((m) => /wave\s*\d+\s*\/\s*3/i.test(m))
+  assert.equal(waveLogs.length, 3, 'one progress log per wave')
+})
+
+test('missing[] = kept - assessed, returned and logged with a one-arg recovery hint', async () => {
+  const gather = { repo: 'o/r', viewer: 'alice', prs: [
+    { number: 1, author: 'alice', state: 'OPEN' }, { number: 2, author: 'alice', state: 'OPEN' }, { number: 3, author: 'alice', state: 'OPEN' },
+  ] }
+  const { result, calls } = await runScript({
+    args: {}, gather,
+    triage: (n) => (n === 2 ? null : { number: n, action: 'AWAITING_HUMAN', ci_status: 'PASSING', mergeability: 'CLEAN', rationale: 'c' }),
+  })
+  assert.deepEqual(result.missing, [2], 'the dropped PR is reported in missing[]')
+  assert.equal(result.triaged.length, 2, 'the other two are still triaged')
+  const hint = calls.logs.find((m) => /args\.numbers\s*=\s*\[\s*2\s*\]/.test(m))
+  assert.ok(hint && /recover|re-?run/i.test(hint), 'recovery hint names the exact missing numbers for a one-arg re-run')
+})
+
+test('discover-once: a single read-only agent resolves the required-context list before triage', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(3) })
+  const discovers = byPrefix(calls, 'discover')
+  assert.equal(discovers.length, 1, 'exactly one discover agent (not one per PR)')
+  assert.equal(discovers[0].opts.agentType, 'Explore', 'discover agent is read-only')
+  assert.ok(/required|branch protection|ruleset/i.test(discovers[0].prompt), 'discover prompt resolves the required-check list')
+})
+
+test('the discovered required-check list is injected into each triage prompt (no per-PR re-discovery)', async () => {
+  const { calls } = await runScript({
+    args: {}, gather: manyAlice(2),
+    discover: { defaultBranch: 'main', requiredContexts: ['ci/build', 'ci/lint'], found: true },
+  })
+  for (const cls of byPrefix(calls, 'triage:#')) {
+    assert.ok(/ci\/build/.test(cls.prompt) && /ci\/lint/.test(cls.prompt), 'triage prompt carries the pre-discovered required contexts')
+    assert.ok(/already.{0,20}discover|pre-?discovered|already been discovered/i.test(cls.prompt), 'triage prompt says the list is already discovered (reuse, do not re-query)')
+  }
+})
+
+test('an additive synthesis phase produces a grouped PR roadmap with markdown', async () => {
+  const { result, calls } = await runScript({ args: {}, gather: manyAlice(2) })
+  const synths = byPrefix(calls, 'synth')
+  assert.equal(synths.length, 1, 'exactly one synthesis agent runs')
+  assert.equal(synths[0].opts.agentType, 'Explore', 'synthesis agent is read-only')
+  assert.ok(result.roadmap && typeof result.roadmap.markdown === 'string' && result.roadmap.markdown.length > 0, 'roadmap markdown returned')
+})
+
+test('synthesis is skipped (roadmap null) when nothing was triaged', async () => {
+  const { result, calls } = await runScript({ args: {}, gather: manyAlice(2), fetch: () => null })
+  assert.equal(byPrefix(calls, 'synth').length, 0, 'no synthesis agent when there is nothing to synthesize')
+  assert.equal(result.roadmap, null, 'roadmap is null, not a wasted agent call')
+  assert.deepEqual(result.missing, [1, 2], 'both unfetched PRs reported missing')
+})
+
+test('state-derived idempotency: a MERGED PR is skipped (not triaged), recorded in skipped_not_open', async () => {
+  const gather = { repo: 'o/r', viewer: 'alice', prs: [
+    { number: 1, author: 'alice', state: 'OPEN' },
+    { number: 2, author: 'alice', state: 'MERGED' },
+  ] }
+  const { result, calls } = await runScript({ args: {}, gather })
+  assert.deepEqual(result.kept.map((p) => p.number), [1], 'only the open PR is kept')
+  assert.deepEqual(result.skipped_not_open.map((p) => p.number), [2], 'the merged PR is recorded as skipped')
+  assert.equal(byPrefix(calls, 'triage:#').length, 1, 'no triage agent spent on the already-merged PR')
+})
+
+test('return shape is additive: existing keys kept, missing[] + roadmap + spineVersion added', async () => {
+  const { result } = await runScript({ args: {}, gather: manyAlice(2) })
+  // existing keys preserved
+  for (const k of ['triaged', 'counts', 'ci_counts', 'kept', 'dropped', 'skipped_not_open', 'author_filter', 'queried_repo', 'total_candidates']) {
+    assert.ok(k in result, `existing key '${k}' preserved`)
+  }
+  // additive keys
+  assert.ok(Array.isArray(result.missing), 'missing[] added')
+  assert.ok(result.roadmap && typeof result.roadmap === 'object', 'roadmap added')
+  assert.equal(typeof result.spineVersion, 'string', 'spineVersion stamped into the return')
+})
+
+test('SPINE_VERSION is stamped as a constant in the source (keeps hand-synced copies aligned)', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(/const\s+SPINE_VERSION\s*=/.test(src), 'a SPINE_VERSION constant is declared')
+})
+
+test('batching + discover + synthesis do not weaken the injection-hardening call shapes', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(2) })
+  assert.equal(byPrefix(calls, 'fetch:#').length, 2, 'one relay per kept PR')
+  assert.equal(byPrefix(calls, 'triage:#').length, 2, 'one classify per kept PR')
+  for (const n of [1, 2]) {
+    const f = byPrefix(calls, `fetch:#${n}`)[0]
+    const cls = byPrefix(calls, `triage:#${n}`)[0]
+    assert.ok(new RegExp(`gh pr view ${n}\\b`).test(f.prompt), `relay #${n} runs the fixed gh pr view`)
+    assert.ok(cls.prompt.includes(`nonce-${n}-feedface`), `classify #${n} fences with the relay nonce`)
+    assert.ok(cls.prompt.includes(PR_INJECTION), `classify #${n} carries the untrusted bytes as fenced data`)
+    assert.ok(/never (obey|follow)/i.test(cls.prompt), `classify #${n} keeps the anti-injection preamble`)
+    assert.ok(!/--json[^`\n]*\bcomments\b/.test(cls.prompt), `classify #${n} never re-fetches comments live`)
+    assert.ok(!/--json[^`\n]*\breviews\b/.test(cls.prompt), `classify #${n} never re-fetches reviews live`)
+  }
+  for (const a of calls.agents) assert.equal(a.opts.agentType, 'Explore', `${a.opts.label} stays read-only`)
 })
 
 // ---- runner ----
