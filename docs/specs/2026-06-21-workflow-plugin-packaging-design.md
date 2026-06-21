@@ -1,7 +1,7 @@
 # Zero-Copy Workflow-Plugin Packaging — Design Spec
 
 **Date:** 2026-06-21
-**Repo:** `schmug/shipofcladius`
+**Repo:** `schmug/shipofclaudius`
 **Status:** Design approved (brainstorming); pending written-spec review → implementation plan.
 
 ---
@@ -32,8 +32,8 @@ the model to run its workflow **in place** from the plugin directory via the Wor
 `scriptPath`, referenced through `${CLAUDE_PLUGIN_ROOT}`.
 
 ```
-claude plugin install shipofcladius   # once
-→ /shipofcladius:deep-security-scan, … available in EVERY project
+claude plugin install shipofclaudius   # once
+→ /shipofclaudius:deep-security-scan, … available in EVERY project
 → each runs ${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js — the bundled copy
 → zero copy, zero drift, zero per-update step
 ```
@@ -79,7 +79,7 @@ smoke test during implementation (§7).
 ## 4. Components
 
 ```
-shipofcladius/                          # repo root == plugin root
+shipofclaudius/                          # repo root == plugin root
 ├── .claude-plugin/
 │   ├── plugin.json                     # { name, version, description, … }
 │   └── marketplace.json                # so it's `claude plugin install`-able
@@ -94,7 +94,7 @@ shipofcladius/                          # repo root == plugin root
 ### 4.1 `plugin.json`
 ```json
 {
-  "name": "shipofcladius",
+  "name": "shipofclaudius",
   "version": "0.1.0",
   "description": "Curated dynamic workflows (triage / research / impl / merge / security) as run-in-place wrapper skills."
 }
@@ -126,7 +126,7 @@ is build-time not user-time. Decided during §7's smoke test; does not change th
 
 ## 5. Naming & UX
 
-- Plugin name `shipofcladius` → skills are namespaced `/shipofcladius:<name>`. The explicit slash
+- Plugin name `shipofclaudius` → skills are namespaced `/shipofclaudius:<name>`. The explicit slash
   form is verbose, but **NL triggering by `description` is unaffected** and is the primary UX the
   README already promotes.
 - All **nine** workflows get a wrapper (no subset) for completeness and parity with the in-repo
@@ -156,7 +156,7 @@ built-ins only) asserting:
 
 **Manual smoke test (the one runtime verification):** install the plugin locally
 (`claude plugin install` from a local dir / `--plugin-dir`), invoke one wrapper (e.g.
-`/shipofcladius:pr-triage-fanout`), and confirm the Workflow runs from the plugin path. This
+`/shipofclaudius:pr-triage-fanout`), and confirm the Workflow runs from the plugin path. This
 resolves the §4.3 open detail.
 
 **Done when:** plugin.json + marketplace.json added; nine wrappers present and path-correct;
