@@ -1,0 +1,36 @@
+name: CI
+
+# Run the offline test suite on every push to main and on every PR.
+# The suite (see package.json "test") is pure Node built-ins — no runtime or
+# dev dependencies and no lockfile — so there is intentionally NO install step:
+# `npm ci` would fail without a lockfile, and there is nothing to install.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-flight run when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Active LTS lines. The tests use only stable Node built-ins, so the
+        # matrix is cheap insurance against a version-specific regression.
+        node-version: [20, 22]
+    name: test (Node ${{ matrix.node-version }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # No cache: caching requires a lockfile, and this project has none.
+      - run: npm test
