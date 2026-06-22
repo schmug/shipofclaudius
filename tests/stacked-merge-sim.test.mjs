@@ -52,7 +52,7 @@ const landed = (ref, over = {}) => ({ ref: String(ref), status: 'LANDED', rebase
 // Runs the workflow with per-PR fetch/verify/land stubs (keyed by ref) + a cleanup stub.
 async function runScript({ args, fetch, verify, land, cleanup } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], order: [] }
+  const calls = { phases: [], logs: [], agents: [], order: [], parallelBatches: [] }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -74,11 +74,19 @@ async function runScript({ args, fetch, verify, land, cleanup } = {}) {
     if (label === 'cleanup') return cleanup ? cleanup() : { deleted: ['x'], skipped: [], note: '' }
     throw new Error('unexpected agent label: ' + label)
   }
-  const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  const parallel = (thunks) => {
+    calls.parallelBatches.push(thunks.length)
+    return Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  }
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
-  const result = await fn(args, undefined, agent, parallel, null, phase, log, null)
+  // Landing is an IRREVERSIBLE batched action: the workflow STAGES by default and only lands with
+  // explicit approval (args.execute:true). The landing-walk tests below model an APPROVED run, so
+  // the harness defaults execute:true; the stage-default and the gate are covered by dedicated
+  // tests that pass execute:false (behaviorally identical to the production default A.execute!==true).
+  const merged = { execute: true, ...(args || {}) }
+  const result = await fn(merged, undefined, agent, parallel, null, phase, log, null)
   return { result, calls }
 }
 
@@ -302,6 +310,62 @@ test('return contract preserved (base / total / landed / complete / outcomes)', 
   assert.equal(result.landed, 2)
   assert.equal(result.complete, true)
   assert.ok(Array.isArray(result.outcomes) && result.outcomes.length === 2)
+})
+
+// ===================== SPINE PHASE 5 (irreversible-action gate / batching) =====================
+
+test('DEFAULT (no approval) STAGES: verifies read-only, ranks, and merges NOTHING', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2, 3], execute: false } })
+  assert.equal(result.executed, false, 'not executed')
+  assert.equal(result.landed, 0, 'nothing landed')
+  assert.equal(result.complete, false)
+  assert.equal(byPrefix(calls, 'land:#').length, 0, 'no write LAND agent spawned without approval')
+  assert.equal(one(calls, 'cleanup'), undefined, 'no branch cleanup without approval')
+  assert.equal(byPrefix(calls, 'verify:#').length, 3, 'every PR is still verified read-only for the plan')
+  for (const v of byPrefix(calls, 'verify:#')) assert.equal(v.opts.agentType, 'Explore', 'stage verify is read-only')
+  assert.ok(Array.isArray(result.staged) && result.staged.length === 3, 'a ranked land-plan is returned')
+  assert.deepEqual(result.outcomes.map((o) => o.status), ['STAGED', 'STAGED', 'STAGED'])
+})
+
+test('args.execute:true is the explicit approval that performs the landing walk', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2], execute: true } })
+  assert.equal(result.executed, true)
+  assert.equal(result.landed, 2)
+  assert.equal(byPrefix(calls, 'land:#').length, 2, 'lands (irreversible) only with explicit approval')
+})
+
+test('stage mode flags non-landable PRs as BLOCKED in the plan (gate without merging)', async () => {
+  const { result, calls } = await runScript({
+    args: { prs: [1, 2], execute: false },
+    verify: (ref) => (ref === '2' ? verdict(ref, { verdict: 'CI_FAILING', ci_status: 'FAILING_REQUIRED' }) : verdict(ref)),
+  })
+  const s2 = result.staged.find((s) => s.ref === '2')
+  assert.equal(s2.landable, false, 'a CI_FAILING PR is not landable')
+  assert.equal(result.outcomes.find((o) => o.ref === '2').status, 'BLOCKED')
+  assert.equal(byPrefix(calls, 'land:#').length, 0, 'still merges nothing in stage mode')
+})
+
+test('the read-only relay-fetch is batched into sequential waves of <= batchSize (default 8)', async () => {
+  const prs = Array.from({ length: 19 }, (_, i) => i + 1)
+  const { calls } = await runScript({ args: { prs, execute: true } }) // execute -> walk is sequential, so the only parallel() is the fetch fan-out
+  assert.deepEqual(calls.parallelBatches, [8, 8, 3], '19 PRs relay-fetched in waves of 8, 8, 3')
+})
+
+test('SPINE_VERSION is stamped as a constant + returned', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(/const\s+SPINE_VERSION\s*=/.test(src), 'SPINE_VERSION constant declared')
+  const { result } = await runScript({ args: { prs: [1] } })
+  assert.equal(typeof result.spineVersion, 'string', 'spineVersion returned')
+})
+
+test('return shape is additive in both modes: existing keys kept, executed/staged/spineVersion added', async () => {
+  for (const execute of [true, false]) {
+    const { result } = await runScript({ args: { prs: [1], execute } })
+    for (const k of ['base', 'total', 'landed', 'complete', 'outcomes']) assert.ok(k in result, `existing key '${k}' (execute=${execute})`)
+    assert.equal(typeof result.executed, 'boolean', `executed added (execute=${execute})`)
+    assert.ok(Array.isArray(result.staged), `staged added (execute=${execute})`)
+    assert.equal(typeof result.spineVersion, 'string', `spineVersion added (execute=${execute})`)
+  }
 })
 
 // ---- runner ----
