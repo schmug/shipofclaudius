@@ -53,9 +53,42 @@ async function runScript({ args, stubs, budget }) {
 }
 
 // ---- canned data ----
+// NOTE: the validator no longer calibrates severity (split out into the Severity stage).
+// severity/reportable here are legacy fields the new flow ignores — harmless to keep.
 const verdict = {
   disposition: 'confirmed', severity: 'high', reportable: true, rationale: 'traced',
   attacker_story: 'a', evidence: 'e', proof_gap: '', fix: 'f', cvss_vector: '',
+}
+// Default Severity-stage verdict: facts justify HIGH and the policy pass keeps it.
+const severityKeepHigh = {
+  facts: { exposure: 'internet-facing', identities: 'anonymous -> user', reachability: 'direct from a route', controls: 'none primary', boundary_crossed: true },
+  calibrated_severity: 'high', final_severity: 'high', policy_decision: 'keep', anti_pattern: '', cvss_vector: 'CVSS:3.1/AV:N', rationale: 'facts justify high',
+}
+// Severity verdict that DOWNGRADES a self-XSS from HIGH to LOW (anti-pattern: self-xss).
+const severitySelfXss = {
+  facts: { exposure: 'authenticated self only', identities: 'attacker == victim (same principal)', reachability: 'requires victim to paste into their own session', controls: 'session-scoped', boundary_crossed: false },
+  calibrated_severity: 'high', final_severity: 'low', policy_decision: 'downgrade', anti_pattern: 'self-xss', cvss_vector: '', rationale: 'self-inflicted, no other principal harmed',
+}
+// Severity verdict that DROPS a theoretical-only memory-corruption finding.
+const severityTheoreticalDrop = {
+  facts: { exposure: 'internal', identities: 'n/a', reachability: 'no demonstrated reachable path', controls: 'n/a', boundary_crossed: false },
+  calibrated_severity: 'info', final_severity: 'info', policy_decision: 'drop', anti_pattern: 'theoretical-memory-corruption', cvss_vector: '', rationale: 'no reachable path proven',
+}
+// Route a Severity-stage call to the right verdict by the CANDIDATE's class line only — NOT the
+// whole prompt (the policy instructions themselves enumerate "self-xss", "theoretical
+// memory-corruption", etc., so matching the full prompt would route everything to one bucket).
+const severityByClass = (prompt) => {
+  const cls = (prompt.match(/- class:\s*(\S+)/) || [])[1] || ''
+  return /self-?xss/i.test(cls) ? severitySelfXss
+    : /memory/i.test(cls) ? severityTheoreticalDrop
+    : severityKeepHigh
+}
+const discoverySelfXssAndSqli = {
+  threat_model: 'tm', files_reviewed: 4,
+  candidates: [
+    { title: 'self-xss via reflected debug echo', file: 'src/dbg.ts', line: 5, vuln_class: 'self-xss', source: 'own input', sink: 'innerHTML', why: 'user can xss their own session' },
+    { title: 'possible sqli in db layer', file: 'src/db.ts', line: 42, vuln_class: 'sql-injection', source: 'user input', sink: 'db.raw', why: 'agent guess' },
+  ],
 }
 const discoveryTwo = {
   threat_model: 'tm', files_reviewed: 5,
@@ -99,13 +132,18 @@ function stubsFor(map) {
     if (l.startsWith('prior-bundle')) { map.sawPriorLoader = true; map.priorLoaderPrompt = prompt; return map.priorLoaded ?? { ok: false, content: '', note: 'no stub' } }
     if (l.startsWith('tools:')) { map.sawTool = true; return map.tool }
     if (l.startsWith('discover:')) return map.discovery(prompt, opts)
-    if (l.startsWith('validate:')) return map.verdict ?? verdict
+    if (l.startsWith('validate:')) { (map.validatePrompts ||= []).push(prompt); return map.verdict ?? verdict }
     if (l.startsWith('verify:')) {
       ;(map.verifyPrompts ||= []).push(prompt)
       ;(map.verifyOpts ||= []).push(opts)
       if (typeof map.verify === 'function') return map.verify(prompt)
       if ('verify' in map) return map.verify // explicit value (incl. null = agent died)
       return verifyOk
+    }
+    if (l.startsWith('severity:')) {
+      (map.severityPrompts ||= []).push(prompt); (map.severityOpts ||= []).push(opts)
+      if ('severity' in map) return typeof map.severity === 'function' ? map.severity(prompt, opts) : map.severity
+      return severityKeepHigh
     }
     if (l === 'report') {
       map.reportPrompt = prompt; map.reportOpts = opts
@@ -664,6 +702,156 @@ test('saturation: ample budget does not trip the budget gate', async () => {
   const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map), budget })
   assert.equal(result.terminal_state, 'saturated', 'with budget to spare it runs to saturation')
   assert.equal(result.rounds_run, 2, 'two rounds: one productive, one dry')
+})
+
+// ================= SEVERITY / ATTACK-PATH STAGE (issue #22) =================
+// Severity is split OUT of the validator into a dedicated post-validation stage that
+// derives an attacker-path FACTS record, calibrates severity, then runs a mechanical
+// POLICY pass with an anti-pattern "should-not-be-high/critical" list.
+
+test('sev: a distinct Severity phase runs after Validate, only on confirmed candidates', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(calls.phases.includes('Severity'), 'a Severity phase fires')
+  const order = calls.phases
+  assert.ok(order.indexOf('Severity') > order.indexOf('Validate'), 'Severity runs AFTER Validate')
+  assert.ok(order.indexOf('Severity') < order.indexOf('Report'), 'Severity runs BEFORE Report')
+  // both candidates are confirmed -> two severity calls (one per confirmed finding)
+  assert.equal((map.severityPrompts || []).length, 2, 'one severity call per confirmed candidate')
+})
+
+test('sev: Severity stage does NOT run for refuted / needs-info candidates', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo, verdict: { disposition: 'refuted', rationale: 'guarded', attacker_story: '', evidence: 'prepared stmt', proof_gap: '', fix: '' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal((map.severityPrompts || []).length, 0, 'no severity calls when nothing is confirmed')
+  assert.equal(result.reportable.length, 0, 'refuted candidates are not reportable')
+  assert.equal(result.appendix_count, result.candidates, 'they still appear in the appendix (suppression visible)')
+})
+
+test('sev: severity comes from the new stage — keep@high flows through to the report', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(result.reportable.length, 2, 'both confirmed + kept findings reported')
+  assert.ok(result.reportable.every((f) => f.severity === 'high'), 'final severity is the stage-calibrated value')
+  assert.ok(result.counts.high >= 2, 'severity counts come from the calibrated severity')
+})
+
+test('sev: self-XSS cannot remain HIGH — policy downgrades it (anti-pattern fires)', async () => {
+  const map = { tool: toolMissing, discovery: () => discoverySelfXssAndSqli, severity: severityByClass }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const selfxss = result.reportable.find((f) => f.vuln_class === 'self-xss')
+  assert.ok(selfxss, 'self-xss still surfaces (downgraded, not silently dropped) at low threshold')
+  assert.notEqual(selfxss.severity, 'high', 'self-xss must NOT remain HIGH')
+  assert.notEqual(selfxss.severity, 'critical', 'nor critical')
+  assert.equal(selfxss.severity, 'low', 'downgraded to the calibrated low severity')
+  assert.equal(selfxss.policy_decision, 'downgrade', 'policy pass recorded a downgrade')
+  assert.equal(selfxss.anti_pattern, 'self-xss', 'the firing anti-pattern is named')
+  // the genuine sqli is untouched by the policy pass
+  const sqli = result.reportable.find((f) => f.vuln_class === 'sql-injection')
+  assert.ok(sqli && sqli.severity === 'high', 'a real high-severity finding is not downgraded')
+})
+
+test('sev: policy DROP removes a theoretical-only finding from the report but keeps it in the appendix', async () => {
+  const discovery = () => ({
+    threat_model: 'tm', files_reviewed: 2,
+    candidates: [
+      { title: 'theoretical memory corruption', file: 'src/mem.c', line: 9, vuln_class: 'memory-corruption', source: 'n/a', sink: 'memcpy', why: 'no proven path' },
+      { title: 'idor on /api/items', file: 'src/api.ts', line: 10, vuln_class: 'idor', source: 'id', sink: 'db.get', why: 'no owner check' },
+    ],
+  })
+  const map = { tool: toolMissing, discovery, severity: severityByClass }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(!result.reportable.some((f) => f.vuln_class === 'memory-corruption'), 'dropped finding is NOT reported')
+  assert.equal(result.reportable.length, 1, 'only the real idor remains reportable')
+  assert.equal(result.reportable.length + result.appendix_count, result.candidates, 'dropped item still counted in the appendix')
+})
+
+test('sev: a downgrade BELOW threshold is suppressed to the appendix, not reported', async () => {
+  // threshold=medium: self-xss downgraded to low falls below it -> appendix.
+  const map = { tool: toolMissing, discovery: () => discoverySelfXssAndSqli, severity: severityByClass }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, threshold: 'medium' }, stubs: stubsFor(map) })
+  assert.ok(!result.reportable.some((f) => f.vuln_class === 'self-xss'), 'self-xss (low) is below the medium threshold')
+  assert.equal(result.reportable.length + result.appendix_count, result.candidates, 'still accounted for in the appendix')
+})
+
+test('sev: return carries an additive severity_policy tally (kept/downgraded/dropped)', async () => {
+  const map = { tool: toolMissing, discovery: () => discoverySelfXssAndSqli, severity: severityByClass }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(result.severity_policy && typeof result.severity_policy === 'object', 'severity_policy present')
+  assert.equal(result.severity_policy.downgraded, 1, 'one downgrade (self-xss)')
+  assert.equal(result.severity_policy.kept, 1, 'one kept (sqli)')
+  assert.equal(result.severity_policy.dropped, 0, 'none dropped here')
+})
+
+test('sev: Severity stage runs in chunks of <=8 concurrent agents', async () => {
+  const many = {
+    threat_model: 'tm', files_reviewed: 5,
+    candidates: Array.from({ length: 20 }, (_, i) => ({
+      title: `finding ${i}`, file: `src/f${i}.ts`, line: 10, vuln_class: 'xss', source: 's', sink: 'k', why: 'w',
+    })),
+  }
+  const map = { tool: toolMissing, discovery: () => many }
+  const { calls } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  // severity agents were all invoked (20), proving the stage iterated the full confirmed set
+  assert.equal((map.severityPrompts || []).length, 20, 'every confirmed candidate is calibrated')
+  void calls
+})
+
+test('sev: severity prompt names the over-rating anti-patterns + the dynamic-baseline principle', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const p = (map.severityPrompts || [])[0] || ''
+  assert.ok(/self-?xss/i.test(p), 'self-XSS anti-pattern named')
+  assert.ok(/theoretical/i.test(p) && /memory/i.test(p), 'theoretical memory-corruption named')
+  assert.ok(/defense-in-depth|second.*(layer|defense)/i.test(p), 'missing second defense-in-depth layer named')
+  assert.ok(/chain/i.test(p), '"could matter if chained" named')
+  assert.ok(/owasp|checklist/i.test(p), 'bare checklist deviation named')
+  assert.ok(/boundary/i.test(p), 'internal-no-boundary covered')
+  assert.ok(/dynamic baseline/i.test(p), 'dynamic-baseline principle present')
+  assert.ok(/facts/i.test(p) && /policy/i.test(p), 'facts -> severity -> policy structure present')
+})
+
+test('sev: severity schema is satisfiable and returns facts + calibrated severity + policy', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const opts = (map.severityOpts || [])[0]
+  assert.ok(opts && opts.schema, 'severity agent uses structured output')
+  const req = opts.schema.required || []
+  for (const k of ['facts', 'calibrated_severity', 'final_severity', 'policy_decision']) {
+    assert.ok(req.includes(k), `severity schema requires ${k}`)
+  }
+})
+
+test('sev: validator no longer calibrates severity (schema drops severity/reportable)', async () => {
+  // The validator schema should NOT carry severity/reportable any more — exploitability only.
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const v = calls.agents.find((a) => (a.opts.label || '').startsWith('validate:'))
+  assert.ok(v && v.opts.schema, 'validator uses structured output')
+  const props = v.opts.schema.properties || {}
+  assert.ok(!('severity' in props), 'validator schema no longer has a severity field')
+  assert.ok(!('reportable' in props), 'validator schema no longer has a reportable field')
+  assert.ok('disposition' in props, 'validator still decides disposition (exploitability)')
+})
+
+test('sev: validator prompt names the five disprove tests + the dynamic-baseline principle', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const p = (map.validatePrompts || [])[0] || ''
+  assert.ok(/exploitation/i.test(p), 'exploitation test named')
+  assert.ok(/impact/i.test(p), 'impact test named')
+  assert.ok(/baseline/i.test(p), 'baseline test named')
+  assert.ok(/mitigation/i.test(p), 'mitigation test named')
+  assert.ok(/parser|runtime/i.test(p), 'parser/runtime-behavior test named')
+  assert.ok(/dynamic baseline/i.test(p), 'dynamic-baseline principle present')
+})
+
+test('sev: report consumes calibrated severity + shows suppressed items with their anti-pattern', async () => {
+  const map = { tool: toolMissing, discovery: () => discoverySelfXssAndSqli, severity: severityByClass }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2, threshold: 'medium' }, stubs: stubsFor(map) })
+  // self-xss downgraded to low is below the medium threshold -> appears in the appendix block with its reason
+  assert.ok(/self-xss/i.test(map.reportPrompt), 'suppressed self-xss reaches the report appendix')
+  assert.ok(/calibrated|attack-path|severity stage/i.test(map.reportPrompt), 'report told severity comes from the calibration stage')
 })
 
 // ---- runner ----
