@@ -15,6 +15,7 @@ Each workflow is a self-contained JavaScript file that begins with an `export co
 | [`deep-security-scan.js`](.claude/workflows/deep-security-scan.js) | `deep-security-scan` | Higher-recall repo security audit: a deterministic prefilter (foxguard: SAST/secrets/SCA) feeds K independent threat-model-lensed discovery workers → semantic merge → disprove-first validation → one HTML + markdown report. For a whole repo or a scoped path — **not** diffs/PRs. |
 | [`defense-scan.js`](.claude/workflows/defense-scan.js) | `defense-scan` | Defense-in-depth orchestrator. Composes `deep-security-scan` (code-at-rest) with opt-in layers — supply-chain (bumblebee), DAST (vigolium), LLM red-team (garak), network/template scan (nuclei), and project-posture/governance (OpenSSF Scorecard vs. the OSPS Baseline) — into one merged report with a per-layer coverage statement. |
 | [`security-diff-scan.js`](.claude/workflows/security-diff-scan.js) | `security-diff-scan` | Change-scoped security review: resolves one code change (a git range, a PR, or the uncommitted working tree), fans out K threat-model-lensed discovery workers over **only the diff** → semantic merge → disprove-first validation (with a change-scope gate that drops pre-existing issues) → one HTML + markdown report with a coverage statement of which files/hunks were in scope. The diff/PR sibling of `deep-security-scan`. |
+| [`triage-finding.js`](.claude/workflows/triage-finding.js) | `triage-finding` | Triage an **external** findings source (a SARIF file, a scanner report, a CVE/GHSA reference, or a list of finding descriptors) against the **current** repo: a read-only relay normalizes + nonce-fences the untrusted findings, then one disprove-first agent per finding triages it to `confirmed` / `not_actionable` / `needs_review` with an exploitability rank + evidence (trace-only; `confirmed` must cross a real security boundary, not just be reachable). Confirmed items produce a `/ghsa`- (public repo) or `/issue`-ready handoff payload — read-only, never files. The security-backlog burn-down sibling of the issue/PR fan-outs. |
 | [`issue-triage-fanout.js`](.claude/workflows/issue-triage-fanout.js) | `issue-triage-fanout` | Read-only fan-out: one agent per open GitHub issue → `GREEN` / `DECISION` / `RESEARCH` / `DONE` / `BLOCKED`, with grouping and dependencies. Auto-gathers open issues when none are passed. |
 | [`issue-research-fanout.js`](.claude/workflows/issue-research-fanout.js) | `issue-research-fanout` | Web-enabled fan-out over the `RESEARCH` bucket: one agent per issue investigates (codebase + `gh` + web) and returns a verdict, aiming to move research issues to `GREEN` with an implementable spec. Read-only on GitHub. |
 | [`pr-triage-fanout.js`](.claude/workflows/pr-triage-fanout.js) | `pr-triage-fanout` | Read-only fan-out: one agent per open PR → `MERGE` / `CLOSE` / `REBASE` / `FIX_CI` / `COMMENT` / `AWAITING_HUMAN` / `ESCALATE`, with a CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated `gh` user by default). |
@@ -94,6 +95,7 @@ Workflow({ scriptPath: "~/.claude/workflows/pr-triage-fanout.js" })
 | `deep-security-scan` | `target` (default `"."`), `scope?`, `rounds?` (default 5 / budget-scaled), `lenses?`, `threshold?` (`critical`…`info`, default `low`), `tools?` (default `['foxguard']`; `[]` disables Phase 0), `toolSeverity?`, `priorBundle?` (prior `bundle.json` for incremental dedup) | No args required; defaults audit the whole repo at `.`. Returns a sealed `bundle` + `sarif` (see **Sealed findings bundle**). |
 | `defense-scan` | `target`, `scope?`, `rounds?`, `threshold?`, `installMissing?`, `supplyChain?` (default on), `url?` + `authorized?` (DAST), `llmEndpoint?` + `llmConfirmed?` (LLM red-team), `networkTarget?` + `authorized?` (nuclei), `repo?` (posture), `priorBundle?` | Layer 1 always runs; layers 2–6 are opt-in / authorization-gated and **fail-open**. Returns a merged `bundle` + `sarif` alongside the existing `coverage[]`. |
 | `security-diff-scan` | `base?` (default `main`), `head?` (default working tree), `pr?` + `repo?` (review a PR instead of a local range), `target?` (default `"."`), `threshold?` (`critical`…`info`, default `low`), `rounds?` (default 5 / budget-scaled), `lenses?`, `readonlyAgent?`, `priorBundle?` | No args required — defaults review your uncommitted changes / current branch vs `main`. PR mode fences untrusted PR text; all discovery/validation subagents run read-only (see **Security model**). Returns a sealed `bundle` + `sarif`. |
+| `triage-finding` | **one source required:** `findings` (descriptor array) \| `sarif` (path) \| `report` (path) \| `cve` \| `ghsa`; then `target?` (default `"."`), `repo?`, `handoff?` (`ghsa`\|`issue`\|`auto`, default `auto`), `notes?`, `batchSize?` (default 8), `readonlyAgent?` | Triages external findings against the current repo. Untrusted findings text is nonce-fenced; subagents run read-only (see **Security model**). Confirmed items yield a `/ghsa`/`/issue` handoff payload — it never files. |
 | `issue-triage-fanout` | `numbers?` (subset; auto-gathers all open issues if omitted), `repo?` (`owner/name`), `notes?`, `readonlyAgent?` | No args required. Untrusted issue text is fenced; subagents run read-only (see **Security model**). |
 | `issue-research-fanout` | `numbers` (the triage `RESEARCH` bucket), `triaged?` (seed with triage findings), `label?` (default `research`), `repo?`, `notes?`, `readonlyAgent?` | Chains after `issue-triage-fanout`. |
 | `pr-triage-fanout` | `numbers?` (subset; auto-gathers all open PRs if omitted), `repo?`, `author?` (**defaults to the authenticated `gh` user**, auto-detected via `gh api user`), `notes?`, `readonlyAgent?` | No args required. Triages only the resolved author's PRs; bots and others are dropped (logged). |
@@ -115,7 +117,7 @@ This is a *cross-run findings contract*, complementary to the single-run **resum
 
 ## Security model
 
-The six GitHub workflows (`issue-triage-fanout`, `issue-research-fanout`, `pr-triage-fanout`, `pr-review-fanout`, `stacked-impl-lanes`, `stacked-merge-walk`) read text an attacker can write — issue/PR **bodies, comments, and reviews**. (PR triage only restricts the PR *author*; commenters and reviewers are unrestricted. Triage is explicitly meant to run against repos whose issues/PRs outsiders can write to.) That makes them a target for **indirect prompt injection**: hostile text trying to get a tool-capable agent to run a command, write a file, or exfiltrate secrets. `security-diff-scan` joins them **in PR mode only**: reviewing a PR (`args.pr`) reads the attacker-writable PR **title/body** (plus the diff itself) to scope the review, so it uses the same defenses; its local-diff modes (base/head/working tree) read only local git bytes and need no relay (the diff is still treated as data and HTML-escaped). The defenses (added for [#3](https://github.com/schmug/shipofclaudius/issues/3)):
+The six GitHub workflows (`issue-triage-fanout`, `issue-research-fanout`, `pr-triage-fanout`, `pr-review-fanout`, `stacked-impl-lanes`, `stacked-merge-walk`) read text an attacker can write — issue/PR **bodies, comments, and reviews**. (PR triage only restricts the PR *author*; commenters and reviewers are unrestricted. Triage is explicitly meant to run against repos whose issues/PRs outsiders can write to.) That makes them a target for **indirect prompt injection**: hostile text trying to get a tool-capable agent to run a command, write a file, or exfiltrate secrets. `security-diff-scan` joins them **in PR mode only**: reviewing a PR (`args.pr`) reads the attacker-writable PR **title/body** (plus the diff itself) to scope the review, so it uses the same defenses; its local-diff modes (base/head/working tree) read only local git bytes and need no relay (the diff is still treated as data and HTML-escaped). `triage-finding` joins them too: its findings source — a SARIF file, a scanner report, a CVE/GHSA description, or a caller-supplied descriptor list — is **external, attacker-influenceable text**, so a read-only ingest relay normalizes it and mints the fence nonce, every per-finding triage reasons over that nonce-fenced `UNTRUSTED DATA`, and all subagents run read-only; it classifies and assembles `/ghsa`/`/issue` handoff payloads but **never files** (filing is a separate, explicitly-gated step). The defenses (added for [#3](https://github.com/schmug/shipofclaudius/issues/3)):
 
 1. **Untrusted text is fetched by a dedicated read-only relay, never live by the agent that reasons over it.** A small relay agent runs a *fixed* `gh issue view` / `gh pr view` (or, for `security-diff-scan`, a fixed `gh pr diff` / `git diff`), generates a fresh random nonce, and returns the raw bytes verbatim. The orchestrator wraps those bytes in a **nonce-marked fence** (`<<<UNTRUSTED_GH_DATA_<nonce>>>> … <<<END…>>>`, and `<<<UNTRUSTED_DIFF_DATA_<nonce>>>>` for the diff scanner) and drops them into the reasoning agent's prompt as clearly-labelled `UNTRUSTED DATA`. The reasoning agent no longer fetches the body/comments/reviews/diff itself. The nonce is generated *after* the attacker wrote their text and never appears in this source, so fenced content can't forge the closing delimiter.
 2. **Every subagent runs through a read-only `agentType`.** Default is the built-in **`Explore`** (no `Edit` / `Write` / `NotebookEdit` / sub-`Agent`), so tool access is restricted by the runtime regardless of what the fenced text says. Override with `args.readonlyAgent: "<your-agent>"` to use a stricter custom read-only agent. (The two **write** workflows are the exception — their actors **must** keep write tools: `stacked-impl-lanes`' impl agent pushes and opens PRs, and `stacked-merge-walk`' land/cleanup actors rebase, force-push-with-lease, and merge. So `readonlyAgent` scopes only their *read-only* relays — `stacked-impl-lanes`' issue-text relays, and `stacked-merge-walk`' PR-text relays **and** its read-only verify gate — never the write actor. Their mitigation is the fence + preamble, plus `stacked-impl-lanes`' `security-hardening-reviewer` gate on invariant lanes and `stacked-merge-walk`' read-only verify gate + the deliberate choice to keep untrusted PR text out of the land actor entirely. `security-diff-scan` is the same shape: its resolve/discovery/validation agents are read-only; only its final **report** agent keeps write tools to create `report.html`, and that agent sees only already-validated findings — never the raw untrusted diff/PR text unescaped.)
@@ -158,7 +160,7 @@ The Workflow **runtime** itself — what `agent()` actually grants a subagent, t
 The `tests/` directory holds **offline simulators**. They wrap each workflow's source in an `AsyncFunction` with stubbed runtime globals (`agent()` / `parallel()` / `phase()` / `log()` / `workflow()`), so orchestration logic — dedup precedence, fail-open behavior, layer gating, diff-scoping & mode decision, coverage wiring, author resolution, schema satisfiability, the **sealed-bundle contract** (content-addressed fingerprint stability + line-independence, bundle shape, `priorBundle` dedup + coverage delta, and a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) projection validated by a dependency-free conformance checker), and the **prompt-injection hardening** (untrusted-text fencing + read-only `agentType` call shapes, see **Security model**) — is exercised in milliseconds at **zero token cost**. They use only Node built-ins (`node:fs/promises`, `node:assert/strict`); no dependencies to install.
 
 ```bash
-npm test          # runs all nine suites
+npm test          # runs all eleven suites
 # or individually:
 node tests/dss-sim.test.mjs
 node tests/defense-scan.test.mjs
@@ -169,9 +171,11 @@ node tests/stacked-impl-sim.test.mjs
 node tests/stacked-merge-sim.test.mjs
 node tests/pr-review-sim.test.mjs
 node tests/security-diff-sim.test.mjs
+node tests/triage-finding-sim.test.mjs
+node tests/plugin-integrity.test.mjs
 ```
 
-Requires Node ≥ 18 (developed on Node 22). Current status: **165 passing** (16 + 38 + 9 + 9 + 12 + 9 + 23 + 18 + 31), 0 failing.
+Requires Node ≥ 18 (developed on Node 22). Current status: **243 passing** (16 + 38 + 21 + 17 + 24 + 19 + 29 + 18 + 31 + 26 + 4), 0 failing.
 
 ## Layout
 
@@ -188,7 +192,8 @@ shipofclaudius/
 │       ├── pr-triage-fanout.js
 │       ├── security-diff-scan.js
 │       ├── stacked-impl-lanes.js
-│       └── stacked-merge-walk.js
+│       ├── stacked-merge-walk.js
+│       └── triage-finding.js
 └── tests/
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
     ├── defense-scan.test.mjs       # simulates defense-scan.js
@@ -198,7 +203,8 @@ shipofclaudius/
     ├── pr-triage-sim.test.mjs      # simulates pr-triage-fanout.js
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
     ├── stacked-impl-sim.test.mjs   # simulates stacked-impl-lanes.js
-    └── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
+    ├── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
+    └── triage-finding-sim.test.mjs # simulates triage-finding.js
 ```
 
 Each test resolves its target with `new URL('../.claude/workflows/<workflow>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
