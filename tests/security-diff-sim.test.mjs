@@ -620,6 +620,47 @@ test('verify fail-safe — a dead verify agent keeps the finding reportable (fla
   assert.ok(result.reportable.every((f) => f.verify && f.verify.outcome === 'unverified'), 'flagged unverified for transparency')
 })
 
+// ============ RICHER PER-CLASS LENSES + BUSINESS-LOGIC / WILDCARD (issue #25) ============
+// Mirrors the deep-security-scan deepening, but every lens stays CHANGE-FRAMED: the
+// business-logic / feature-abuse / chaining the change introduces or newly exposes, and a
+// change-scoped wildcard / creative generalist pass. The diff-specific regression /
+// weakened-defense lens is retained.
+
+test('#25: default lens set is 5, carries a change-framed business-logic lens, and keeps the regression lens', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake' }, map }) // no rounds -> default
+  assert.equal(map.discoverPrompts.length, 5, `default run should fan out 5 named lenses, got ${map.discoverPrompts && map.discoverPrompts.length}`)
+  const bl = map.discoverPrompts.find((p) => /business[- ]logic/i.test(p) && /feature[- ]abuse/i.test(p) && /chain/i.test(p))
+  assert.ok(bl, 'a business-logic / feature-abuse / chaining lens runs by default')
+  assert.ok(/introduc|exposed|the change|diff/i.test(bl), 'business-logic lens is change-framed')
+  assert.ok(
+    map.discoverPrompts.some((p) => /REMOVED or LOOSENED|weakened-defense|removed-guard|relaxed/i.test(p)),
+    'the diff-specific regression / weakened-defense lens is retained'
+  )
+})
+
+test('#25: lenses carry class-specific hunt checklists (change-framed)', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const all = map.discoverPrompts.join('\n---\n')
+  assert.match(all, /deserializ/i, 'deserialization checklist present')
+  assert.match(all, /pickle|ObjectInputStream|Marshal|BinaryFormatter|TypeNameHandling/i, 'names concrete deserialization codecs')
+  assert.match(all, /SAML|SSO|assertion/i, 'SAML/SSO assertion-selection checklist present')
+  assert.match(all, /zip[- ]?slip|archive|tar/i, 'archive-member path-traversal checklist present')
+  assert.match(all, /169\.254\.169\.254|metadata|link-local|destination class/i, 'SSRF destination-classes checklist present')
+  assert.match(all, /shell|argv|argument/i, 'command-runner argument-type checklist present')
+  assert.match(all, /XXE|external entit|DTD/i, 'XXE feature-setup checklist present')
+})
+
+test('#25: a change-scoped wildcard / creative generalist pass is produced beyond the named lenses', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake', rounds: 7 }, map })
+  assert.equal(map.discoverPrompts.length, 7, '5 named lenses + 2 generalist passes')
+  const wild = map.discoverPrompts.find((p) => /wildcard/i.test(p) && /creativ/i.test(p))
+  assert.ok(wild, 'the first generalist fresh pass is an explicit wildcard / creative angle')
+  assert.ok(/change|diff/i.test(wild), 'wildcard pass stays change-scoped, not a whole-repo audit')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

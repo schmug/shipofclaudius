@@ -25,7 +25,8 @@
 //   - args.target:   local repo root to work from (default ".").
 //   - args.threshold:min severity to report — critical|high|medium|low|info (default "low",
 //                    to match deep-security-scan).
-//   - args.rounds:   number of independent discovery workers (default 4, or budget-scaled).
+//   - args.rounds:   number of independent discovery workers (default 5 = one per default
+//                    lens, or budget-scaled).
 //   - args.lenses:   optional array of custom threat-model lenses (overrides defaults).
 //   - args.readonlyAgent: read-only agentType for the resolve/discovery/validation agents
 //                    (default the built-in `Explore`; override with a stricter custom agent).
@@ -77,7 +78,11 @@ const HEAD = (typeof A.head === 'string' && A.head.trim()) ? A.head.trim() : ''
 const MODE = PR ? 'pr' : (HEAD ? 'range' : 'worktree')
 
 const HAS_BUDGET = (typeof budget !== 'undefined' && budget && budget.total)
-const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budget.total / 120000))) : 4)
+// Non-budget default = one worker per default lens (so the new business-logic lens always
+// runs); on a budgeted run the existing scaling absorbs it. Budget floor unchanged (no
+// cost-structure change beyond the added lens). DEFAULT_LENSES is defined below; the literal
+// here MUST stay in sync with it (5 default lenses, incl. the business-logic lens).
+const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budget.total / 120000))) : 5)
 
 // Read-only agentType every NON-report subagent runs under (default built-in `Explore`;
 // override with args.readonlyAgent). The report agent is intentionally NOT restricted — it
@@ -104,22 +109,36 @@ function fence(nonce, raw) {
 
 // Diverse default lenses, framed for a CHANGE: each worker hunts hardest within its lens,
 // which is what makes the independent passes find DIFFERENT things. Lens 4 is diff-specific —
-// what the change WEAKENED or REMOVED, the failure mode unique to reviewing a delta.
+// what the change WEAKENED or REMOVED, the failure mode unique to reviewing a delta. Lens 5 is
+// the change-framed business-logic / feature-abuse / chaining lens (the marginal recall a
+// generic scanner misses). Each lens now carries a class-specific HUNT CHECKLIST for the
+// high-miss classes (deserialization codecs, SAML assertion-selection, archive-member
+// traversal, SSRF destination classes, command-runner argument types, XXE parser setup), all
+// scoped to what the CHANGE introduces/exposes. Lenses stay INDEPENDENT — none references
+// another's output, which is what drives the recall win.
 const DEFAULT_LENSES = [
-  'Injection & untrusted-input flow introduced or altered by the change: SQL/NoSQL/OS-command/LDAP injection, XSS & template injection, SSRF, path traversal, insecure deserialization, missing output encoding. Trace attacker-controlled input added or newly reached by the diff to dangerous sinks.',
-  'AuthN/AuthZ & multi-tenancy changes: a new/changed endpoint or handler with missing or broken access control, IDOR, privilege escalation, session/token/cookie handling, or a tenant-isolation break introduced by the diff. Watch for new entry points wired without the repo\'s usual enforcement.',
-  'Secrets, crypto & supply chain in the diff: a newly hardcoded secret/key/token, secrets newly flowing into logs/telemetry, weak or hand-rolled crypto added, insecure randomness, and dependency manifest/lockfile bumps that add a risky/outdated/tampered package.',
+  'Injection & untrusted-input flow introduced or altered by the change: SQL/NoSQL/OS-command/LDAP injection, XSS & template injection, SSRF, path traversal, insecure deserialization, XXE, missing output encoding. Trace attacker-controlled input added or newly reached by the diff to dangerous sinks. Hunt checklist (only where the CHANGE adds/alters it): (a) Deserialization — a newly introduced or switched codec that can instantiate arbitrary types: Java ObjectInputStream/XMLDecoder, Python pickle/PyYAML yaml.load, Ruby Marshal, .NET BinaryFormatter & Json.NET TypeNameHandling, PHP unserialize, Node node-serialize; did the change drop a type allow-list? (b) Command runners — does the diff add a shell string vs argv array, set shell:true, interpolate args, or feed attacker input into sh -c? (c) SSRF — does a new/changed fetch reach cloud metadata (169.254.169.254), localhost, link-local/RFC1918, follow redirects to them, or accept file://gopher://dict:// schemes? (d) Path traversal — new archive extraction (zip-slip / tar member escaping the dest dir), ../ in a newly-trusted path, symlink-following writes. (e) XXE — a newly added/reconfigured XML parser with external-entity/DTD resolution left enabled (missing FEATURE_SECURE_PROCESSING / resolve_entities=false).',
+  'AuthN/AuthZ & multi-tenancy changes: a new/changed endpoint or handler with missing or broken access control, IDOR, privilege escalation, session/token/cookie handling, or a tenant-isolation break introduced by the diff. Watch for new entry points wired without the repo\'s usual enforcement. Hunt checklist (where the CHANGE adds/alters it): (a) SAML/SSO — a change to assertion handling: signature wrapping (XSW) exposure, WHICH assertion/signature is selected vs validated, audience/recipient/NotOnOrAfter/InResponseTo checks added or dropped, newly accepting unsigned assertions. (b) JWT/token — a new path with alg=none allowed, RS256→HS256 confusion, signature not verified, kid/jku injection, missing audience/expiry. (c) OAuth/OIDC — changed redirect_uri validation, removed state/PKCE, token-audience binding. (d) Object-level authz — a new handler loading a record by request-supplied id/path without the ownership/tenant scoping the rest of the repo applies.',
+  'Secrets, crypto & supply chain in the diff: a newly hardcoded secret/key/token, secrets newly flowing into logs/telemetry, weak or hand-rolled crypto added, insecure randomness, and dependency manifest/lockfile bumps that add a risky/outdated/tampered package. Hunt checklist (where the CHANGE adds/alters it): (a) Crypto misuse newly introduced — ECB mode, static/zero IV, key reuse, MD5/SHA1/unsalted password hashing, a non-constant-time secret/MAC compare, Math.random/rand for a token. (b) Secret flow — a secret newly reaching logs/telemetry/error responses/URLs or a client bundle. (c) Supply chain — a manifest/lockfile bump to an outdated/abandoned/typosquat-adjacent package, or a newly-reachable use of a vulnerable dependency.',
   'Regression & weakened-defense lens (DIFF-SPECIFIC): focus on what the change REMOVED or LOOSENED — a deleted/relaxed validation or auth check, a widened input/permission, a disabled safety flag, a guard moved after the sink, or a refactor that drops sanitization. Removed guards and newly-exposed pre-existing paths are first-class candidates; read the "-" lines as carefully as the "+" lines.',
+  'Business-logic, feature-abuse & chained exploits introduced or newly exposed by the change (HIGH-MISS, generic scanners skip this): hunt the bugs that live in the product\'s rules, not in a sink. Build your OWN threat model of the invariants this change touches and how a creative attacker subverts them — do not assume the injection/authz lenses cover this. Hunt checklist (scoped to what the CHANGE introduces/exposes): (a) Workflow/state-machine abuse — the change lets a required step be skipped or reordered (pay→ship, verify→activate), a one-time action be replayed, or an action run on a state that should forbid it. (b) Economic/quantity manipulation — a new/changed handler accepting negative or fractional amounts/quantities, integer over/underflow in price·qty, coupon/referral/discount stacking or reuse, double-spend via a newly-introduced race. (c) Feature abuse — a new feature pointed at an unintended target: webhook/callback/avatar-by-URL → SSRF, file/CSV/template import → path write or formula/template injection, "preview/render/fetch" → SSRF/XXE, email/notify → spoof/open-relay, export/search → bulk exfil, a new "act-as"/impersonate/admin-debug path. (d) Chained exploits — does the change add a primitive that composes into high impact: open-redirect + OAuth → token theft, IDOR + info-leak → ATO, SSRF + cloud-metadata → cred theft, path-write + include → RCE? Think in multi-step kill chains across the changed endpoints/files. (e) Parser/trust-boundary differentials newly introduced — the same input read differently by validator vs consumer (request smuggling, JSON/XML duplicate-key or type confusion, unicode/case/encoding normalization mismatch in an authz or filename check).',
 ]
 const LENSES = Array.isArray(A.lenses) && A.lenses.length ? A.lenses : DEFAULT_LENSES
 
 // Build exactly ROUNDS worker lenses: named lenses first, then generalist fresh passes
-// (varied by index, since Math.random is unavailable) to fill out the count.
-const WORKERS = Array.from({ length: ROUNDS }, (_, i) =>
-  i < LENSES.length
-    ? { id: i, lens: LENSES[i] }
-    : { id: i, lens: `Fresh generalist pass #${i - LENSES.length + 1}: independently re-review the SAME change for anything the lens-specialized workers might miss. Do not assume earlier workers were thorough; start from your own threat model of what this change touches.` }
-)
+// (varied by index, since Math.random is unavailable) to fill out the count. The FIRST
+// generalist pass is an explicit WILDCARD / CREATIVE angle — a relabel of an existing
+// budget-scaled pass (no added cost), kept change-scoped, for bugs a checklist-driven worker misses.
+const WORKERS = Array.from({ length: ROUNDS }, (_, i) => {
+  if (i < LENSES.length) return { id: i, lens: LENSES[i] }
+  const passNum = i - LENSES.length + 1
+  return {
+    id: i,
+    lens: passNum === 1
+      ? `Wildcard / creative generalist pass (still CHANGE-SCOPED): independently re-review the SAME change with NO fixed checklist — think like a creative attacker, not a scanner. Hunt the unexpected the change enables: multi-step exploit chains, gadget chains, abuse of an intended feature the diff adds, parser/trust-boundary differentials, and anything the lens-specialized workers would skip because it doesn't fit a named class. Stay within the diff (every candidate must trace to a changed hunk); do not assume earlier workers were thorough; start from your own threat model of what this change touches.`
+      : `Fresh generalist pass #${passNum}: independently re-review the SAME change for anything the lens-specialized workers might miss. Do not assume earlier workers were thorough; start from your own threat model of what this change touches.`,
+  }
+})
 
 // ---- schemas (reuse deep-security-scan's finding shape, plus diff-scoping fields) ----
 const CANDIDATE_ITEM = {

@@ -546,6 +546,43 @@ test('verify: fail-safe — a dead verify agent keeps the finding reportable (fl
   assert.ok(result.reportable.every((f) => f.verify && f.verify.outcome === 'unverified'), 'flagged unverified for transparency')
 })
 
+// ============== RICHER PER-CLASS LENSES + BUSINESS-LOGIC / WILDCARD (issue #25) ==============
+// The default lens set deepens to 5 (the 4 standard lenses + a business-logic / feature-abuse /
+// chaining lens), each lens carries class-specific hunt checklists, and the generalist
+// fresh-pass builder makes its first pass an explicit "wildcard / creative" angle.
+
+test('#25: default lens set is 5 and carries a business-logic / feature-abuse / chaining lens', async () => {
+  const prompts = []
+  const map = { tool: toolMissing, discovery: (p) => { prompts.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake' }, stubs: stubsFor(map) }) // no rounds -> default
+  assert.equal(prompts.length, 5, `default run should fan out 5 named lenses, got ${prompts.length}`)
+  const bl = prompts.find((p) => /business[- ]logic/i.test(p) && /feature[- ]abuse/i.test(p) && /chain/i.test(p))
+  assert.ok(bl, 'a business-logic / feature-abuse / chaining lens runs by default')
+})
+
+test('#25: lenses carry class-specific hunt checklists for the named high-miss classes', async () => {
+  const prompts = []
+  const map = { tool: toolMissing, discovery: (p) => { prompts.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake' }, stubs: stubsFor(map) })
+  const all = prompts.join('\n---\n')
+  assert.match(all, /deserializ/i, 'deserialization checklist present')
+  assert.match(all, /pickle|ObjectInputStream|Marshal|BinaryFormatter|TypeNameHandling/i, 'names concrete deserialization codecs')
+  assert.match(all, /SAML|SSO|assertion/i, 'SAML/SSO assertion-selection checklist present')
+  assert.match(all, /zip[- ]?slip|archive|tar/i, 'archive-member path-traversal checklist present')
+  assert.match(all, /169\.254\.169\.254|metadata|link-local|destination class/i, 'SSRF destination-classes checklist present')
+  assert.match(all, /shell|argv|argument/i, 'command-runner argument-type checklist present')
+  assert.match(all, /XXE|external entit|DTD/i, 'XXE feature-setup checklist present')
+})
+
+test('#25: a wildcard / creative generalist pass is produced beyond the named lenses', async () => {
+  const prompts = []
+  const map = { tool: toolMissing, discovery: (p) => { prompts.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake', rounds: 7 }, stubs: stubsFor(map) })
+  assert.equal(prompts.length, 7, '5 named lenses + 2 generalist passes')
+  const wild = prompts.find((p) => /wildcard/i.test(p) && /creativ/i.test(p))
+  assert.ok(wild, 'the first generalist fresh pass is an explicit wildcard / creative angle')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
