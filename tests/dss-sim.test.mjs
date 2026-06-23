@@ -5,6 +5,7 @@
 //   node ~/.claude/workflows/tests/dss-sim.test.mjs
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { validateSarif } from './lib/sarif-2_1_0.mjs'
 
 const SRC_PATH = new URL('../.claude/workflows/deep-security-scan.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -73,6 +74,7 @@ const toolOkNoCount = { ...toolOk, files_scanned: 0 }
 function stubsFor(map) {
   return (prompt, opts) => {
     const l = opts.label || ''
+    if (l.startsWith('prior-bundle')) { map.sawPriorLoader = true; map.priorLoaderPrompt = prompt; return map.priorLoaded ?? { ok: false, content: '', note: 'no stub' } }
     if (l.startsWith('tools:')) { map.sawTool = true; return map.tool }
     if (l.startsWith('discover:')) return map.discovery(prompt)
     if (l.startsWith('validate:')) return map.verdict ?? verdict
@@ -245,6 +247,148 @@ test('v2: report prompt — do NOT write report.md, return it as text, embed bas
   assert.ok(map.reportPrompt.includes('report_md'), 'returns markdown in report_md')
   assert.ok(/base64/i.test(map.reportPrompt), 'embeds markdown base64 (no breakout)')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
+})
+
+// ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
+// A persisted, content-addressed findings artifact alongside the HTML+md report: each finding
+// carries a stable fingerprint (file + class + normalized root-cause — NOT line numbers), and a
+// coverage doc carries a schema-level completeness + explicit exclusions. Unlocks cross-run
+// incremental dedup (args.priorBundle) and a SARIF 2.1.0 projection for external-tool interop.
+
+test('bundle: emits a sealed manifest/findings/coverage doc for persistence', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const b = result.bundle
+  assert.ok(b, 'a bundle is returned for the caller to persist')
+  assert.ok(typeof b.schema_version === 'string' && /security-bundle/.test(b.schema_version), 'bundle carries a schema_version')
+  assert.ok(b.manifest && b.manifest.tool === 'deep-security-scan', 'manifest names the tool')
+  assert.ok(Array.isArray(b.findings) && b.findings.length === 2, 'findings doc holds the confirmed findings')
+  assert.ok(b.coverage && typeof b.coverage === 'object', 'coverage doc present')
+})
+
+test('bundle: every finding carries a stable, content-addressed fingerprint', async () => {
+  const a = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const b = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const fpsA = a.result.bundle.findings.map((f) => f.fingerprint)
+  const fpsB = b.result.bundle.findings.map((f) => f.fingerprint)
+  assert.ok(fpsA.every((fp) => typeof fp === 'string' && fp.length > 0), 'fingerprints are non-empty strings')
+  assert.deepEqual([...fpsA].sort(), [...fpsB].sort(), 'same findings -> identical fingerprints across runs (stable)')
+})
+
+test('fingerprints are line-independent (line drift does not change the id)', async () => {
+  const drifted = {
+    threat_model: 'tm', files_reviewed: 5,
+    candidates: discoveryTwo.candidates.map((c) => ({ ...c, line: c.line + 957 })), // same issue, drifted lines
+  }
+  const r1 = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const r2 = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor({ tool: toolMissing, discovery: () => drifted }) })
+  const fp = (r) => r.result.bundle.findings.find((f) => f.vuln_class === 'sql-injection').fingerprint
+  assert.equal(fp(r1), fp(r2), 'fingerprint must not depend on line number (lines drift)')
+})
+
+test('coverage doc carries completeness + distinguishes "not observed" from "not scanned"', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const c = result.bundle.coverage
+  assert.ok(['complete', 'partial', 'unknown'].includes(c.completeness), 'schema-level completeness enum')
+  assert.ok(Array.isArray(c.reviewed_surfaces), 'reviewed_surfaces present')
+  assert.ok(Array.isArray(c.not_observed), 'not_observed (looked-for, none confirmed) present')
+  assert.ok(Array.isArray(c.exclusions), 'exclusions (NOT scanned) present')
+  assert.ok(c.not_observed.length > 0, 'classes reviewed-but-not-confirmed are listed as not-observed')
+  assert.notDeepEqual(c.not_observed, c.exclusions, '"not observed" and "not scanned" are distinct fields')
+})
+
+test('sarif: the findings doc projects to a valid SARIF 2.1.0 log carrying fingerprints', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const v = validateSarif(result.sarif)
+  assert.ok(v.valid, `SARIF projection must validate against 2.1.0; errors: ${v.errors.join('; ')}`)
+  const fps = new Set(result.bundle.findings.map((f) => f.fingerprint))
+  assert.equal(result.sarif.runs[0].results.length, 2, 'one SARIF result per finding')
+  for (const res of result.sarif.runs[0].results) {
+    const fp = res.partialFingerprints && res.partialFingerprints['shipFingerprint/v1']
+    assert.ok(fps.has(fp), 'every SARIF result carries a bundle fingerprint in partialFingerprints')
+  }
+})
+
+test('sarif: a zero-finding run still projects to a valid (empty-results) SARIF log', async () => {
+  const map = { tool: toolMissing, discovery: () => emptyDiscovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(result.bundle && Array.isArray(result.bundle.findings) && result.bundle.findings.length === 0, 'empty findings doc')
+  const v = validateSarif(result.sarif)
+  assert.ok(v.valid, `empty SARIF must still validate; errors: ${v.errors.join('; ')}`)
+})
+
+test('priorBundle absent: no delta, no is_new, no loader agent (full run, no behavior change)', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(result.bundle.coverage.delta == null, 'no delta without a prior bundle')
+  assert.ok(result.bundle.findings.every((f) => !('is_new' in f)), 'no is_new tag without a baseline')
+  assert.ok(result.new_findings == null, 'new_findings absent without a baseline')
+  assert.ok(!calls.agents.some((a) => (a.opts.label || '').startsWith('prior-bundle')), 'no prior-bundle loader agent when none provided')
+})
+
+test('priorBundle (object): an identical re-run carries everything over, surfaces nothing new, reports a delta', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const prior = first.result.bundle // feed the previous bundle back in
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: prior }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const b = result.bundle
+  assert.ok(b.findings.every((f) => f.is_new === false), 'identical re-run: every finding is carried-over (none new)')
+  assert.equal(result.new_findings.length, 0, 'surfaces ONLY new findings -> none on an identical re-run')
+  assert.ok(b.coverage.delta, 'coverage reports a delta vs the prior run')
+  assert.equal(b.coverage.delta.new, 0)
+  assert.equal(b.coverage.delta.carried_over, 2)
+  assert.equal(b.coverage.delta.prior_total, 2)
+})
+
+test('priorBundle: only the fingerprint absent from the prior bundle is surfaced as new', async () => {
+  // Prior run knew only the idor; the sqli is new this run.
+  const onlyIdor = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor({ tool: toolMissing, discovery: () => ({ threat_model: 't', files_reviewed: 1, candidates: [discoveryTwo.candidates[1]] }) }) })
+  const prior = onlyIdor.result.bundle
+  assert.equal(prior.findings.length, 1, 'prior bundle has exactly the idor')
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: prior }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  assert.equal(result.new_findings.length, 1, 'only the fingerprint absent from prior is surfaced as new')
+  assert.equal(result.new_findings[0].vuln_class, 'sql-injection', 'the sqli is the new one')
+  assert.equal(result.bundle.coverage.delta.new, 1)
+  assert.equal(result.bundle.coverage.delta.carried_over, 1)
+})
+
+test('priorBundle as a JSON string is parsed inline (no loader agent needed)', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const priorStr = JSON.stringify(first.result.bundle)
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: priorStr }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  assert.ok(result.bundle.coverage.delta, 'JSON-string prior bundle still yields a delta')
+  assert.equal(result.bundle.coverage.delta.carried_over, 2)
+  assert.ok(!calls.agents.some((a) => (a.opts.label || '').startsWith('prior-bundle')), 'no loader agent for an inline JSON prior bundle')
+})
+
+test('priorBundle as a path triggers a read-only loader relay; load failure is fail-open', async () => {
+  // Loader stub returns ok:false -> the run must proceed as a full (no-prior) run, not crash.
+  const map = { tool: toolMissing, discovery: () => discoveryTwo, priorLoaded: { ok: false, content: '', note: 'file not found' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: '/tmp/prior/bundle.json' }, stubs: stubsFor(map) })
+  assert.ok(map.sawPriorLoader, 'a path prior bundle is loaded via a read-only relay agent')
+  assert.ok(/cat|read/i.test(map.priorLoaderPrompt) && map.priorLoaderPrompt.includes('/tmp/prior/bundle.json'), 'loader relay reads the given path')
+  assert.ok(result.bundle.coverage.delta == null, 'a failed load is fail-open: full run, no delta (never fatal)')
+  assert.equal(result.candidates, 2, 'the scan still completes normally')
+})
+
+test('priorBundle path: a successful load dedups by fingerprint', async () => {
+  const seed = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const map = { tool: toolMissing, discovery: () => discoveryTwo, priorLoaded: { ok: true, content: JSON.stringify(seed.result.bundle), note: 'ok' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: '/tmp/prior/bundle.json' }, stubs: stubsFor(map) })
+  assert.ok(map.sawPriorLoader, 'loader ran')
+  assert.equal(result.new_findings.length, 0, 'loaded prior bundle dedups the re-run')
+  assert.equal(result.bundle.coverage.delta.carried_over, 2)
+})
+
+test('report prompt carries the bundle + SARIF for base64 embedding, and the delta when incremental', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: first.result.bundle }, stubs: stubsFor(map) })
+  assert.ok(/bundle\.json/i.test(map.reportPrompt), 'report embeds the machine-readable bundle')
+  assert.ok(/sarif/i.test(map.reportPrompt), 'report embeds the SARIF projection')
+  assert.ok(/fingerprint/i.test(map.reportPrompt), 'report explains the fingerprints')
+  assert.ok(/delta/i.test(map.reportPrompt) && /new finding/i.test(map.reportPrompt), 'incremental run leads with new findings + delta')
 })
 
 // ---- runner ----

@@ -8,6 +8,7 @@
 //   node tests/security-diff-sim.test.mjs
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { validateSarif } from './lib/sarif-2_1_0.mjs'
 
 const SRC_PATH = new URL('../.claude/workflows/security-diff-scan.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -73,6 +74,7 @@ const verdictBelow = { ...verdict, severity: 'low', reportable: false } // below
 function stubsFor(map) {
   return (prompt, opts) => {
     const l = opts.label || ''
+    if (l.startsWith('prior-bundle')) { map.sawPriorLoader = true; map.priorLoaderPrompt = prompt; map.priorLoaderOpts = opts; return map.priorLoaded ?? { ok: false, content: '', note: 'no stub' } }
     if (l === 'resolve') { map.sawResolve = true; map.resolvePrompt = prompt; map.resolveOpts = opts; return map.resolve ?? RESOLVE_LOCAL }
     if (l.startsWith('discover:')) { (map.discoverPrompts ||= []).push(prompt); (map.discoverOpts ||= []).push(opts); return map.discovery ? map.discovery(prompt) : discoveryTwo }
     if (l.startsWith('validate:')) { (map.validatePrompts ||= []).push(prompt); (map.validateOpts ||= []).push(opts); return map.verdict ?? verdict }
@@ -402,6 +404,100 @@ test('report prompt carries the scope + reportable findings for rendering', asyn
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
   assert.ok(map.reportPrompt.includes('possible sqli in db layer'), 'reportable finding title reaches the report')
   assert.ok(map.reportPrompt.includes('src/db.ts'), 'changed files reach the report')
+})
+
+// ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
+// Same cross-run findings contract as deep-security-scan, scoped to the change: each confirmed
+// in-scope finding gets a stable fingerprint (file + class + normalized root-cause, NOT the
+// line/change_ref which drift); the coverage doc distinguishes "not observed" from "not scanned";
+// args.priorBundle dedups across runs with a delta. Mirrors dss-sim's bundle suite.
+
+test('bundle: emits a sealed security-diff-scan manifest/findings/coverage doc', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  const b = result.bundle
+  assert.ok(b && /security-bundle/.test(b.schema_version), 'schema_version present')
+  assert.equal(b.manifest.tool, 'security-diff-scan', 'manifest names the diff scanner')
+  assert.ok(Array.isArray(b.findings) && b.findings.length === 2, 'findings doc holds confirmed in-scope findings')
+  assert.ok(b.findings.every((f) => f.change_ref), 'diff findings keep their change_ref anchor')
+  assert.ok(b.coverage && ['complete', 'partial', 'unknown'].includes(b.coverage.completeness), 'completeness enum')
+})
+
+test('bundle: fingerprints are stable and line/change_ref-independent', async () => {
+  const drift = {
+    threat_model: 'tm', hunks_reviewed: 2,
+    candidates: discoveryTwo.candidates.map((c) => ({ ...c, line: c.line + 500, change_ref: c.change_ref.replace(/\d+/, (n) => String(Number(n) + 500)) })),
+  }
+  const a = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, map: {} })
+  const b = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, map: { discovery: () => drift } })
+  const fp = (r) => r.result.bundle.findings.find((f) => f.vuln_class === 'sql-injection').fingerprint
+  assert.equal(fp(a), fp(b), 'fingerprint ignores line + change_ref drift')
+})
+
+test('bundle: coverage distinguishes "not observed" from "not scanned" exclusions', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  const c = result.bundle.coverage
+  assert.ok(Array.isArray(c.not_observed) && c.not_observed.length > 0, 'not_observed lists reviewed-but-unconfirmed classes')
+  assert.ok(Array.isArray(c.exclusions) && c.exclusions.some((e) => /unchanged code/i.test(e)), 'exclusions name unchanged code (not scanned)')
+  assert.notDeepEqual(c.not_observed, c.exclusions, 'distinct fields')
+})
+
+test('sarif: the diff findings doc projects to a valid SARIF 2.1.0 log', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  const v = validateSarif(result.sarif)
+  assert.ok(v.valid, `SARIF must validate; errors: ${v.errors.join('; ')}`)
+  const fps = new Set(result.bundle.findings.map((f) => f.fingerprint))
+  for (const res of result.sarif.runs[0].results) assert.ok(fps.has(res.partialFingerprints['shipFingerprint/v1']), 'SARIF result carries the fingerprint')
+})
+
+test('priorBundle absent: no delta, no is_new, no loader agent', async () => {
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  assert.ok(result.bundle.coverage.delta == null, 'no delta without a prior')
+  assert.ok(result.bundle.findings.every((f) => !('is_new' in f)))
+  assert.ok(result.new_findings == null)
+  assert.ok(!calls.agents.some((a) => (a.opts.label || '').startsWith('prior-bundle')))
+})
+
+test('priorBundle (object): identical re-run carries over, surfaces nothing new, reports a delta', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: first.result.bundle }, map: {} })
+  assert.ok(result.bundle.findings.every((f) => f.is_new === false))
+  assert.equal(result.new_findings.length, 0, 'surfaces only new -> none on an identical re-run')
+  assert.equal(result.bundle.coverage.delta.carried_over, 2)
+  assert.equal(result.bundle.coverage.delta.new, 0)
+})
+
+test('priorBundle: only the fingerprint absent from prior is surfaced as new', async () => {
+  const onlyIdor = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, map: { discovery: () => ({ threat_model: 't', hunks_reviewed: 1, candidates: [discoveryTwo.candidates[1]] }) } })
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: onlyIdor.result.bundle }, map: {} })
+  assert.equal(result.new_findings.length, 1)
+  assert.equal(result.new_findings[0].vuln_class, 'sql-injection')
+  assert.equal(result.bundle.coverage.delta.new, 1)
+  assert.equal(result.bundle.coverage.delta.carried_over, 1)
+})
+
+test('priorBundle as a path triggers a read-only loader relay (Explore) — fail-open', async () => {
+  const map = { priorLoaded: { ok: false, content: '', note: 'missing' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: '/tmp/prior/bundle.json' }, map })
+  assert.ok(map.sawPriorLoader, 'path prior bundle is loaded via a relay')
+  assert.equal(map.priorLoaderOpts.agentType, 'Explore', 'loader runs read-only')
+  assert.ok(result.bundle.coverage.delta == null, 'failed load is fail-open (full run, no delta)')
+})
+
+test('no-change-in-scope still emits a bundle (unknown completeness, no misleading delta)', async () => {
+  const map = { resolve: RESOLVE_EMPTY, priorLoaded: { ok: true, content: '{"findings":[{"fingerprint":"scf1:abc"}]}', note: 'ok' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: '/tmp/p.json' }, map })
+  assert.ok(result.bundle, 'a bundle is emitted even when nothing was in scope')
+  assert.equal(result.bundle.coverage.completeness, 'unknown', 'nothing scanned -> unknown')
+  assert.ok(result.bundle.coverage.delta == null, 'no delta computed when nothing was scanned (prior not falsely "resolved")')
+  assert.equal(result.bundle.findings.length, 0)
+})
+
+test('report prompt carries the bundle + SARIF and the delta when incremental', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: first.result.bundle }, map })
+  assert.ok(/bundle\.json/i.test(map.reportPrompt) && /sarif/i.test(map.reportPrompt))
+  assert.ok(/delta/i.test(map.reportPrompt) && /new finding/i.test(map.reportPrompt))
 })
 
 // ---- runner ----

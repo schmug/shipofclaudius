@@ -7,6 +7,7 @@
 //   node ~/.claude/workflows/tests/defense-scan.test.mjs
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { validateSarif } from './lib/sarif-2_1_0.mjs'
 
 const SRC_PATH = new URL('../.claude/workflows/defense-scan.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -80,9 +81,12 @@ const L6_RAN = {
 }
 const L6_MISSING = { ran: false, status: 'not-installed', tool_version: '', target: 'github.com/acme/widget', note: 'scorecard not installed', findings: [] }
 
+const L2_RAN_EMPTY = { ran: true, status: 'ran', tool_version: '0.1.1', target: '/tmp/fake', note: 'scanned, nothing found', findings: [], inventory: [] }
+
 function stubsFor(map) {
   return (prompt, opts) => {
     const l = opts.label || ''
+    if (l.startsWith('prior-bundle')) { map.sawPriorLoader = true; map.priorLoaderPrompt = prompt; return map.priorLoaded ?? { ok: false, content: '', note: 'no stub' } }
     if (l.startsWith('layer2')) { map.sawL2 = true; map.l2Prompt = prompt; if (map.l2Throws) throw new Error('bumblebee blew up'); return map.l2 ?? L2_MISSING }
     if (l.startsWith('layer3')) { map.sawL3 = true; map.l3Prompt = prompt; return map.l3 ?? L3_RAN }
     if (l.startsWith('layer4')) { map.sawL4 = true; map.l4Prompt = prompt; return map.l4 ?? L4_RAN }
@@ -497,6 +501,94 @@ test('report prompt: subagent must NOT write report.md, returns it as text, embe
   assert.ok(map.reportPrompt.includes('report_md'), 'must return markdown in the report_md field')
   assert.ok(/base64/i.test(map.reportPrompt), 'embeds the markdown base64-encoded (no breakout)')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'HTML carries a client-side download affordance')
+})
+
+// ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
+// The defense-scan bundle AGGREGATES the merged findings across every layer. Its coverage doc
+// maps RAN-with-0-findings layers to "not observed" and SKIPPED/DISABLED/ERROR layers to
+// "not scanned" exclusions — the per-layer status the orchestrator already tracks. The existing
+// top-level `coverage` array (per-layer strings) is preserved; the bundle's coverage doc is nested.
+
+test('bundle: emits a sealed defense-scan manifest/findings/coverage doc (additive to coverage[])', async () => {
+  const map = { l2: L2_RAN }
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  assert.ok(Array.isArray(result.coverage), 'existing per-layer coverage[] array preserved')
+  const b = result.bundle
+  assert.ok(b && /security-bundle/.test(b.schema_version), 'schema_version present')
+  assert.equal(b.manifest.tool, 'defense-scan', 'manifest names the orchestrator')
+  // L1 (2 reportable) + L2_RAN (1) = 3 merged findings
+  assert.equal(b.findings.length, 3, 'findings doc aggregates all layers')
+  assert.ok(b.findings.every((f) => typeof f.fingerprint === 'string' && f.fingerprint), 'every merged finding is fingerprinted')
+  assert.ok(b.findings.every((f) => f.layer), 'each finding keeps its layer provenance')
+})
+
+test('bundle: fingerprints are stable across identical runs', async () => {
+  const a = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_RAN } })
+  const b = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_RAN } })
+  assert.deepEqual(
+    a.result.bundle.findings.map((f) => f.fingerprint).sort(),
+    b.result.bundle.findings.map((f) => f.fingerprint).sort(),
+    'same merged findings -> identical fingerprints'
+  )
+})
+
+test('coverage doc: RAN-with-0-findings -> not_observed; SKIPPED/MISSING layer -> exclusions (not scanned)', async () => {
+  // L2 ran but found nothing (not observed); L3/L4/L5/L6 are skipped (not scanned).
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_RAN_EMPTY } })
+  const c = result.bundle.coverage
+  assert.ok(['complete', 'partial', 'unknown'].includes(c.completeness))
+  assert.ok(c.not_observed.some((s) => /L2/.test(s)), 'a layer that ran with no findings is "not observed"')
+  assert.ok(c.exclusions.some((s) => /L3|L4|L5|L6/.test(s) && /not scanned/i.test(s)), 'skipped layers are "not scanned" exclusions')
+  assert.notDeepEqual(c.not_observed, c.exclusions, '"not observed" and "not scanned" are distinct fields')
+})
+
+test('sarif: the merged findings doc projects to a valid SARIF 2.1.0 log', async () => {
+  const map = { l2: L2_RAN }
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  const v = validateSarif(result.sarif)
+  assert.ok(v.valid, `SARIF must validate; errors: ${v.errors.join('; ')}`)
+  const fps = new Set(result.bundle.findings.map((f) => f.fingerprint))
+  for (const res of result.sarif.runs[0].results) assert.ok(fps.has(res.partialFingerprints['shipFingerprint/v1']), 'SARIF result carries the fingerprint')
+})
+
+test('priorBundle absent: no delta, no is_new, no loader agent', async () => {
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_RAN } })
+  assert.ok(result.bundle.coverage.delta == null)
+  assert.ok(result.bundle.findings.every((f) => !('is_new' in f)))
+  assert.ok(result.new_findings == null)
+  assert.ok(!calls.agents.some((a) => (a.opts.label || '').startsWith('prior-bundle')))
+})
+
+test('priorBundle (object): identical re-run carries over, surfaces nothing new, reports a delta', async () => {
+  const first = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_RAN } })
+  const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: first.result.bundle }, map: { l2: L2_RAN } })
+  assert.ok(result.bundle.findings.every((f) => f.is_new === false), 'all carried over on identical re-run')
+  assert.equal(result.new_findings.length, 0)
+  assert.equal(result.bundle.coverage.delta.carried_over, 3)
+  assert.equal(result.bundle.coverage.delta.new, 0)
+})
+
+test('priorBundle: a new layer finding (absent from prior) is surfaced as new', async () => {
+  // Prior run had only L1 (L2 missing); this run adds L2's finding -> 1 new.
+  const prior = await runScript({ args: { target: '/tmp/fake' }, map: { l2: L2_MISSING } })
+  const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: prior.result.bundle }, map: { l2: L2_RAN } })
+  assert.equal(result.new_findings.length, 1, 'only the new L2 finding is surfaced')
+  assert.ok(result.new_findings[0].title.includes('lodash'))
+  assert.equal(result.bundle.coverage.delta.new, 1)
+})
+
+test('priorBundle as a path triggers a loader relay (fail-open)', async () => {
+  const map = { l2: L2_RAN, priorLoaded: { ok: false, content: '', note: 'missing' } }
+  const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: '/tmp/p.json' }, map })
+  assert.ok(map.sawPriorLoader, 'path prior bundle loaded via a relay')
+  assert.ok(result.bundle.coverage.delta == null, 'failed load is fail-open')
+})
+
+test('report prompt carries the bundle + SARIF for embedding', async () => {
+  const map = { l2: L2_RAN }
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  assert.ok(/bundle\.json/i.test(map.reportPrompt) && /sarif/i.test(map.reportPrompt))
+  assert.ok(/fingerprint/i.test(map.reportPrompt))
 })
 
 // ---- runner ----
