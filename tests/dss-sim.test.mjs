@@ -32,20 +32,24 @@ async function runScript({ args, stubs }) {
   const calls = { phases: [], logs: [], agents: [] }
   let validateInFlight = 0
   let maxValidateInFlight = 0
+  let verifyInFlight = 0
+  let maxVerifyInFlight = 0
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const isValidate = (opts.label || '').startsWith('validate:')
+    const isVerify = (opts.label || '').startsWith('verify:')
     if (isValidate) { validateInFlight++; maxValidateInFlight = Math.max(maxValidateInFlight, validateInFlight) }
+    if (isVerify) { verifyInFlight++; maxVerifyInFlight = Math.max(maxVerifyInFlight, verifyInFlight) }
     await new Promise((r) => setTimeout(r, 2)) // let concurrency overlap
-    try { return await stubs(prompt, opts) } finally { if (isValidate) validateInFlight-- }
+    try { return await stubs(prompt, opts) } finally { if (isValidate) validateInFlight--; if (isVerify) verifyInFlight-- }
   }
   const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
   const result = await fn(args, undefined, agent, parallel, null, phase, log, null)
-  return { result, calls, maxValidateInFlight: () => maxValidateInFlight }
+  return { result, calls, maxValidateInFlight: () => maxValidateInFlight, maxVerifyInFlight: () => maxVerifyInFlight }
 }
 
 // ---- canned data ----
@@ -71,6 +75,24 @@ const toolOk = {
 const toolMissing = { ran: false, tool_version: '', files_scanned: 0, note: 'foxguard not installed', candidates: [] }
 const toolOkNoCount = { ...toolOk, files_scanned: 0 }
 
+// ---- canned factual-verification verdicts (Verify phase grounds each reportable finding) ----
+const verifyOk = {
+  outcome: 'verified',
+  grounding: { file_exists: true, line_matches: true, root_cause_present: true, payload_reaches_sink: true, fix_closes_hole: true },
+  revalidated: true, rationale: 'every cited fact checks out against the source', evidence: 'lines match the described sink',
+}
+const verifyCorrected = {
+  outcome: 'corrected',
+  grounding: { file_exists: true, line_matches: false, root_cause_present: true, payload_reaches_sink: true, fix_closes_hole: true },
+  corrected_fields: { line: 99 },
+  revalidated: true, rationale: 'line was off; re-traced the corrected source->sink, still holds', evidence: 'real sink at line 99',
+}
+const verifyRejected = {
+  outcome: 'rejected',
+  grounding: { file_exists: true, line_matches: false, root_cause_present: false, payload_reaches_sink: false, fix_closes_hole: false },
+  revalidated: false, rationale: 'cited sink does not exist at that location — confidently-wrong citation', evidence: 'no such call in the file',
+}
+
 function stubsFor(map) {
   return (prompt, opts) => {
     const l = opts.label || ''
@@ -78,6 +100,13 @@ function stubsFor(map) {
     if (l.startsWith('tools:')) { map.sawTool = true; return map.tool }
     if (l.startsWith('discover:')) return map.discovery(prompt)
     if (l.startsWith('validate:')) return map.verdict ?? verdict
+    if (l.startsWith('verify:')) {
+      ;(map.verifyPrompts ||= []).push(prompt)
+      ;(map.verifyOpts ||= []).push(opts)
+      if (typeof map.verify === 'function') return map.verify(prompt)
+      if ('verify' in map) return map.verify // explicit value (incl. null = agent died)
+      return verifyOk
+    }
     if (l === 'report') {
       map.reportPrompt = prompt; map.reportOpts = opts
       // 'report' in map lets a test force an explicit null (agent-died case); otherwise default.
@@ -389,6 +418,132 @@ test('report prompt carries the bundle + SARIF for base64 embedding, and the del
   assert.ok(/sarif/i.test(map.reportPrompt), 'report embeds the SARIF projection')
   assert.ok(/fingerprint/i.test(map.reportPrompt), 'report explains the fingerprints')
   assert.ok(/delta/i.test(map.reportPrompt) && /new finding/i.test(map.reportPrompt), 'incremental run leads with new findings + delta')
+})
+
+// ================= VERIFY (independent factual-grounding gate: after Validate, before Report) =================
+// Distinct from the disprove-first validator: validation asks "is it exploitable?", verification
+// asks "is this finding factually true about the code?" — grounding file/line/root-cause/payload/fix.
+
+test('verify: one Verify agent grounds each reportable finding, AFTER Validate and BEFORE Report', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  const verifyCalls = calls.agents.filter((a) => (a.opts.label || '').startsWith('verify:'))
+  assert.equal(verifyCalls.length, result.reportable.length, 'one verify agent per reportable finding')
+  assert.ok(calls.phases.indexOf('Verify') > calls.phases.indexOf('Validate'), 'Verify runs after Validate')
+  assert.ok(calls.phases.indexOf('Report') > calls.phases.indexOf('Verify'), 'Verify runs before Report')
+})
+
+test('verify: schema returns verified|corrected|rejected with per-fact grounding evidence', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.ok(map.verifyOpts && map.verifyOpts[0] && map.verifyOpts[0].schema, 'verify agent uses structured output')
+  const schema = map.verifyOpts[0].schema
+  assert.deepEqual(schema.properties.outcome.enum, ['verified', 'corrected', 'rejected'], 'outcome trichotomy')
+  const g = schema.properties.grounding.properties
+  for (const k of ['file_exists', 'line_matches', 'root_cause_present', 'payload_reaches_sink', 'fix_closes_hole']) {
+    assert.ok(g[k], `grounding schema checks ${k}`)
+  }
+})
+
+test('verify: a verified finding is reported as-is in the reconciled set, carrying its grounding verdict', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo, verify: verifyOk }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.equal(result.reportable.length, 2, 'both verified findings stay reportable')
+  assert.ok(result.reportable.every((f) => f.verify && f.verify.outcome === 'verified'), 'each reportable finding carries its grounding verdict')
+})
+
+test('verify: a non-existent sink is REJECTED — dropped from reportable, kept in the appendix (invariant intact)', async () => {
+  const map = {
+    tool: toolMissing, discovery: () => discoveryTwo,
+    verify: (p) => (p.includes('sqli') ? verifyRejected : verifyOk),
+  }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.ok(!result.reportable.some((f) => f.vuln_class === 'sql-injection'), 'the factually-wrong finding is NOT reported as-is')
+  assert.equal(result.reportable.length, 1, 'only the grounded finding remains reportable')
+  assert.equal(result.reportable.length + result.appendix_count, result.candidates, 'rejected moved to appendix — no candidate lost')
+})
+
+test('verify: a wrong-line finding is CORRECTED — reported with patched fields, re-validated, not as-is', async () => {
+  const corrected = { ...verifyCorrected, corrected_fields: { line: 99, sink: 'db.exec' } }
+  const map = {
+    tool: toolMissing, discovery: () => discoveryTwo,
+    verify: (p) => (p.includes('sqli') ? corrected : verifyOk),
+  }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  const sqli = result.reportable.find((f) => f.vuln_class === 'sql-injection')
+  assert.ok(sqli, 'corrected finding is still reported (real vuln, fixed citation)')
+  assert.equal(sqli.line, 99, 'the corrected line overwrites the original')
+  assert.equal(sqli.sink, 'db.exec', 'the corrected sink overwrites the original')
+  assert.equal(sqli.verify.outcome, 'corrected', 'the correction is auditable on the finding')
+  assert.ok(sqli.verify.revalidated, 'corrected fields were re-validated, not just edited')
+})
+
+test('verify: prompt grounds facts (file/line/root-cause/sink/fix), trace-only, with mandatory re-validation', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  const prompts = map.verifyPrompts || []
+  assert.ok(prompts.length > 0)
+  assert.ok(prompts.every((p) => /do NOT build/i.test(p)), 'trace-only / read-only posture')
+  assert.ok(prompts.every((p) => /factual/i.test(p)), 'grounds facts, not exploitability')
+  assert.ok(prompts.every((p) => /re-?validate|re-?trace/i.test(p)), 'corrected must be re-validated')
+  for (const fact of ['file', 'line', 'root cause', 'sink', 'fix']) {
+    assert.ok(prompts.every((p) => p.toLowerCase().includes(fact)), `grounds the ${fact}`)
+  }
+})
+
+test('verify: is distinct from the exploitability validator — it does not re-decide exploitability', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  const prompts = map.verifyPrompts || []
+  assert.ok(prompts.length > 0)
+  assert.ok(prompts.every((p) => /NOT the exploitability validator|already (judged|validated)/i.test(p)), 'verify grounds facts; exploitability was decided in Validate')
+})
+
+test('verify: runs in chunks of <=8 concurrent verifiers', async () => {
+  const many = {
+    threat_model: 'tm', files_reviewed: 5,
+    candidates: Array.from({ length: 20 }, (_, i) => ({
+      title: `finding ${i}`, file: `src/f${i}.ts`, line: 10, vuln_class: 'xss', source: 's', sink: 'k', why: 'w',
+    })),
+  }
+  const map = { tool: toolMissing, discovery: () => many }
+  const { maxVerifyInFlight } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.ok(maxVerifyInFlight() <= 8, `max concurrent verifiers was ${maxVerifyInFlight()}, want <=8`)
+})
+
+test('verify: report consumes the reconciled set; rejected appears in the appendix with a verification reason', async () => {
+  const map = {
+    tool: toolMissing, discovery: () => discoveryTwo,
+    verify: (p) => (p.includes('idor') ? verifyRejected : verifyOk),
+  }
+  await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.ok(/idor on \/api\/items/.test(map.reportPrompt), 'rejected finding visible in the report appendix input')
+  assert.ok(/verification-rejected/i.test(map.reportPrompt), 'tagged verification-rejected so suppression is auditable')
+})
+
+test('verify: report prompt states the findings are factually grounded and corrected items are an audit trail', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(/factual/i.test(map.reportPrompt) && /verif/i.test(map.reportPrompt), 'report told the findings are factually grounded')
+  assert.ok(/corrected/i.test(map.reportPrompt), 'report told to note corrected findings (audit trail)')
+})
+
+test('verify: additive return key verify_counts tallies verified/corrected/rejected', async () => {
+  const map = {
+    tool: toolMissing, discovery: () => discoveryTwo,
+    verify: (p) => (p.includes('sqli') ? verifyRejected : verifyOk),
+  }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.ok(result.verify_counts, 'verify_counts present (additive return key)')
+  assert.equal(result.verify_counts.rejected, 1, 'one rejected')
+  assert.equal(result.verify_counts.verified, 1, 'one verified')
+})
+
+test('verify: fail-safe — a dead verify agent keeps the finding reportable (flagged unverified), never silently dropped', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo, verify: null }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1 }, stubs: stubsFor(map) })
+  assert.equal(result.reportable.length, 2, 'a verify agent that dies must not suppress a real finding')
+  assert.ok(result.reportable.every((f) => f.verify && f.verify.outcome === 'unverified'), 'flagged unverified for transparency')
 })
 
 // ---- runner ----
