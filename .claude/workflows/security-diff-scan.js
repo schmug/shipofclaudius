@@ -59,7 +59,8 @@ export const meta = {
     { title: 'Resolve', detail: 'resolve the change ONCE into the exact changed files + hunks (read-only relay; local git range/working tree, or a PR via gh — PR diff & text nonce-fenced)' },
     { title: 'Discovery', detail: 'K independent workers, each a distinct threat-model lens, hunt candidates ONLY in the change in parallel' },
     { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge; a change-scope gate drops pre-existing issues the change does not touch' },
-    { title: 'Report', detail: 'synthesize one HTML + markdown report from confirmed, in-scope findings, with a coverage statement of which files/hunks were reviewed' },
+    { title: 'Verify', detail: 'one fresh read-only agent per reportable finding GROUNDS it against the diff/source (file/line/root-cause/payload/fix) -> verified|corrected|rejected' },
+    { title: 'Report', detail: 'synthesize one HTML + markdown report from the reconciled, factually-grounded in-scope findings, with a coverage statement of which files/hunks were reviewed' },
   ],
 }
 
@@ -331,6 +332,51 @@ function buildBundle(confirmed, ctx) {
   return { bundle, sarif: buildSarif('security-diff-scan', findings), newFindings }
 }
 
+// Verify (factual grounding) schema. Distinct from VALIDATION_SCHEMA: validation decides
+// EXPLOITABILITY + change-scope ("is it real/reachable/abusable AND caused by the change?");
+// verification decides FACTUAL ACCURACY ("is this finding true about the code/diff as written?").
+// Outcomes verified|corrected|rejected; a `corrected` finding must be RE-VALIDATED (the patched
+// facts re-traced against the diff), never just edited. It does NOT re-decide change-scope.
+const VERIFY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['outcome', 'grounding', 'rationale'],
+  properties: {
+    outcome: { type: 'string', enum: ['verified', 'corrected', 'rejected'], description: 'verified=every cited fact (file, line, change_ref hunk, root cause, source->sink, fix) checks out against the diff/source as stated; corrected=a fact was wrong (wrong line, mis-quoted sink, wrong change_ref, mis-stated fix) BUT the underlying vulnerability is still real after patching the fields AND re-tracing it against the diff — put the patched values in corrected_fields and set revalidated=true; rejected=the finding is factually wrong in a way that means there is NO real reportable vulnerability (cited code does not match the description, the sink does not exist, the cited hunk does not contain the described change, the root cause is absent, a skipped precondition makes it unreachable, or the proposed fix shows the hole was never open).' },
+    grounding: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['file_exists', 'line_matches', 'root_cause_present', 'payload_reaches_sink', 'fix_closes_hole'],
+      properties: {
+        file_exists: { type: 'boolean', description: 'The cited file actually exists at the given repo-relative path.' },
+        line_matches: { type: 'boolean', description: 'The cited line number(s) and change_ref hunk actually contain the changed code the finding describes.' },
+        root_cause_present: { type: 'boolean', description: 'The described root cause / vulnerable construct is really present in the changed code (not misread or hallucinated).' },
+        payload_reaches_sink: { type: 'boolean', description: 'The attacker source/payload reaches the named sink/endpoint/method as claimed, with no silently-skipped precondition.' },
+        fix_closes_hole: { type: 'boolean', description: 'The proposed fix actually closes the hole without breaking legitimate behavior.' },
+      },
+    },
+    corrected_fields: {
+      type: 'object',
+      additionalProperties: false,
+      description: 'ONLY when outcome=corrected: the patched field values to overwrite on the finding. Include only what changed; omit for verified|rejected.',
+      properties: {
+        title: { type: 'string' },
+        file: { type: 'string' },
+        line: { type: 'integer' },
+        vuln_class: { type: 'string' },
+        change_ref: { type: 'string' },
+        source: { type: 'string' },
+        sink: { type: 'string' },
+        severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'] },
+        fix: { type: 'string' },
+      },
+    },
+    revalidated: { type: 'boolean', description: 'For outcome=corrected: true ONLY if you RE-TRACED the corrected source->sink against the diff and the vulnerability still holds (a correction that is not re-validated is not a correction). For verified: true. For rejected: false.' },
+    rationale: { type: 'string', description: 'The decisive grounding result: which facts checked out, which were wrong, and — for corrected — exactly what you changed and why the re-traced finding still holds; for rejected — the decisive factual error.' },
+    evidence: { type: 'string', description: 'The grounding proof: the exact diff/source lines you read (quoted/cited) showing the finding is / is not factually true.' },
+  },
+}
+
 // ============================ Phase 1 — RESOLVE the change once ============================
 // One read-only agent acts as the diff RELAY: it runs FIXED git/gh commands, transcribes the
 // (untrusted) diff + PR text verbatim with a fresh nonce, and enumerates the changed files for
@@ -546,12 +592,84 @@ Return the structured object.`,
 }
 
 const verdicts = validated.filter(Boolean)
-const reportable = verdicts.filter((v) => v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)
 const sevRank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
+const confirmedReportable = verdicts.filter((v) => v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)
+const validationAppendix = verdicts.filter((v) => !(v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)) // refuted / needs-info / out-of-scope / below-threshold
+log(`Validation: ${confirmedReportable.length} reportable, ${validationAppendix.length} reviewed-not-reported.`)
+
+// ============================ Phase 3.5 — independent factual VERIFICATION (grounding) ============================
+// A FRESH read-only agent grounds each confirmed in-scope finding against the diff/source: file
+// exists, line/change_ref matches, root cause present, payload reaches a real sink, fix closes the
+// hole. This is the "is the finding factually TRUE about the code?" gate — distinct from
+// validation's "is it exploitable AND caused by the change?" gate — and catches the
+// confidently-wrong-citation class the validator is not looking for. Runs ONLY on the (already
+// small, post-threshold) reportable set; chunk-of-8 like validation; reasons over the SAME fenced
+// CHANGE_BLOCK (no re-fetch) under the read-only agentType. Note (#22): when a separate Severity
+// stage is extracted, Verify must run BEFORE it so severity is calibrated on grounded facts.
+phase('Verify')
+const VERIFY_CHUNK = 8
+const verifyResults = []
+for (let i = 0; i < confirmedReportable.length; i += VERIFY_CHUNK) {
+  const chunk = confirmedReportable.slice(i, i + VERIFY_CHUNK)
+  log(`Verifying (grounding) reportable findings ${i + 1}-${i + chunk.length} of ${confirmedReportable.length}.`)
+  const results = await parallel(
+    chunk.map((c) => () =>
+      agent(
+        `You are an INDEPENDENT FACTUAL-VERIFICATION agent grounding ONE already-validated security finding against the actual change/source. You are NOT the exploitability validator — a separate skeptical validator already judged this finding real, exploitable, AND caused by the change; do NOT re-decide exploitability, change-scope, or severity. Your ONE job is to confirm the finding is FACTUALLY TRUE ABOUT THE CODE as written. Work from the repo at "${TARGET}". You are READ-ONLY and TRACE-ONLY.
+
+${CHANGE_BLOCK}
+
+The finding to ground (already confirmed exploitable + in change scope; severity ${c.severity}):
+- id:    ${c.id}
+- title: ${c.title}
+- file:  ${c.file}:${c.line || '?'}
+- class: ${c.vuln_class}
+- change_ref: ${c.change_ref || '?'}  (introduced: ${c.introduced || '?'})
+- source/sink: ${c.source || '?'} -> ${c.sink || '?'}
+- attacker story: ${c.attacker_story || '(none)'}
+- evidence: ${c.evidence || '(none)'}
+- proposed fix: ${c.fix || '(none)'}
+
+Ground every cited fact against the fenced diff and the local files it reaches:
+1. Locate the cited change_ref/line in the fenced diff above and ${MODE === 'pr' ? 'the local base files' : 'the changed files'} it reaches. Never conclude on a location you have not read. TRACE-ONLY: do NOT build, test, run, or start servers (read-only shell — rg, ls, git grep, git show — is fine).
+2. Check each fact and report it in grounding: (a) file_exists — the path resolves; (b) line_matches — the cited line(s) AND change_ref hunk actually contain the described changed code; (c) root_cause_present — the described vulnerable construct is really there, not a misread or hallucinated sink; (d) payload_reaches_sink — the source/payload reaches the named sink/endpoint/method and no precondition was silently skipped; (e) fix_closes_hole — the proposed fix actually closes the hole without breaking legitimate behavior.
+3. Decide the OUTCOME:
+   - verified: every fact checks out as stated — report it as-is.
+   - corrected: a fact is wrong (wrong line, slightly mis-quoted sink, wrong change_ref, mis-stated fix) BUT the underlying vulnerability is still real once you patch the fields. Put the patched values in corrected_fields, then RE-VALIDATE: re-trace the corrected source->sink against the diff to confirm the finding STILL holds with the corrected facts (a correction that is not re-traced is not a correction) and set revalidated=true.
+   - rejected: the finding is factually wrong in a way that means there is NO real reportable vulnerability — the cited code does not match the description, the sink does not exist, the cited hunk does not contain the described change, the root cause is absent, a skipped precondition makes it unreachable, or the "fix" reveals the hole was never open.
+A finding citing a wrong line or a non-existent sink must be corrected or rejected, NEVER reported as-is. Return the structured object.`,
+        { label: `verify:${c.id}`, phase: 'Verify', agentType: READONLY_AGENT, schema: VERIFY_SCHEMA }
+      ).then((v) => ({ finding: c, verify: v }))
+    )
+  )
+  verifyResults.push(...results)
+}
+
+// Reconcile: verified/corrected stay reportable (corrected with patched fields merged);
+// rejected is moved to the appendix so the suppression stays auditable. A dead verify agent
+// (null) keeps the finding reportable, flagged "unverified" — never silently dropped.
+const verify_counts = { verified: 0, corrected: 0, rejected: 0, unverified: 0 }
+const reportable = []
+const verifyRejected = []
+for (const { finding, verify } of verifyResults) {
+  if (!verify) {
+    verify_counts.unverified++
+    reportable.push({ ...finding, verify: { outcome: 'unverified', rationale: 'verify agent returned no result; kept reportable, not silently dropped' } })
+  } else if (verify.outcome === 'rejected') {
+    verify_counts.rejected++
+    verifyRejected.push({ ...finding, verify })
+  } else if (verify.outcome === 'corrected') {
+    verify_counts.corrected++
+    reportable.push({ ...finding, ...(verify.corrected_fields || {}), verify })
+  } else {
+    verify_counts.verified++
+    reportable.push({ ...finding, verify })
+  }
+}
 reportable.sort((a, b) => (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9))
 const counts = reportable.reduce((m, v) => ((m[v.severity] = (m[v.severity] || 0) + 1), m), {})
-const appendix = verdicts.filter((v) => !(v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)) // refuted / needs-info / out-of-scope / below-threshold
-log(`Validation: ${reportable.length} reportable, ${appendix.length} reviewed-not-reported. Severity: ${JSON.stringify(counts)}.`)
+const appendix = validationAppendix.concat(verifyRejected) // refuted / needs-info / out-of-scope / below-threshold / verification-rejected
+log(`Verification: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (agent died)` : ''}. Reportable now ${reportable.length}; appendix ${appendix.length}. Severity: ${JSON.stringify(counts)}.`)
 
 // ---- Sealed bundle (issue #21): fingerprinted findings doc + coverage doc + SARIF, built from
 // the confirmed in-scope set BEFORE the report so the agent can embed them and lead with what's
@@ -580,13 +698,15 @@ const REPORT_SCHEMA = {
 const reportResult = await agent(
   `You are writing the final report for a CHANGE-SCOPED security review of ${SCOPE} (repo at "${TARGET}").
 
-Reportable findings (confirmed, in change scope, at/above the ${THRESHOLD} threshold), highest severity first:
+Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/change_ref/root-cause/payload/fix against the actual diff/source. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}.
+
+Reportable findings (confirmed, in change scope, factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each carries a "verify" object with its grounding outcome; for any with verify.outcome="corrected", render the corrected facts in the body AND note the correction (what changed) as an audit trail so the edit is traceable:
 ${JSON.stringify(reportable, null, 2)}
 
-Reviewed-but-not-reported (refuted / needs-info / out-of-change-scope / below threshold) — these go in an appendix so suppression is visible, NOT deleted:
-${JSON.stringify(appendix.map((v) => ({ title: v.title, file: v.file, line: v.line, change_ref: v.change_ref, disposition: v.disposition, severity: v.severity, in_change_scope: v.in_change_scope, reason: v.evidence || v.proof_gap || v.rationale })), null, 2)}
+Reviewed-but-not-reported — refuted / needs-info / out-of-change-scope / below threshold, plus VERIFICATION-REJECTED findings (validated as exploitable but factually wrong about the code). These go in an appendix so suppression is visible, NOT deleted:
+${JSON.stringify(appendix.map((v) => ({ title: v.title, file: v.file, line: v.line, change_ref: v.change_ref, disposition: v.disposition, severity: v.severity, in_change_scope: v.in_change_scope, reason: v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}` : (v.evidence || v.proof_gap || v.rationale) })), null, 2)}
 
-Coverage facts (render the COVERAGE STATEMENT verbatim): ${COVERAGE}
+Coverage facts (render the COVERAGE STATEMENT verbatim): ${COVERAGE} Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected.
 ${WORKERS.length} independent discovery workers ran (lenses + threat models below), ~${hunksReviewed} hunk-reviews total, ${unique.length} unique candidates after merge.
 Changed files in scope:
 ${JSON.stringify(changedFiles.map((f) => ({ path: f.path, status: f.status || '', additions: f.additions || 0, deletions: f.deletions || 0, hunks: (f.hunk_headers || []).length })), null, 2)}
@@ -640,6 +760,7 @@ return {
   counts,
   reportable,
   appendix_count: appendix.length,
+  verify_counts, // factual-grounding gate tallies: verified / corrected / rejected / unverified (additive)
   // First-class so the caller can persist report.md deterministically (subagents can't write it):
   report_dir: reportDir,
   report_html: reportHtml,
