@@ -14,7 +14,8 @@
 //                  args: { target: ".", scope: "the whole repo", rounds: 4 } })
 //   - args.target:    repo root or subpath to audit (default ".").
 //   - args.scope:     human description of scope (default: the whole repo at target).
-//   - args.rounds:    number of independent discovery workers (default 4, or budget-scaled).
+//   - args.rounds:    number of independent discovery workers (default 5 = one per default
+//                     lens, or budget-scaled).
 //   - args.lenses:    optional array of custom threat-model lenses (overrides defaults).
 //   - args.threshold: min severity to report — critical|high|medium|low|info (default "low").
 //   - args.tools:     deterministic prefilter tools to run before discovery
@@ -53,28 +54,46 @@ const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
 const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
-const HAS_BUDGET = (typeof budget !== 'undefined' && budget && budget.total)
-const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budget.total / 120000))) : 4)
-const TOOLS = Array.isArray(A.tools) ? A.tools : ['foxguard']
-const TOOL_SEVERITY = (A.toolSeverity || 'low').toLowerCase()
 
 // Diverse default lenses — each worker hunts hardest within its lens, which is what makes
 // the independent passes find DIFFERENT things instead of redundantly re-finding the same.
+// Each lens now carries a class-specific HUNT CHECKLIST for the high-miss classes a generic
+// scanner skims (deserialization codecs, SAML assertion-selection, archive-member traversal,
+// SSRF destination classes, command-runner argument types, XXE parser setup), and a fifth
+// lens makes business-logic / feature-abuse / chained exploits first-class — the marginal
+// recall is there, not in the standard injection/authz checklist every scanner already runs.
+// Lenses stay INDEPENDENT: none references another's output, which is what drives the recall win.
 const DEFAULT_LENSES = [
-  'Injection & untrusted-input flow: SQL/NoSQL/OS-command/LDAP injection, XSS & template injection, SSRF, path traversal, insecure deserialization, and missing output encoding. Trace attacker-controlled input to dangerous sinks.',
-  'AuthN/AuthZ & multi-tenancy: missing or broken access control, IDOR, privilege escalation, session/token/cookie handling, and tenant-isolation breaks. Look for enforcement gaps on real entry points.',
-  'Secrets, crypto & supply chain: hardcoded secrets/keys/tokens, secrets in logs, weak or hand-rolled crypto, insecure randomness, and risky/outdated/tampered dependencies (manifests + lockfiles). (If a deterministic tool pass ran, it already caught literal secret patterns and known-CVE manifests — hunt the remainder: secrets flowing into logs/telemetry, crypto misuse, and whether vulnerable dependencies are reachable in how the code actually uses them.)',
-  'Resource, concurrency & logic: unbounded input / DoS, race conditions & TOCTOU, business-logic flaws, unsafe defaults, insecure file/temp handling, and dangerous configuration.',
+  'Injection & untrusted-input flow: SQL/NoSQL/OS-command/LDAP injection, XSS & template injection, SSRF, path traversal, insecure deserialization, XXE, and missing output encoding. Trace attacker-controlled input to dangerous sinks. Hunt checklist: (a) Deserialization — enumerate the codec and whether it can instantiate arbitrary types: Java ObjectInputStream/XMLDecoder, Python pickle/PyYAML yaml.load, Ruby Marshal/YAML.load, .NET BinaryFormatter & Json.NET TypeNameHandling, PHP unserialize, Node node-serialize/funcster; check for type allow-lists / gadget-chain guards. (b) Command runners — classify the argument type: shell string vs argv array, shell:true, interpolated/concatenated args, sh -c "...", env-influenced args; any attacker-influenced token in a shell context is a candidate. (c) SSRF — enumerate destination classes the fetch can reach: cloud metadata (169.254.169.254 / metadata.google.internal), localhost/127.0.0.1, link-local & private RFC1918 ranges, redirect-following to those, DNS-rebinding, and non-HTTP scheme smuggling (file:// gopher:// dict://). (d) Path traversal — archive-member traversal (zip-slip / tar extraction writing outside the dest dir), ../ in user-supplied paths, symlink following on write. (e) XXE — XML parser feature setup: external-entity/DTD resolution left enabled, missing FEATURE_SECURE_PROCESSING / resolve_entities=false, SAX/DOM/lxml parsers not hardened.',
+  'AuthN/AuthZ & multi-tenancy: missing or broken access control, IDOR, privilege escalation, session/token/cookie handling, and tenant-isolation breaks. Look for enforcement gaps on real entry points. Hunt checklist: (a) SAML/SSO assertion handling — signature wrapping (XSW), WHICH assertion/signature is selected vs which is actually validated, audience/recipient/NotOnOrAfter/InResponseTo checks, acceptance of unsigned or self-signed assertions, IdP-response replay. (b) JWT/token — alg=none, RS256→HS256 algorithm confusion, signature not verified, kid/jku injection, missing audience/expiry checks. (c) OAuth/OIDC — redirect_uri validation, state/PKCE presence, token audience binding. (d) Object-level authz — every handler that loads a record by an id/path from the request: is ownership/tenant scoping enforced on THIS path, or only on the common one? (e) Privilege transitions — role/claim derived from attacker-controlled input, mass-assignment of role fields.',
+  'Secrets, crypto & supply chain: hardcoded secrets/keys/tokens, secrets in logs, weak or hand-rolled crypto, insecure randomness, and risky/outdated/tampered dependencies (manifests + lockfiles). Hunt checklist: (a) Crypto misuse — ECB mode, static/zero IVs, key reuse, weak/legacy hashes for passwords (MD5/SHA1/unsalted), missing constant-time compare on secrets/MACs, predictable randomness (Math.random/rand) for tokens. (b) Secret flow — secrets reaching logs/telemetry/error responses/URLs, secrets baked into client bundles. (c) Supply chain — manifest/lockfile entries that are outdated/abandoned/typosquat-adjacent, and whether a vulnerable dependency is actually reachable in how the code uses it. (If a deterministic tool pass ran, it already caught literal secret patterns and known-CVE manifests — hunt the remainder: secrets flowing into logs/telemetry, crypto misuse, and reachability of vulnerable dependencies.)',
+  'Resource, concurrency & logic: unbounded input / DoS, race conditions & TOCTOU, unsafe defaults, insecure file/temp handling, and dangerous configuration. Hunt checklist: (a) Decompression/parse amplification — zip/gzip bombs, deeply-nested JSON/XML, regex catastrophic backtracking (ReDoS), unbounded allocation from a length field. (b) Concurrency — TOCTOU between check and use (auth check then file op), non-atomic read-modify-write on shared/limited resources, missing locks on balance/quota/counter mutations. (c) File/temp — predictable temp paths, world-readable/writable artifacts, following symlinks. (d) Config — debug/verbose modes, permissive CORS, disabled TLS verification, default credentials.',
+  'Business-logic, feature-abuse & chained exploits (HIGH-MISS, generic scanners skip this): hunt the bugs that live in the product\'s rules, not in a sink. Build your OWN threat model of the app\'s economic/state invariants and how a creative attacker subverts them — do not assume the standard injection/authz lenses cover this. Hunt checklist: (a) Workflow/state-machine abuse — skipping or reordering required steps (pay→ship, verify→activate), replaying a one-time action, acting on a resource in a state that should forbid it. (b) Economic/quantity manipulation — negative or fractional amounts/quantities, integer over/underflow in price·qty, coupon/referral/discount stacking or reuse, currency/rounding abuse, double-spend via race. (c) Feature abuse — an intended feature pointed at an unintended target: webhook/callback/avatar-by-URL → SSRF, file/CSV/template import → path write or formula/template injection, "preview/render/fetch" → SSRF/XXE, email/notify → spoof/open-relay, export/search → bulk data exfil, "act-as"/impersonate/admin-debug endpoints. (d) Chained exploits — compose low-severity primitives into high impact: open-redirect + OAuth → token theft; IDOR + info-leak → account takeover; SSRF + cloud-metadata → credential theft; path-write + include → RCE; self-XSS + CSRF/login-CSRF. Think in multi-step kill chains across endpoints and files. (e) Parser/trust-boundary differentials — the same input read differently by validator vs consumer (request smuggling, JSON/XML duplicate-key or type confusion, unicode/case/encoding normalization mismatches in authz or filename checks).',
 ]
 const LENSES = Array.isArray(A.lenses) && A.lenses.length ? A.lenses : DEFAULT_LENSES
 
+const HAS_BUDGET = (typeof budget !== 'undefined' && budget && budget.total)
+// Non-budget default = one worker per default lens (so the new business-logic lens always
+// runs); on a budgeted run the existing scaling absorbs it. Budget floor unchanged (no
+// cost-structure change beyond the added lens).
+const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budget.total / 120000))) : DEFAULT_LENSES.length)
+const TOOLS = Array.isArray(A.tools) ? A.tools : ['foxguard']
+const TOOL_SEVERITY = (A.toolSeverity || 'low').toLowerCase()
+
 // Build exactly ROUNDS worker lenses: named lenses first, then generalist fresh passes
-// (varied by index, since Math.random is unavailable) to fill out the count.
-const WORKERS = Array.from({ length: ROUNDS }, (_, i) =>
-  i < LENSES.length
-    ? { id: i, lens: LENSES[i] }
-    : { id: i, lens: `Fresh generalist pass #${i - LENSES.length + 1}: independently re-audit ${SCOPE} for anything the lens-specialized workers might miss. Do not assume earlier workers were thorough; start from your own threat model.` }
-)
+// (varied by index, since Math.random is unavailable) to fill out the count. The FIRST
+// generalist pass is an explicit WILDCARD / CREATIVE angle — a relabel of an existing
+// budget-scaled pass (no added cost), aimed at the bugs a checklist-driven worker misses.
+const WORKERS = Array.from({ length: ROUNDS }, (_, i) => {
+  if (i < LENSES.length) return { id: i, lens: LENSES[i] }
+  const passNum = i - LENSES.length + 1
+  return {
+    id: i,
+    lens: passNum === 1
+      ? `Wildcard / creative generalist pass: independently re-audit ${SCOPE} with NO fixed checklist — think like a creative attacker, not a scanner. Hunt the unexpected: multi-step exploit chains, gadget chains, abuse of intended features, parser/trust-boundary differentials, surprising data-flows, and anything the lens-specialized workers would skip because it doesn't fit a named class. Do not assume earlier workers were thorough; start from your own threat model.`
+      : `Fresh generalist pass #${passNum}: independently re-audit ${SCOPE} for anything the lens-specialized workers might miss. Do not assume earlier workers were thorough; start from your own threat model.`,
+  }
+})
 
 const CANDIDATE_ITEM = {
   type: 'object',
