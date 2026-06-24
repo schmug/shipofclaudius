@@ -22,6 +22,7 @@ Each workflow is a self-contained JavaScript file that begins with an `export co
 | [`pr-review-fanout.js`](.claude/workflows/pr-review-fanout.js) | `pr-review-fanout` | Read-only deep review of **one** PR's diff (the canonical review pattern: fan out review dimensions → adversarially verify each finding → synthesize). One review agent per dimension (correctness, security, error-handling, tests, types/API, perf) finds findings over the resolved diff; each finding is independently verified by a skeptic (refuted/low-confidence dropped); survivors are deduped, confidence-filtered, and written to one HTML + markdown review, every finding traced to `file:line`. Sits behind pr-triage's `COMMENT` verdict — reviews and reports only, never comments/merges. |
 | [`stacked-impl-lanes.js`](.claude/workflows/stacked-impl-lanes.js) | `stacked-impl-lanes` | Implements issue-lanes into review-only PRs (parallel if disjoint, sequential + stacked if hub-coupled), then runs a security-hardening review on each invariant-touching lane. |
 | [`stacked-merge-walk.js`](.claude/workflows/stacked-merge-walk.js) | `stacked-merge-walk` | Lands a chain of stacked PRs onto a moving base: walks base-first, re-verifies mergeability + the required-check rollup read-only, rebases each child's own commits `--onto` the base after its parent squash-merges, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges, and prunes branches only once the whole stack lands. The terminal **write** step after `stacked-impl-lanes` opens the stack and `pr-triage-fanout` classifies it. |
+| [`track-findings.js`](.claude/workflows/track-findings.js) | `track-findings` | Deduped, preview-gated bridge from a scan bundle to a tracker. Dedups a scan's confirmed findings by **fingerprint** (create / reuse / skip) against already-filed items, routes public repos to a **draft GHSA** and private/internal repos to a **`security`-labeled issue**, and shows the **exact payloads** — writing nothing. **Stage-by-default**; `execute: true` is the reviewed approval that then files each create serially, with a pre-write recheck and a readback. The filing sibling of `deep-security-scan` / `triage-finding`; GHSA publish/CVE stay human-gated in `/ghsa`. |
 
 ## Install
 
@@ -102,6 +103,7 @@ Workflow({ scriptPath: "~/.claude/workflows/pr-triage-fanout.js" })
 | `pr-review-fanout` | `number`/`pr` (**required** — the PR to review; or a small list via `numbers`/`prs`), `repo?`, `dimensions?` (default: correctness, security, error-handling, tests, types/API, perf — strings or `{key,title,focus}`), `threshold?` (min verified **confidence** to surface: `high`\|`medium`\|`low`, default `medium`), `notes?`, `readonlyAgent?` | Reviews one PR (or a few). The diff + untrusted PR text are fenced; subagents run read-only (see **Security model**). Only `confirmed` findings at/above `threshold` surface; the rest go to a visible appendix. |
 | `stacked-impl-lanes` | `lanes` (required: `[{ key, branch, issues, invariant, brief }]`), `mode?` (`parallel` \| `sequential`, default `parallel`), `base?` (default `main`), `repo?`, `readonlyAgent?` | **Writes** — opens review-only PRs. `readonlyAgent` scopes only its issue-text relays, not the impl agent. |
 | `stacked-merge-walk` | `prs` (required, base-first: `[n,…]` or `[{ pr, branch }]`; also accepts `branches: [name,…]` or `lanes: [{ key, branch }]` from `stacked-impl-lanes`), `base?` (default `main`), `repo?`, `readonlyAgent?` | **Writes** — rebases/merges the stack. `readonlyAgent` scopes only its read-only PR-text relays + the read-only verify gate, not the write land/cleanup actors. A PR that can't land stops the walk; the landed prefix is reported. |
+| `track-findings` | `bundle` (a scan return OBJECT — `deep-security-scan`'s `reportable[]`, the #21 fingerprinted bundle, or `triage-finding`'s confirmed set) **or** `bundlePath` (a JSON file an agent reads), `repo?` (default current), `execute?` (default `false` = preview only; `true` = file), `labels?` (extra issue labels) | **Stage-by-default** (no args / `execute:false` writes nothing — it dedups, routes, and previews exact payloads). `execute:true` is the reviewed approval that **writes** — files each create serially with a pre-write recheck + readback. Public repo → draft GHSA; private/internal → `security` issue. Untrusted bundle text is HTML-escaped and written via `--body-file`/`--rawfile`. |
 
 ### Sealed findings bundle (cross-run dedup + SARIF)
 
@@ -160,7 +162,7 @@ The Workflow **runtime** itself — what `agent()` actually grants a subagent, t
 The `tests/` directory holds **offline simulators**. They wrap each workflow's source in an `AsyncFunction` with stubbed runtime globals (`agent()` / `parallel()` / `phase()` / `log()` / `workflow()`), so orchestration logic — dedup precedence, fail-open behavior, layer gating, diff-scoping & mode decision, coverage wiring, author resolution, schema satisfiability, the **sealed-bundle contract** (content-addressed fingerprint stability + line-independence, bundle shape, `priorBundle` dedup + coverage delta, and a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) projection validated by a dependency-free conformance checker), and the **prompt-injection hardening** (untrusted-text fencing + read-only `agentType` call shapes, see **Security model**) — is exercised in milliseconds at **zero token cost**. They use only Node built-ins (`node:fs/promises`, `node:assert/strict`); no dependencies to install.
 
 ```bash
-npm test          # runs all eleven suites
+npm test          # runs all twelve suites
 # or individually:
 node tests/dss-sim.test.mjs
 node tests/defense-scan.test.mjs
@@ -172,10 +174,11 @@ node tests/stacked-merge-sim.test.mjs
 node tests/pr-review-sim.test.mjs
 node tests/security-diff-sim.test.mjs
 node tests/triage-finding-sim.test.mjs
+node tests/track-findings-sim.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
-Requires Node ≥ 18 (developed on Node 22). Current status: **243 passing** (16 + 38 + 21 + 17 + 24 + 19 + 29 + 18 + 31 + 26 + 4), 0 failing.
+Requires Node ≥ 18 (developed on Node 22). Current status: **333 passing** (12 + 44 + 47 + 21 + 17 + 24 + 19 + 29 + 18 + 52 + 26 + 20 + 4), 0 failing.
 
 ## Layout
 
@@ -193,7 +196,8 @@ shipofclaudius/
 │       ├── security-diff-scan.js
 │       ├── stacked-impl-lanes.js
 │       ├── stacked-merge-walk.js
-│       └── triage-finding.js
+│       ├── triage-finding.js
+│       └── track-findings.js
 └── tests/
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
     ├── defense-scan.test.mjs       # simulates defense-scan.js
@@ -204,7 +208,8 @@ shipofclaudius/
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
     ├── stacked-impl-sim.test.mjs   # simulates stacked-impl-lanes.js
     ├── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
-    └── triage-finding-sim.test.mjs # simulates triage-finding.js
+    ├── triage-finding-sim.test.mjs # simulates triage-finding.js
+    └── track-findings-sim.test.mjs # simulates track-findings.js
 ```
 
 Each test resolves its target with `new URL('../.claude/workflows/<workflow>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
