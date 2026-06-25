@@ -27,7 +27,7 @@ function assertSatisfiable(schema, label) {
   walk(schema, '')
 }
 
-async function runScript({ args, stubs }) {
+async function runScript({ args, stubs, budget }) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [] }
   let validateInFlight = 0
@@ -48,7 +48,7 @@ async function runScript({ args, stubs }) {
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
-  const result = await fn(args, undefined, agent, parallel, null, phase, log, null)
+  const result = await fn(args, budget, agent, parallel, null, phase, log, null)
   return { result, calls, maxValidateInFlight: () => maxValidateInFlight, maxVerifyInFlight: () => maxVerifyInFlight }
 }
 
@@ -98,7 +98,7 @@ function stubsFor(map) {
     const l = opts.label || ''
     if (l.startsWith('prior-bundle')) { map.sawPriorLoader = true; map.priorLoaderPrompt = prompt; return map.priorLoaded ?? { ok: false, content: '', note: 'no stub' } }
     if (l.startsWith('tools:')) { map.sawTool = true; return map.tool }
-    if (l.startsWith('discover:')) return map.discovery(prompt)
+    if (l.startsWith('discover:')) return map.discovery(prompt, opts)
     if (l.startsWith('validate:')) return map.verdict ?? verdict
     if (l.startsWith('verify:')) {
       ;(map.verifyPrompts ||= []).push(prompt)
@@ -554,8 +554,8 @@ test('verify: fail-safe — a dead verify agent keeps the finding reportable (fl
 test('#25: default lens set is 5 and carries a business-logic / feature-abuse / chaining lens', async () => {
   const prompts = []
   const map = { tool: toolMissing, discovery: (p) => { prompts.push(p); return discoveryTwo } }
-  await runScript({ args: { target: '/tmp/fake' }, stubs: stubsFor(map) }) // no rounds -> default
-  assert.equal(prompts.length, 5, `default run should fan out 5 named lenses, got ${prompts.length}`)
+  await runScript({ args: { target: '/tmp/fake', maxRounds: 1 }, stubs: stubsFor(map) }) // one round -> the default per-round lens set
+  assert.equal(prompts.length, 5, `default run should fan out 5 named lenses per round, got ${prompts.length}`)
   const bl = prompts.find((p) => /business[- ]logic/i.test(p) && /feature[- ]abuse/i.test(p) && /chain/i.test(p))
   assert.ok(bl, 'a business-logic / feature-abuse / chaining lens runs by default')
 })
@@ -577,10 +577,93 @@ test('#25: lenses carry class-specific hunt checklists for the named high-miss c
 test('#25: a wildcard / creative generalist pass is produced beyond the named lenses', async () => {
   const prompts = []
   const map = { tool: toolMissing, discovery: (p) => { prompts.push(p); return discoveryTwo } }
-  await runScript({ args: { target: '/tmp/fake', rounds: 7 }, stubs: stubsFor(map) })
-  assert.equal(prompts.length, 7, '5 named lenses + 2 generalist passes')
+  await runScript({ args: { target: '/tmp/fake', rounds: 7, maxRounds: 1 }, stubs: stubsFor(map) })
+  assert.equal(prompts.length, 7, '5 named lenses + 2 generalist passes (one round)')
   const wild = prompts.find((p) => /wildcard/i.test(p) && /creativ/i.test(p))
   assert.ok(wild, 'the first generalist fresh pass is an explicit wildcard / creative angle')
+})
+
+// ================= SATURATION LOOP (loop-until-dry discovery rounds) =================
+// Discovery is wrapped in a budget-bounded loop: re-run the lensed fan-out and
+// accumulate into ONE cumulative `seen` map until a full round adds zero new
+// unique candidates (saturated), the round cap is hit (capped), or the budget
+// floor is reached (budget). Each round's "new" is measured against ALL prior rounds.
+
+// Parse the round index out of a round-aware discover label ("discover:r2-lens-0").
+const roundOf = (opts) => Number((opts.label || '').match(/discover:r(\d+)-/)?.[1] || 0)
+const discoverCalls = (calls) => calls.agents.filter((a) => (a.opts.label || '').startsWith('discover:'))
+
+test('saturation: stops after the first round that adds zero new candidates', async () => {
+  // Same candidates every round => round 2 adds nothing new => saturated.
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2, maxRounds: 6 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'saturated', 'a zero-new round => saturated')
+  assert.equal(result.rounds_run, 2, 'round 1 finds 2, round 2 adds nothing => stop at round 2')
+  assert.equal(discoverCalls(calls).length, 4, 'exactly two rounds of two workers ran')
+  assert.equal(result.candidates, 2, 'cumulative unique stays 2 across rounds')
+})
+
+test('saturation: honors args.maxRounds when rounds never go dry', async () => {
+  // Each round surfaces a brand-new candidate => never saturates => capped at maxRounds.
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return {
+      threat_model: 'tm', files_reviewed: 1,
+      candidates: [{ title: `finding round ${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }],
+    }
+  }
+  const map = { tool: toolMissing, discovery }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'capped', 'never dry => capped at the round cap')
+  assert.equal(result.rounds_run, 3, 'ran exactly maxRounds rounds')
+  assert.equal(discoverCalls(calls).length, 3, 'one worker per round, three rounds')
+  assert.equal(result.candidates, 3, 'three distinct findings accumulated')
+})
+
+test('saturation: a round-1 candidate is not re-counted as new in round 2 (cumulative dedup)', async () => {
+  const A = { title: 'idor on items', file: 'src/api.ts', line: 10, vuln_class: 'idor', source: 'id', sink: 'db.get', why: 'no check' }
+  const B = { title: 'sqli in db', file: 'src/db.ts', line: 42, vuln_class: 'sql-injection', source: 'q', sink: 'db.raw', why: 'concat' }
+  // Round 1 finds A+B; every later round re-finds only A (a prior-round dup).
+  const discovery = (_p, opts) => ({
+    threat_model: 'tm', files_reviewed: 1, candidates: roundOf(opts) === 1 ? [A, B] : [A],
+  })
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 6 }, stubs: stubsFor(map) })
+  assert.equal(result.candidates, 2, 'A+B once; round-2 re-finding of A adds nothing new')
+  assert.equal(result.terminal_state, 'saturated', 'round 2 adds zero new => saturated')
+  assert.equal(result.rounds_run, 2, 'stops the round after the dry one')
+})
+
+test('saturation: terminal_state and rounds_run appear in the return and the report coverage', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(['saturated', 'capped', 'budget'].includes(result.terminal_state), 'terminal_state in return')
+  assert.equal(typeof result.rounds_run, 'number', 'rounds_run is a number in the return')
+  assert.ok(result.rounds_run >= 1, 'at least one round ran')
+  assert.ok(map.reportPrompt.includes(result.terminal_state), 'coverage statement names the terminal state')
+  assert.ok(/round/i.test(map.reportPrompt), 'coverage statement mentions discovery rounds')
+})
+
+test('saturation: stops with terminal_state=budget when the budget floor is hit', async () => {
+  // Discovery never goes dry, so only the budget gate can stop it before maxRounds.
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `f${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+  }
+  // remaining() always reports below any per-round floor: round 1 runs, round 2's gate stops it.
+  const budget = { total: 1_000_000, remaining: () => 1 }
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 6 }, stubs: stubsFor(map), budget })
+  assert.equal(result.terminal_state, 'budget', 'budget floor stops the loop before the cap')
+  assert.equal(result.rounds_run, 1, 'only the first round completed')
+})
+
+test('saturation: ample budget does not trip the budget gate', async () => {
+  const budget = { total: 10_000_000, remaining: () => 10_000_000 }
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map), budget })
+  assert.equal(result.terminal_state, 'saturated', 'with budget to spare it runs to saturation')
+  assert.equal(result.rounds_run, 2, 'two rounds: one productive, one dry')
 })
 
 // ---- runner ----

@@ -6,16 +6,25 @@
 // comes from diverse independent framings + a merge — one pass gets unlucky and misses
 // things; N lenses don't miss the same things.
 //
+// Discovery is wrapped in a SATURATION LOOP (loop-until-dry): the lensed fan-out is
+// re-run round after round, each round's candidates merged into the SAME cumulative
+// dedup map, until a full round adds ZERO new unique candidates (`saturated`), a hard
+// round cap is reached (`capped`), or the per-round budget floor is hit (`budget`).
+// Recall isn't capped at whatever one fan-out happened to surface; agents are
+// nondeterministic, so a second round of the same diverse lenses often finds more — and
+// we stop the moment a round stops paying for itself.
+//
 // Repository / scoped-path audits only (for a diff/PR, use the security-diff-scan workflow).
 // This is the heavyweight sibling of the security-scan skill and reuses its HTML report
 // template at ~/.claude/skills/security-scan/assets/report-template.html.
 //
 // Run:  Workflow({ scriptPath: "~/.claude/workflows/deep-security-scan.js",
-//                  args: { target: ".", scope: "the whole repo", rounds: 4 } })
+//                  args: { target: ".", scope: "the whole repo", rounds: 4, maxRounds: 6 } })
 //   - args.target:    repo root or subpath to audit (default ".").
 //   - args.scope:     human description of scope (default: the whole repo at target).
-//   - args.rounds:    number of independent discovery workers (default 5 = one per default
-//                     lens, or budget-scaled).
+//   - args.rounds:    number of independent discovery workers PER ROUND (default 5 =
+//                     one per default lens, or budget-scaled).
+//   - args.maxRounds: hard cap on saturation rounds before stopping as `capped` (default 6).
 //   - args.lenses:    optional array of custom threat-model lenses (overrides defaults).
 //   - args.threshold: min severity to report — critical|high|medium|low|info (default "low").
 //   - args.tools:     deterministic prefilter tools to run before discovery
@@ -24,8 +33,9 @@
 //   - args.toolSeverity: severity floor passed to the tool (default "low" —
 //                     independent of the report threshold).
 //
-// Cost: ~rounds discovery agents + one validation agent per unique candidate + one
-// report agent. Deliberately more expensive than a single pass — that's the recall trade.
+// Cost: ~rounds_run x rounds discovery agents (the saturation loop runs the fan-out
+// repeatedly) + one validation agent per unique candidate + one report agent.
+// Deliberately more expensive than a single pass — that's the recall trade.
 //
 // Design notes baked in: args may arrive as a JSON string (parse-guard); two barriers
 // are intentional (dedup needs ALL discovery; the report needs ALL validation); no
@@ -43,7 +53,7 @@ export const meta = {
   whenToUse: 'Repository or scoped-path security audit where recall matters and a single pass risks missing things. Not for diffs/PRs (use security-diff-scan).',
   phases: [
     { title: 'Tools', detail: 'deterministic prefilter (foxguard: SAST, secrets, SCA) — zero-token candidates' },
-    { title: 'Discovery', detail: 'K independent workers, each a distinct threat-model lens, find candidates in parallel' },
+    { title: 'Discovery', detail: 'saturation loop: re-run K lensed workers round after round, accumulating, until a round adds nothing new (or the round cap / budget floor is hit)' },
     { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge' },
     { title: 'Verify', detail: 'one fresh read-only agent per reportable finding GROUNDS it against the source (file/line/root-cause/payload/fix) -> verified|corrected|rejected' },
     { title: 'Report', detail: 'synthesize one HTML + markdown report from the reconciled, factually-grounded findings' },
@@ -77,6 +87,10 @@ const HAS_BUDGET = (typeof budget !== 'undefined' && budget && budget.total)
 // runs); on a budgeted run the existing scaling absorbs it. Budget floor unchanged (no
 // cost-structure change beyond the added lens).
 const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budget.total / 120000))) : DEFAULT_LENSES.length)
+// Saturation-loop cap: how many times we re-run the lensed fan-out before stopping as
+// `capped`. Clamped to [1, 12] so an args.maxRounds override can't approach the
+// 1000-agent backstop (12 rounds x 8 workers + validators + report is still far under).
+const MAX_ROUNDS = Math.max(1, Math.min(12, A.maxRounds || 6))
 const TOOLS = Array.isArray(A.tools) ? A.tools : ['foxguard']
 const TOOL_SEVERITY = (A.toolSeverity || 'low').toLowerCase()
 
@@ -94,6 +108,12 @@ const WORKERS = Array.from({ length: ROUNDS }, (_, i) => {
       : `Fresh generalist pass #${passNum}: independently re-audit ${SCOPE} for anything the lens-specialized workers might miss. Do not assume earlier workers were thorough; start from your own threat model.`,
   }
 })
+
+// Budget floor: estimated tokens to START one more discovery round (one fan-out of
+// WORKERS.length workers). When a budget target is set and remaining dips below this,
+// the saturation loop stops with terminal_state='budget' rather than begin a round it
+// likely can't finish (and still leave room for validation + the report).
+const PER_ROUND_TOKEN_EST = WORKERS.length * 60000
 
 const CANDIDATE_ITEM = {
   type: 'object',
@@ -373,14 +393,54 @@ const TOOL_COVERAGE = !TOOLS.includes('foxguard')
     ? `Deterministic prefilter: foxguard ${toolReport.tool_version}, severity floor ${TOOL_SEVERITY}, ${toolReport.files_scanned > 0 ? `${toolReport.files_scanned} files scanned` : 'files-scanned count not reported by tool'}, ${toolCandidates.length} findings ingested as candidates.`
     : `Deterministic prefilter SKIPPED: ${toolReport ? toolReport.note : 'tool agent returned no result'}.`
 
-// ---- Phase 1: independent lensed discovery (barrier: dedup needs all of it) ----
+// ---- Phase 1: independent lensed discovery, wrapped in a SATURATION LOOP ----
+// One ROUND is the full lensed WORKERS fan-out. We re-run rounds and accumulate into
+// the SAME `seen` map (cumulative dedup across ALL prior rounds) until a round adds
+// zero new unique candidates (`saturated`), we reach MAX_ROUNDS (`capped`), or the
+// budget floor is hit (`budget`). The foxguard prefilter already ran ONCE above; only
+// the lensed discovery repeats. The merge itself is still the justified barrier — dedup
+// needs all workers of a round before we can tell whether the round added anything.
+// (Future: a Workflow resume checkpoint — issue #17 — could persist `seen` + roundsRun
+// so an interrupted scan resumes mid-loop instead of restarting round 1.)
 phase('Discovery')
-log(`Deep scan of ${SCOPE} — ${WORKERS.length} independent discovery workers (threshold=${THRESHOLD}).`)
+log(`Deep scan of ${SCOPE} — up to ${MAX_ROUNDS} saturation round(s) of ${WORKERS.length} workers each (threshold=${THRESHOLD}).`)
 
-const discoveries = await parallel(
-  WORKERS.map((w) => () =>
-    agent(
-      `You are independent security discovery worker #${w.id} auditing ${SCOPE}. Work from the repo at "${TARGET}".
+// Semantic-merge state lives OUTSIDE the loop so candidates accumulate and a
+// prior-round finding is never re-counted as "new".
+const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+const seen = new Map()
+let nextId = 1
+let uniqueTotal = 0
+const addCandidate = (c) => {
+  // Collapse the same issue found by multiple lenses or rounds: same file + class + ~line bucket.
+  const key = `${norm(c.file)}|${norm(c.vuln_class)}|${Math.round((c.line || 0) / 8)}`
+  const altKey = `${norm(c.file)}|${norm(c.title)}`
+  if (seen.has(key) || seen.has(altKey)) return false
+  const entry = { id: `f${nextId++}`, ...c }
+  seen.set(key, entry)
+  seen.set(altKey, entry)
+  uniqueTotal++
+  return true
+}
+// Tool candidates enter FIRST: insertion order is dedup precedence, and an
+// exact-line deterministic finding beats a fuzzier agent guess at the same spot.
+for (const c of toolCandidates) addCandidate(c)
+
+const clean = []          // every successful worker pass, across all rounds
+let filesReviewed = 0
+let roundsRun = 0
+let terminalState = 'capped'
+for (let round = 1; round <= MAX_ROUNDS; round++) {
+  // Budget floor: never START a round we likely can't finish (round 1 always runs).
+  if (round > 1 && HAS_BUDGET && budget.remaining() < PER_ROUND_TOKEN_EST) {
+    terminalState = 'budget'
+    break
+  }
+  const before = uniqueTotal
+  const discoveries = await parallel(
+    WORKERS.map((w) => () =>
+      agent(
+        `You are independent security discovery worker #${w.id} auditing ${SCOPE}. Work from the repo at "${TARGET}".
 
 Your assigned threat-model LENS:
 ${w.lens}${TOOL_NOTE}
@@ -392,32 +452,26 @@ Do this:
 4. For each candidate give a file, best-guess line, vuln_class, source/sink, and a concrete "why". Do NOT validate or fix here.
 
 You are ONE of several independent workers with different lenses; do not try to cover everything — go DEEP on yours. Report files_reviewed honestly. Return the structured object.`,
-      { label: `discover:lens-${w.id}`, phase: 'Discovery', schema: CANDIDATE_SCHEMA }
+        { label: `discover:r${round}-lens-${w.id}`, phase: 'Discovery', schema: CANDIDATE_SCHEMA }
+      )
     )
   )
-)
-
-// ---- Semantic merge + dedup (plain JS; the justified barrier) ----
-const clean = discoveries.filter(Boolean)
-const filesReviewed = clean.reduce((s, d) => s + (d.files_reviewed || 0), 0)
-const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
-const seen = new Map()
-let nextId = 1
-const addCandidate = (c) => {
-  // Collapse the same issue found by multiple lenses: same file + class + ~line bucket.
-  const key = `${norm(c.file)}|${norm(c.vuln_class)}|${Math.round((c.line || 0) / 8)}`
-  const altKey = `${norm(c.file)}|${norm(c.title)}`
-  if (seen.has(key) || seen.has(altKey)) return
-  const entry = { id: `f${nextId++}`, ...c }
-  seen.set(key, entry)
-  seen.set(altKey, entry)
+  roundsRun = round
+  const roundClean = discoveries.filter(Boolean)
+  for (const d of roundClean) {
+    clean.push(d)
+    filesReviewed += d.files_reviewed || 0
+    for (const c of (d.candidates || [])) addCandidate(c)
+  }
+  const added = uniqueTotal - before
+  log(`Round ${round}/${MAX_ROUNDS}: ${roundClean.length}/${WORKERS.length} workers, +${added} new unique (cumulative ${uniqueTotal}).`)
+  if (added === 0) { terminalState = 'saturated'; break }   // loop-until-dry: a dry round ends it
+  if (round === MAX_ROUNDS) { terminalState = 'capped'; break }
 }
-// Tool candidates enter FIRST: insertion order is dedup precedence, and an
-// exact-line deterministic finding beats a fuzzier agent guess at the same spot.
-for (const c of toolCandidates) addCandidate(c)
-for (const d of clean) for (const c of (d.candidates || [])) addCandidate(c)
+
+// ---- Semantic merge complete (plain JS; the justified barrier) ----
 const unique = [...new Set(seen.values())]
-log(`Discovery merged: ${clean.length}/${WORKERS.length} workers, ~${filesReviewed} file-reviews, ${toolCandidates.length} tool candidates -> ${unique.length} unique after dedup.`)
+log(`Discovery merged: ${roundsRun} round(s) (${terminalState}), ${clean.length} worker passes, ~${filesReviewed} file-reviews, ${toolCandidates.length} tool candidates -> ${unique.length} unique after cumulative dedup.`)
 
 // Coverage context shared by the bundle's coverage doc (both the early return and the final one).
 const degradedWorkers = WORKERS.length - clean.length
@@ -436,9 +490,10 @@ if (unique.length === 0) {
   const { bundle, sarif, newFindings } = buildBundle([], coverageCtx)
   return {
     target: TARGET, scope: SCOPE, rounds: WORKERS.length,
+    rounds_run: roundsRun, terminal_state: terminalState,
     files_reviewed: filesReviewed, candidates: 0, reportable: [],
     tool_coverage: TOOL_COVERAGE,
-    note: 'No candidate vulnerabilities surfaced across the independent discovery workers. Treat as "covered these lenses, found nothing" — see workers\' threat models for coverage.',
+    note: `No candidate vulnerabilities surfaced across ${roundsRun} discovery round(s) (terminal state: ${terminalState}). Treat as "covered these lenses, found nothing" — see workers' threat models for coverage.`,
     worker_threat_models: clean.map((d, i) => ({ worker: i, threat_model: d.threat_model })),
     // Sealed bundle (issue #21): empty findings doc + coverage doc (+ delta vs a prior bundle).
     bundle, sarif, new_findings: newFindings,
@@ -595,7 +650,7 @@ ${JSON.stringify(reportable, null, 2)}
 Reviewed-but-not-reported — refuted / needs-info / below threshold, plus VERIFICATION-REJECTED findings (validated as exploitable but factually wrong about the code). These go in the appendix so suppression is visible, NOT deleted:
 ${JSON.stringify(appendix.map((v) => ({ title: v.title, file: v.file, line: v.line, disposition: v.disposition, severity: v.severity, reason: v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}` : (v.evidence || v.proof_gap || v.rationale) })), null, 2)}
 
-Coverage facts: ${TOOL_COVERAGE} ${WORKERS.length} independent discovery workers ran (lenses + their threat models below), ~${filesReviewed} file-reviews total, ${unique.length} unique candidates after merge (${toolCandidates.length} from the deterministic prefilter). Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected.
+Coverage facts: ${TOOL_COVERAGE} Saturation discovery ran ${roundsRun} round(s) of up to ${MAX_ROUNDS} (terminal state: ${terminalState} — saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), ${WORKERS.length} lensed workers per round, ${clean.length} worker passes total (lenses + their threat models below), ~${filesReviewed} file-reviews total, ${unique.length} unique candidates after cumulative merge (${toolCandidates.length} from the deterministic prefilter). Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected.
 Worker threat models / lenses:
 ${JSON.stringify(clean.map((d, i) => ({ worker: i, files_reviewed: d.files_reviewed, threat_model: d.threat_model })), null, 2)}
 
@@ -616,7 +671,7 @@ Produce:
 2. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise produce an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, and any scanned input before inserting it (& -> &amp; < -> &lt; > -> &gt; " -> &quot;) — a reviewed file may contain <script>. Set the verdict border color to the highest severity present. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
 3. report.md — compose the SAME report as a terminal/PR-friendly markdown summary: severity counts, each finding (title, severity, file:line, one-line fix), and the coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the caller persists it).
 4. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html, base64-encoded, inside \`<script type="application/octet-stream" id="report-md-b64">…</script>\` (base64 cannot break out of the script tag, unlike raw text containing </script>), and add a small "Download report.md" button whose click handler does \`atob\` → \`Blob\` → download.
-5. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md: the deterministic-prefilter line (tool + version + files scanned + findings ingested, or exactly why it was skipped/disabled), how many workers/lenses ran, approx files reviewed, candidates found vs reported, and the honest limits (what was NOT deeply reviewed). Use the bundle's coverage doc: render completeness (${bundle.coverage.completeness}), the explicit "not scanned" exclusions, and — distinctly — the "not observed" classes (reviewed, none confirmed). "Not observed" must never read the same as "not scanned", and "found nothing" must never read the same as "didn't look."
+5. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md: the deterministic-prefilter line (tool + version + files scanned + findings ingested, or exactly why it was skipped/disabled), how many SATURATION ROUNDS ran (${roundsRun} of up to ${MAX_ROUNDS}) and the terminal state (${terminalState}: saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), how many workers/lenses ran per round, approx files reviewed, candidates found vs reported, and the honest limits (what was NOT deeply reviewed). Use the bundle's coverage doc: render completeness (${bundle.coverage.completeness}), the explicit "not scanned" exclusions, and — distinctly — the "not observed" classes (reviewed, none confirmed). "Not observed" must never read the same as "not scanned", "found nothing" must never read the same as "didn't look," and "stopped at the cap" must never read the same as "saturated."
 6. Embed the SEALED BUNDLE for interop: base64-encode the bundle.json above into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\` (same no-breakout reasoning as report.md), and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` → \`Blob\` → download. Do NOT write these to disk yourself (the subagent guardrail blocks it) — the orchestrator returns them for the caller to persist.
 
 Return the structured object {output_dir, report_html_path, report_md, html_written}. Do not invent findings beyond those given.`,
@@ -632,6 +687,8 @@ return {
   target: TARGET,
   scope: SCOPE,
   rounds: WORKERS.length,
+  rounds_run: roundsRun,
+  terminal_state: terminalState,
   files_reviewed: filesReviewed,
   tool_coverage: TOOL_COVERAGE,
   candidates: unique.length,
