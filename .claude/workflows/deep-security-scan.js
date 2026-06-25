@@ -54,9 +54,10 @@ export const meta = {
   phases: [
     { title: 'Tools', detail: 'deterministic prefilter (foxguard: SAST, secrets, SCA) — zero-token candidates' },
     { title: 'Discovery', detail: 'saturation loop: re-run K lensed workers round after round, accumulating, until a round adds nothing new (or the round cap / budget floor is hit)' },
-    { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge' },
+    { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge (exploitability only — severity is a separate stage)' },
     { title: 'Verify', detail: 'one fresh read-only agent per reportable finding GROUNDS it against the source (file/line/root-cause/payload/fix) -> verified|corrected|rejected' },
-    { title: 'Report', detail: 'synthesize one HTML + markdown report from the reconciled, factually-grounded findings' },
+    { title: 'Severity', detail: 'per confirmed finding: derive an attacker-path facts record, calibrate severity, then a mechanical over-rating policy pass (downgrade/drop self-XSS, theoretical, internal-no-boundary, …)' },
+    { title: 'Report', detail: 'synthesize one HTML + markdown report from confirmed, reportable findings; suppressed/downgraded items kept in the appendix' },
   ],
 }
 
@@ -158,20 +159,22 @@ const TOOL_SCHEMA = {
   },
 }
 
+// The validator decides EXPLOITABILITY ONLY. Severity calibration is split out into the
+// dedicated Severity / attack-path stage below (issue #22), so this schema no longer carries
+// severity / reportable / cvss — keeping the disprove-first pass focused on "is it real,
+// reachable, exploitable?" and leaving "how bad, and does an over-rating anti-pattern apply?"
+// to a stage that reasons from an attacker-path facts record.
 const VALIDATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['disposition', 'severity', 'reportable', 'rationale'],
+  required: ['disposition', 'rationale'],
   properties: {
-    disposition: { type: 'string', enum: ['confirmed', 'refuted', 'needs-info'], description: 'confirmed=evidence shows with >80% confidence it is real, reachable, and exploitable; refuted=a guard defeats it / input not attacker-controlled / not reachable; needs-info=could not prove or disprove within bounded effort (anything under the 80% bar lands here, never in confirmed).' },
-    severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Calibrated from impact x reachability x preconditions. Use info for refuted/non-issues.' },
-    reportable: { type: 'boolean', description: `True iff disposition=confirmed AND severity meets the ${THRESHOLD} threshold AND it is in scope. Refuted and needs-info are NOT reportable.` },
-    rationale: { type: 'string', description: 'Concise justification for the disposition: the decisive reason it is confirmed / refuted / needs-info.' },
+    disposition: { type: 'string', enum: ['confirmed', 'refuted', 'needs-info'], description: 'confirmed=evidence shows with >80% confidence it is real, reachable, and exploitable; refuted=a guard defeats it / input not attacker-controlled / not reachable; needs-info=could not prove or disprove within bounded effort (anything under the 80% bar lands here, never in confirmed). Decide EXPLOITABILITY only — severity is calibrated downstream.' },
+    rationale: { type: 'string', description: 'Concise justification for the disposition, citing which of the five disprove tests settled it.' },
     attacker_story: { type: 'string', description: 'How the issue is reached and abused, in concrete terms.' },
     evidence: { type: 'string', description: 'The proof: the attacker-input -> sink trace naming each guard on the path and why it does/does not defeat the input.' },
     proof_gap: { type: 'string', description: 'For needs-info: the exact missing piece (service, input, infra). Empty otherwise.' },
     fix: { type: 'string', description: 'Concrete remediation.' },
-    cvss_vector: { type: 'string', description: 'Optional CVSS 3.1 vector; must match the prose severity. Empty if not assessed.' },
   },
 }
 
@@ -363,6 +366,62 @@ const VERIFY_SCHEMA = {
   },
 }
 
+// Severity / attack-path stage schema (issue #22): facts -> calibrated severity -> policy.
+// Runs only on CONFIRMED candidates. The auditor-grade rubric: build an attacker-path FACTS
+// record from repo evidence, calibrate severity from it, then mechanically apply the
+// "should-not-remain-high/critical" anti-pattern list, downgrading or dropping accordingly.
+const SEVERITY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['facts', 'calibrated_severity', 'final_severity', 'policy_decision', 'rationale'],
+  properties: {
+    facts: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['exposure', 'identities', 'reachability', 'controls', 'boundary_crossed'],
+      properties: {
+        exposure: { type: 'string', description: 'Where the vulnerable code sits relative to a trust boundary — internet-facing / authenticated-user-reachable / internal-only / local-only / dev/test-only — citing the concrete entry point (route/handler/CLI).' },
+        identities: { type: 'string', description: 'Whose privileges are involved: who can reach it (anonymous / any authed user / admin) and what privilege the attacker GAINS. Flag explicitly if attacker and victim are the SAME principal (self-only).' },
+        reachability: { type: 'string', description: 'The concrete attacker path from entry point to sink and the preconditions required. State plainly if reachability is only THEORETICAL / unproven.' },
+        controls: { type: 'string', description: 'Compensating controls already on the path (authn, CSP, prepared statements, sandboxing, network ACLs), each marked PRIMARY defense vs secondary defense-in-depth layer.' },
+        boundary_crossed: { type: 'boolean', description: 'True iff exploitation crosses a real privilege/trust boundary (attacker gains something they could not already do). False for self-only / same-principal / internal-with-no-boundary.' },
+      },
+    },
+    calibrated_severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Severity derived from the FACTS (impact x reachability x preconditions), BEFORE the policy pass.' },
+    final_severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Severity AFTER the policy pass — what the report uses. Equals calibrated_severity when policy_decision=keep; lower when downgrade; info when drop.' },
+    policy_decision: { type: 'string', enum: ['keep', 'downgrade', 'drop'], description: 'Mechanical over-rating policy result: keep=facts justify the calibrated severity; downgrade=an anti-pattern caps it lower; drop=an anti-pattern means it should not be reported at all (theoretical-only, no boundary crossed, bare checklist deviation).' },
+    anti_pattern: { type: 'string', description: 'If downgrade/drop, which anti-pattern fired: self-xss | theoretical-memory-corruption | internal-no-boundary | could-matter-if-chained | missing-second-defense-layer | owasp-checklist-deviation. Empty when keep.' },
+    cvss_vector: { type: 'string', description: 'Optional CVSS 3.1 vector; must match final_severity. Empty if not assessed.' },
+    rationale: { type: 'string', description: 'Concise justification tying facts -> calibrated severity -> policy decision.' },
+  },
+}
+
+// Build the per-candidate Severity-stage prompt (issue #22). Shared shape with the diff scan.
+const severityPrompt = (c) =>
+  `You are a SEVERITY / ATTACK-PATH analyst calibrating a CONFIRMED security finding in ${SCOPE} (repo at "${TARGET}"). ` +
+  `Exploitability is ALREADY settled upstream — do NOT re-litigate whether it is exploitable. Your job: (1) build an attacker-path FACTS record from the actual code, (2) calibrate severity from those facts, (3) apply a mechanical POLICY pass that downgrades or drops auditor-recognized over-rating anti-patterns. Work TRACE-ONLY: read code (Read/Grep/Glob, read-only shell); do NOT build, test, run, or start servers.
+
+Confirmed finding:
+- title: ${c.title}
+- file:  ${c.file}:${c.line || '?'}
+- class: ${c.vuln_class}
+- source/sink: ${c.source || '?'} -> ${c.sink || '?'}
+- validator evidence: ${c.evidence || c.why || ''}
+- attacker story: ${c.attacker_story || ''}
+
+1. FACTS — from the real code, record: exposure (where the code sits vs a trust boundary, cite the entry point); identities (who can reach it and what privilege they gain; flag if attacker == victim / same principal); reachability (the concrete path + preconditions; flag if only THEORETICAL); controls (defenses on the path, each PRIMARY vs secondary defense-in-depth); boundary_crossed (does exploitation cross a real privilege/trust boundary).
+2. CALIBRATE calibrated_severity = impact x reachability x preconditions, from the facts.
+3. POLICY PASS — a finding should NOT remain high/critical when it matches an over-rating anti-pattern. Downgrade (cap lower) or drop (do not report; final_severity=info) when:
+   - SELF-XSS / self-inflicted (attacker == victim, no other principal harmed) — never high/critical;
+   - THEORETICAL memory-corruption or any issue with no demonstrated reachable path — drop or floor to low;
+   - INTERNAL-ONLY with NO trust boundary crossed (boundary_crossed=false) — downgrade;
+   - "could matter if CHAINED" with no concrete present chain — do not inflate on a hypothetical chain;
+   - a missing *second* DEFENSE-IN-DEPTH layer where a PRIMARY control still holds — not high/critical;
+   - a bare OWASP-CHECKLIST / best-practice deviation with no concrete exploit — drop.
+   Apply the DYNAMIC BASELINE: compare to comparable production systems; if reachable untouched code has plausibly not been exploited, understand WHY before rating it high. Do NOT pad the report — suppression stays visible (downgraded/dropped items still appear in the appendix), so prefer accuracy over inflation.
+   Set policy_decision (keep|downgrade|drop), final_severity (== calibrated when keep; lower when downgrade; info when drop), and anti_pattern (which one fired; empty when keep).
+Return the structured object.`
+
 // ---- Phase 0: deterministic prefilter (zero-token findings before any agent spend) ----
 let toolReport = null
 if (TOOLS.includes('foxguard')) {
@@ -525,8 +584,9 @@ Candidate to validate:
 Try hard to DISPROVE it:
 1. Open the cited file and the code it reaches. Never conclude on a location you have not read.
 2. TRACE-ONLY validation: do NOT build, test, or run the project — no cargo build/test/check/run, no npm/pnpm/yarn/bun install/build/test/dev, no server starts, no migrations (concurrent builds have stalled this pipeline before). Validate by reading code: trace attacker-input -> sink, naming EVERY guard on the path and whether it truly defeats the input, plus the preconditions an attacker needs. Read-only shell (rg, ls, git grep) is fine.
-3. Decide disposition: confirmed ONLY if you are >80% confident it is real, reachable, and exploitable; refuted (a guard defeats it / input not attacker-controlled / not reachable — say why); or needs-info (state the EXACT proof gap; anything under the 80% bar is needs-info, never confirmed).
-4. If confirmed, calibrate severity from impact x reachability x preconditions, and set reportable per the ${THRESHOLD} threshold + in-scope. Give an attacker story, the evidence, and a concrete fix.
+3. Run the five DISPROVE TESTS and answer each: (a) EXPLOITATION — is there a concrete attacker-reachable path, not just a code smell; (b) IMPACT — what an attacker actually gains if it fires; (c) BASELINE (the DYNAMIC BASELINE principle) — compare to comparable production systems and ask WHY this untouched code has plausibly not already been exploited; if there is a benign reason, surface it and lean toward refuted/needs-info; (d) MITIGATION — does an existing guard/control already defeat it; (e) PARSER/RUNTIME-BEHAVIOR — does language/framework/runtime behavior (escaping, type coercion, prepared statements) neutralize it.
+4. Decide disposition: confirmed ONLY if you are >80% confident it is real, reachable, and exploitable; refuted (a guard defeats it / input not attacker-controlled / not reachable — say why); or needs-info (state the EXACT proof gap; anything under the 80% bar is needs-info, never confirmed).
+5. If confirmed, give the attacker story, the evidence, and a concrete fix. Do NOT assign severity here — a dedicated severity / attack-path stage calibrates severity downstream from an attacker-path facts record. Your job is EXPLOITABILITY, not rating.
 
 Return the structured object.`,
         { label: `validate:${c.id}`, phase: 'Validate', schema: VALIDATION_SCHEMA }
@@ -538,9 +598,9 @@ Return the structured object.`,
 
 const verdicts = validated.filter(Boolean)
 const sevRank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
-const confirmedReportable = verdicts.filter((v) => v.reportable && v.disposition === 'confirmed')
-const validationAppendix = verdicts.filter((v) => !v.reportable) // refuted / needs-info / below-threshold
-log(`Validation: ${confirmedReportable.length} reportable, ${validationAppendix.length} reviewed-not-reported.`)
+const confirmedSet = verdicts.filter((v) => v.disposition === 'confirmed')
+const nonConfirmed = verdicts.filter((v) => v.disposition !== 'confirmed')
+log(`Validation: ${confirmedSet.length} confirmed, ${nonConfirmed.length} refuted/needs-info.`)
 
 // ---- Phase 2.5: independent factual VERIFICATION (grounding) of each reportable finding ----
 // A FRESH read-only agent grounds each confirmed finding against the source: file exists, line
@@ -553,15 +613,15 @@ log(`Validation: ${confirmedReportable.length} reportable, ${validationAppendix.
 phase('Verify')
 const VERIFY_CHUNK = 8
 const verifyResults = []
-for (let i = 0; i < confirmedReportable.length; i += VERIFY_CHUNK) {
-  const chunk = confirmedReportable.slice(i, i + VERIFY_CHUNK)
-  log(`Verifying (grounding) reportable findings ${i + 1}-${i + chunk.length} of ${confirmedReportable.length}.`)
+for (let i = 0; i < confirmedSet.length; i += VERIFY_CHUNK) {
+  const chunk = confirmedSet.slice(i, i + VERIFY_CHUNK)
+  log(`Verifying (grounding) confirmed findings ${i + 1}-${i + chunk.length} of ${confirmedSet.length}.`)
   const results = await parallel(
     chunk.map((f) => () =>
       agent(
         `You are an INDEPENDENT FACTUAL-VERIFICATION agent grounding ONE already-validated security finding against the actual source. You are NOT the exploitability validator — a separate skeptical validator already judged this finding real and exploitable; do NOT re-decide exploitability or severity. Your ONE job is to confirm the finding is FACTUALLY TRUE ABOUT THE CODE as written. Work from the repo at "${TARGET}". You are READ-ONLY and TRACE-ONLY.
 
-The finding to ground (already confirmed exploitable; severity ${f.severity}):
+The finding to ground (already confirmed exploitable; severity is calibrated downstream):
 - id:    ${f.id}
 - title: ${f.title}
 - file:  ${f.file}:${f.line || '?'}
@@ -590,27 +650,77 @@ A finding citing a wrong line or a non-existent sink must be corrected or reject
 // rejected is moved to the appendix so the suppression stays auditable. A dead verify agent
 // (null) keeps the finding reportable, flagged "unverified" — never silently dropped.
 const verify_counts = { verified: 0, corrected: 0, rejected: 0, unverified: 0 }
-const reportable = []
+const verified = []
 const verifyRejected = []
 for (const { finding, verify } of verifyResults) {
   if (!verify) {
     verify_counts.unverified++
-    reportable.push({ ...finding, verify: { outcome: 'unverified', rationale: 'verify agent returned no result; kept reportable, not silently dropped' } })
+    verified.push({ ...finding, verify: { outcome: 'unverified', rationale: 'verify agent returned no result; kept reportable, not silently dropped' } })
   } else if (verify.outcome === 'rejected') {
     verify_counts.rejected++
     verifyRejected.push({ ...finding, verify })
   } else if (verify.outcome === 'corrected') {
     verify_counts.corrected++
-    reportable.push({ ...finding, ...(verify.corrected_fields || {}), verify })
+    verified.push({ ...finding, ...(verify.corrected_fields || {}), verify })
   } else {
     verify_counts.verified++
-    reportable.push({ ...finding, verify })
+    verified.push({ ...finding, verify })
   }
 }
+log(`Verification: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (agent died)` : ''}. ${verified.length} grounded finding(s) proceed to severity calibration.`)
+
+// ---- Phase 3: severity / attack-path calibration (only on confirmed; chunked like Validate) ----
+// A dedicated auditor-grade stage: derive an attacker-path FACTS record, calibrate severity from
+// it, then run a mechanical over-rating POLICY pass (self-XSS, theoretical, internal-no-boundary,
+// could-matter-if-chained, missing 2nd defense layer, bare OWASP-checklist) that downgrades/drops.
+// Suppression stays visible — downgraded/dropped findings still land in the appendix.
+phase('Severity')
+const meetsThreshold = (sev) => (sevRank[sev] ?? 9) <= (sevRank[THRESHOLD] ?? 9)
+const mergeSeverity = (c, s) => {
+  if (!s) {
+    // Severity agent died: keep the confirmed finding visible (never silently drop a real one)
+    // at a conservative MEDIUM, flagged so the calibration gap is honest.
+    return { ...c, severity: 'medium', calibrated_severity: 'medium', policy_decision: 'keep', anti_pattern: '', severity_rationale: 'severity stage returned no result; conservative fallback', severity_failed: true }
+  }
+  return {
+    ...c,
+    facts: s.facts,
+    calibrated_severity: s.calibrated_severity,
+    severity: s.final_severity,        // authoritative — the report uses this
+    policy_decision: s.policy_decision,
+    anti_pattern: s.anti_pattern || '',
+    cvss_vector: s.cvss_vector || '',
+    severity_rationale: s.rationale,
+  }
+}
+const SEVERITY_CHUNK = 8
+const calibrated = []
+if (verified.length) {
+  log(`Calibrating severity + attack-path for ${verified.length} grounded finding(s).`)
+  for (let i = 0; i < verified.length; i += SEVERITY_CHUNK) {
+    const chunk = verified.slice(i, i + SEVERITY_CHUNK)
+    const results = await parallel(
+      chunk.map((c) => () =>
+        agent(severityPrompt(c), { label: `severity:${c.id}`, phase: 'Severity', schema: SEVERITY_SCHEMA })
+          .then((s) => mergeSeverity(c, s))
+      )
+    )
+    calibrated.push(...results)
+  }
+}
+
+// Reconcile: a DROP, or a downgrade BELOW threshold, is suppressed to the appendix; a downgrade
+// that still meets the threshold stays reportable at the lower (calibrated) severity.
+const reportable = calibrated.filter((c) => c.policy_decision !== 'drop' && meetsThreshold(c.severity))
+const suppressed = calibrated.filter((c) => c.policy_decision === 'drop' || !meetsThreshold(c.severity))
 reportable.sort((a, b) => (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9))
 const counts = reportable.reduce((m, v) => ((m[v.severity] = (m[v.severity] || 0) + 1), m), {})
-const appendix = validationAppendix.concat(verifyRejected) // refuted / needs-info / below-threshold / verification-rejected
-log(`Verification: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (agent died)` : ''}. Reportable now ${reportable.length}; appendix ${appendix.length}. Severity: ${JSON.stringify(counts)}.`)
+const appendix = [...nonConfirmed, ...verifyRejected, ...suppressed] // refuted / needs-info / verification-rejected / dropped / downgraded-below-threshold
+const severity_policy = calibrated.reduce((m, c) => {
+  const k = c.policy_decision === 'drop' ? 'dropped' : (c.policy_decision === 'downgrade' ? 'downgraded' : 'kept')
+  m[k] = (m[k] || 0) + 1; return m
+}, { kept: 0, downgraded: 0, dropped: 0 })
+log(`Severity: ${reportable.length} reportable, ${appendix.length} reviewed-not-reported. Policy: ${JSON.stringify(severity_policy)}. Severity: ${JSON.stringify(counts)}.`)
 
 // ---- Sealed bundle (issue #21): build the fingerprinted findings doc + coverage doc + SARIF
 // projection from the confirmed reportable set, BEFORE the report so the report agent can embed
@@ -620,7 +730,7 @@ const { bundle, sarif, newFindings } = buildBundle(reportable, coverageCtx)
 const isIncremental = !!PRIOR.fps
 if (isIncremental) log(`Incremental run vs ${PRIOR.ref}: ${bundle.coverage.delta.new} new, ${bundle.coverage.delta.carried_over} carried-over, ${bundle.coverage.delta.resolved} resolved (gone since prior).`)
 
-// ---- Phase 3: one synthesized report ----
+// ---- Phase 4: one synthesized report ----
 phase('Report')
 // The workflow runtime blocks subagents from WRITING report files it treats as "findings
 // text" — report.md is rejected ("Subagents should return findings as text, not write
@@ -642,15 +752,22 @@ const REPORT_SCHEMA = {
 const reportResult = await agent(
   `You are writing the final report for a deep security audit of ${SCOPE} (repo at "${TARGET}").
 
-Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/root-cause/payload/fix against the actual source. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}.
+Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/root-cause/payload/fix against the actual source — and THEN a dedicated SEVERITY / ATTACK-PATH stage calibrated its severity (impact x reachability x preconditions) and applied a mechanical over-rating policy pass. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}. Severity policy: ${JSON.stringify(severity_policy)} (kept/downgraded/dropped).
 
-Reportable findings (confirmed AND factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each carries a "verify" object with its grounding outcome; for any with verify.outcome="corrected", render the corrected facts in the body AND note the correction (what changed) as an audit trail so the edit is traceable:
+Reportable findings (confirmed, factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each "severity" is the CALIBRATED severity from the dedicated severity / attack-path stage (AFTER the over-rating policy pass) — render it as authoritative. Each also carries a "verify" object with its grounding outcome (for verify.outcome="corrected", render the corrected facts in the body AND note what changed as an audit trail) and a facts record + any anti_pattern that was applied:
 ${JSON.stringify(reportable, null, 2)}
 
-Reviewed-but-not-reported — refuted / needs-info / below threshold, plus VERIFICATION-REJECTED findings (validated as exploitable but factually wrong about the code). These go in the appendix so suppression is visible, NOT deleted:
-${JSON.stringify(appendix.map((v) => ({ title: v.title, file: v.file, line: v.line, disposition: v.disposition, severity: v.severity, reason: v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}` : (v.evidence || v.proof_gap || v.rationale) })), null, 2)}
+Reviewed-but-not-reported — refuted / needs-info / VERIFICATION-REJECTED (validated exploitable but factually wrong about the code) / policy-DROPPED / policy-DOWNGRADED-below-threshold. These go in the appendix so suppression is VISIBLE, NOT deleted. Render the reason: for a verification rejection, its grounding outcome; for a policy action, the anti-pattern that fired (e.g. a self-XSS downgraded out of HIGH, a theoretical-only finding dropped):
+${JSON.stringify(appendix.map((v) => ({
+  title: v.title, file: v.file, line: v.line, disposition: v.disposition,
+  severity: v.severity || 'info', calibrated_severity: v.calibrated_severity, policy_decision: v.policy_decision, anti_pattern: v.anti_pattern,
+  reason: v.policy_decision === 'drop' ? `policy DROP (${v.anti_pattern || 'over-rating'}): ${v.severity_rationale || ''}`
+        : v.policy_decision === 'downgrade' ? `policy DOWNGRADE to ${v.severity} (${v.anti_pattern || 'over-rating'}): ${v.severity_rationale || ''}`
+        : v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}`
+        : (v.evidence || v.proof_gap || v.rationale),
+})), null, 2)}
 
-Coverage facts: ${TOOL_COVERAGE} Saturation discovery ran ${roundsRun} round(s) of up to ${MAX_ROUNDS} (terminal state: ${terminalState} — saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), ${WORKERS.length} lensed workers per round, ${clean.length} worker passes total (lenses + their threat models below), ~${filesReviewed} file-reviews total, ${unique.length} unique candidates after cumulative merge (${toolCandidates.length} from the deterministic prefilter). Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected.
+Coverage facts: ${TOOL_COVERAGE} Saturation discovery ran ${roundsRun} round(s) of up to ${MAX_ROUNDS} (terminal state: ${terminalState} — saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), ${WORKERS.length} lensed workers per round, ${clean.length} worker passes total (lenses + their threat models below), ~${filesReviewed} file-reviews total, ${unique.length} unique candidates after cumulative merge (${toolCandidates.length} from the deterministic prefilter). Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected. Severity calibrated by a dedicated attack-path stage: ${JSON.stringify(severity_policy)} (kept/downgraded/dropped) across ${confirmedSet.length} confirmed finding(s).
 Worker threat models / lenses:
 ${JSON.stringify(clean.map((d, i) => ({ worker: i, files_reviewed: d.files_reviewed, threat_model: d.threat_model })), null, 2)}
 
@@ -692,7 +809,9 @@ return {
   files_reviewed: filesReviewed,
   tool_coverage: TOOL_COVERAGE,
   candidates: unique.length,
+  confirmed: confirmedSet.length,
   counts,
+  severity_policy,
   reportable,
   appendix_count: appendix.length,
   verify_counts, // factual-grounding gate tallies: verified / corrected / rejected / unverified (additive)

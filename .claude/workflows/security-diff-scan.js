@@ -59,9 +59,10 @@ export const meta = {
   phases: [
     { title: 'Resolve', detail: 'resolve the change ONCE into the exact changed files + hunks (read-only relay; local git range/working tree, or a PR via gh — PR diff & text nonce-fenced)' },
     { title: 'Discovery', detail: 'K independent workers, each a distinct threat-model lens, hunt candidates ONLY in the change in parallel' },
-    { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge; a change-scope gate drops pre-existing issues the change does not touch' },
+    { title: 'Validate', detail: 'one disprove-first validator per unique candidate after semantic merge (exploitability + change-attribution only — severity is a separate stage); a change-scope gate drops pre-existing issues the change does not touch' },
     { title: 'Verify', detail: 'one fresh read-only agent per reportable finding GROUNDS it against the diff/source (file/line/root-cause/payload/fix) -> verified|corrected|rejected' },
-    { title: 'Report', detail: 'synthesize one HTML + markdown report from the reconciled, factually-grounded in-scope findings, with a coverage statement of which files/hunks were reviewed' },
+    { title: 'Severity', detail: 'per confirmed in-scope finding: derive an attacker-path facts record, calibrate severity, then a mechanical over-rating policy pass (downgrade/drop self-XSS, theoretical, internal-no-boundary, …)' },
+    { title: 'Report', detail: 'synthesize one HTML + markdown report from confirmed, in-scope findings, with a coverage statement of which files/hunks were reviewed; suppressed/downgraded items kept in the appendix' },
   ],
 }
 
@@ -209,21 +210,53 @@ const RESOLVE_SCHEMA = {
   },
 }
 
+// The validator decides EXPLOITABILITY + CHANGE-ATTRIBUTION only. Severity is split out into the
+// dedicated Severity / attack-path stage below (issue #22), so this schema no longer carries
+// severity / reportable / cvss — the disprove-first pass stays focused on "is it real, reachable,
+// exploitable, AND caused by the change?"; "how bad, and does an over-rating anti-pattern apply?"
+// is a separate stage reasoning from an attacker-path facts record.
 const VALIDATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['disposition', 'severity', 'in_change_scope', 'reportable', 'rationale'],
+  required: ['disposition', 'in_change_scope', 'rationale'],
   properties: {
-    disposition: { type: 'string', enum: ['confirmed', 'refuted', 'needs-info'], description: 'confirmed=evidence shows with >80% confidence it is real, reachable, exploitable AND caused by the change; refuted=a guard defeats it / input not attacker-controlled / not reachable / not caused by the change; needs-info=could not prove or disprove within bounded effort (anything under the 80% bar lands here, never in confirmed).' },
-    severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Calibrated from impact x reachability x preconditions. Use info for refuted/non-issues.' },
+    disposition: { type: 'string', enum: ['confirmed', 'refuted', 'needs-info'], description: 'confirmed=evidence shows with >80% confidence it is real, reachable, exploitable AND caused by the change; refuted=a guard defeats it / input not attacker-controlled / not reachable / not caused by the change; needs-info=could not prove or disprove within bounded effort (anything under the 80% bar lands here, never in confirmed). Decide EXPLOITABILITY only — severity is calibrated downstream.' },
     in_change_scope: { type: 'boolean', description: 'True iff this issue is INTRODUCED, MODIFIED, REMOVED, or newly EXPOSED by the change. False = a pre-existing issue in unchanged code the change does not touch/reach (out of scope for a diff review even if real).' },
-    reportable: { type: 'boolean', description: `True iff disposition=confirmed AND in_change_scope=true AND severity meets the ${THRESHOLD} threshold. Refuted, needs-info, and out-of-scope are NOT reportable.` },
-    rationale: { type: 'string', description: 'Concise justification for the disposition: the decisive reason it is confirmed / refuted / needs-info, including why the change is (or is not) responsible.' },
+    rationale: { type: 'string', description: 'Concise justification for the disposition, citing which of the five disprove tests settled it and why the change is (or is not) responsible.' },
     attacker_story: { type: 'string', description: 'How the issue is reached and abused, in concrete terms.' },
     evidence: { type: 'string', description: 'The proof: the attacker-input -> sink trace naming each guard on the path and why it does/does not defeat the input, anchored to the changed hunk.' },
     proof_gap: { type: 'string', description: 'For needs-info: the exact missing piece (service, input, infra). Empty otherwise.' },
     fix: { type: 'string', description: 'Concrete remediation.' },
-    cvss_vector: { type: 'string', description: 'Optional CVSS 3.1 vector; must match the prose severity. Empty if not assessed.' },
+  },
+}
+
+// Severity / attack-path stage schema (issue #22): facts -> calibrated severity -> policy.
+// Runs only on CONFIRMED, in-change-scope candidates. Identical rubric to deep-security-scan:
+// build an attacker-path FACTS record from repo+change evidence, calibrate severity from it, then
+// mechanically apply the "should-not-remain-high/critical" anti-pattern list, downgrading/dropping.
+const SEVERITY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['facts', 'calibrated_severity', 'final_severity', 'policy_decision', 'rationale'],
+  properties: {
+    facts: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['exposure', 'identities', 'reachability', 'controls', 'boundary_crossed'],
+      properties: {
+        exposure: { type: 'string', description: 'Where the vulnerable code sits relative to a trust boundary — internet-facing / authenticated-user-reachable / internal-only / local-only / dev/test-only — citing the concrete entry point (route/handler/CLI).' },
+        identities: { type: 'string', description: 'Whose privileges are involved: who can reach it (anonymous / any authed user / admin) and what privilege the attacker GAINS. Flag explicitly if attacker and victim are the SAME principal (self-only).' },
+        reachability: { type: 'string', description: 'The concrete attacker path from entry point to sink and the preconditions required. State plainly if reachability is only THEORETICAL / unproven.' },
+        controls: { type: 'string', description: 'Compensating controls already on the path (authn, CSP, prepared statements, sandboxing, network ACLs), each marked PRIMARY defense vs secondary defense-in-depth layer.' },
+        boundary_crossed: { type: 'boolean', description: 'True iff exploitation crosses a real privilege/trust boundary (attacker gains something they could not already do). False for self-only / same-principal / internal-with-no-boundary.' },
+      },
+    },
+    calibrated_severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Severity derived from the FACTS (impact x reachability x preconditions), BEFORE the policy pass.' },
+    final_severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'], description: 'Severity AFTER the policy pass — what the report uses. Equals calibrated_severity when policy_decision=keep; lower when downgrade; info when drop.' },
+    policy_decision: { type: 'string', enum: ['keep', 'downgrade', 'drop'], description: 'Mechanical over-rating policy result: keep=facts justify the calibrated severity; downgrade=an anti-pattern caps it lower; drop=an anti-pattern means it should not be reported at all (theoretical-only, no boundary crossed, bare checklist deviation).' },
+    anti_pattern: { type: 'string', description: 'If downgrade/drop, which anti-pattern fired: self-xss | theoretical-memory-corruption | internal-no-boundary | could-matter-if-chained | missing-second-defense-layer | owasp-checklist-deviation. Empty when keep.' },
+    cvss_vector: { type: 'string', description: 'Optional CVSS 3.1 vector; must match final_severity. Empty if not assessed.' },
+    rationale: { type: 'string', description: 'Concise justification tying facts -> calibrated severity -> policy decision.' },
   },
 }
 
@@ -486,6 +519,36 @@ const SCOPE_RULE =
   `change_ref. Do NOT report pre-existing issues in unchanged code unless THIS change newly exposes or reaches ` +
   `them. This is a diff review, not a whole-repo audit.`
 
+// Per-candidate Severity / attack-path stage prompt (issue #22). Defined here (CHANGE_BLOCK is in
+// scope) and invoked in Phase 4. The fenced UNTRUSTED diff is embedded so the analyst grounds the
+// facts record in the change without re-fetching anything.
+const severityPrompt = (c) =>
+  `You are a SEVERITY / ATTACK-PATH analyst calibrating a CONFIRMED, in-change-scope security finding for ${SCOPE} (repo at "${TARGET}"). Exploitability + change-attribution are ALREADY settled upstream — do NOT re-litigate them. Your job: (1) build an attacker-path FACTS record from the actual code + the change, (2) calibrate severity from those facts, (3) apply a mechanical over-rating POLICY pass that downgrades/drops auditor-recognized anti-patterns. Work TRACE-ONLY: read code (Read/Grep/Glob, read-only shell); do NOT build, test, run, or start servers.
+
+${CHANGE_BLOCK}
+
+Confirmed finding (introduced/exposed by the change):
+- title: ${c.title}
+- file:  ${c.file}:${c.line || '?'}
+- class: ${c.vuln_class}
+- change_ref: ${c.change_ref || '?'}  (introduced: ${c.introduced || '?'})
+- source/sink: ${c.source || '?'} -> ${c.sink || '?'}
+- validator evidence: ${c.evidence || c.why || ''}
+- attacker story: ${c.attacker_story || ''}
+
+1. FACTS — from the real code + change, record: exposure (where the code sits vs a trust boundary, cite the entry point); identities (who can reach it and what privilege they gain; flag if attacker == victim / same principal); reachability (the concrete path + preconditions; flag if only THEORETICAL); controls (defenses on the path, each PRIMARY vs secondary defense-in-depth); boundary_crossed (does exploitation cross a real privilege/trust boundary).
+2. CALIBRATE calibrated_severity = impact x reachability x preconditions, from the facts.
+3. POLICY PASS — a finding should NOT remain high/critical when it matches an over-rating anti-pattern. Downgrade (cap lower) or drop (do not report; final_severity=info) when:
+   - SELF-XSS / self-inflicted (attacker == victim, no other principal harmed) — never high/critical;
+   - THEORETICAL memory-corruption or any issue with no demonstrated reachable path — drop or floor to low;
+   - INTERNAL-ONLY with NO trust boundary crossed (boundary_crossed=false) — downgrade;
+   - "could matter if CHAINED" with no concrete present chain — do not inflate on a hypothetical chain;
+   - a missing *second* DEFENSE-IN-DEPTH layer where a PRIMARY control still holds — not high/critical;
+   - a bare OWASP-CHECKLIST / best-practice deviation with no concrete exploit — drop.
+   Apply the DYNAMIC BASELINE: compare to comparable production systems; if reachable untouched code has plausibly not been exploited, understand WHY before rating it high. Do NOT pad the report — suppression stays visible (downgraded/dropped items still appear in the appendix), so prefer accuracy over inflation.
+   Set policy_decision (keep|downgrade|drop), final_severity (== calibrated when keep; lower when downgrade; info when drop), and anti_pattern (which one fired; empty when keep).
+Return the structured object.`
+
 // ============================ Phase 2 — lensed discovery over the CHANGE ============================
 // Barrier: dedup needs all of it.
 phase('Discovery')
@@ -599,8 +662,9 @@ Try hard to DISPROVE it:
 1. Locate the cited change in the fenced diff and ${MODE === 'pr' ? 'the local base files' : 'the changed files'} it reaches. Never conclude on a location you have not read.
 2. TRACE-ONLY validation: do NOT build, test, run, or start servers (no cargo/npm/pnpm/yarn/bun build/test/run, no server starts, no migrations — concurrent builds have stalled this pipeline before). Validate by reading code: trace attacker-input -> sink, naming EVERY guard on the path and whether it truly defeats the input, plus the attacker preconditions. Read-only shell (rg, ls, git grep, git show) is fine.
 3. CHANGE-SCOPE GATE: confirm the issue is actually introduced, modified, removed, or newly EXPOSED by this change. If it is a pre-existing issue in unchanged code that the change does not touch or newly reach, set in_change_scope=false (out of scope for a diff review, even if real).
-4. Decide disposition: confirmed ONLY if you are >80% confident it is real, reachable, exploitable AND caused by the change; refuted (a guard defeats it / not attacker-controlled / not reachable / not caused by the change — say why); or needs-info (state the EXACT proof gap; anything under the 80% bar is needs-info, never confirmed).
-5. If confirmed, calibrate severity from impact x reachability x preconditions, and set reportable per the ${THRESHOLD} threshold AND in_change_scope=true. Give an attacker story, the evidence, and a concrete fix.
+4. Run the five DISPROVE TESTS and answer each: (a) EXPLOITATION — is there a concrete attacker-reachable path, not just a code smell; (b) IMPACT — what an attacker actually gains if it fires; (c) BASELINE (the DYNAMIC BASELINE principle) — compare to comparable production systems and ask WHY this code has plausibly not already been exploited; if there is a benign reason, surface it and lean toward refuted/needs-info; (d) MITIGATION — does an existing guard/control already defeat it; (e) PARSER/RUNTIME-BEHAVIOR — does language/framework/runtime behavior (escaping, type coercion, prepared statements) neutralize it.
+5. Decide disposition: confirmed ONLY if you are >80% confident it is real, reachable, exploitable AND caused by the change; refuted (a guard defeats it / not attacker-controlled / not reachable / not caused by the change — say why); or needs-info (state the EXACT proof gap; anything under the 80% bar is needs-info, never confirmed).
+6. If confirmed, give the attacker story, the evidence, and a concrete fix. Do NOT assign severity here — a dedicated severity / attack-path stage calibrates severity downstream from an attacker-path facts record. Your job is EXPLOITABILITY + change-attribution, not rating.
 
 Return the structured object.`,
         { label: `validate:${c.id}`, phase: 'Validate', agentType: READONLY_AGENT, schema: VALIDATION_SCHEMA }
@@ -612,9 +676,9 @@ Return the structured object.`,
 
 const verdicts = validated.filter(Boolean)
 const sevRank = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
-const confirmedReportable = verdicts.filter((v) => v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)
-const validationAppendix = verdicts.filter((v) => !(v.reportable && v.disposition === 'confirmed' && v.in_change_scope !== false)) // refuted / needs-info / out-of-scope / below-threshold
-log(`Validation: ${confirmedReportable.length} reportable, ${validationAppendix.length} reviewed-not-reported.`)
+const confirmedSet = verdicts.filter((v) => v.disposition === 'confirmed' && v.in_change_scope !== false)
+const notForSeverity = verdicts.filter((v) => !(v.disposition === 'confirmed' && v.in_change_scope !== false)) // refuted / needs-info / out-of-scope
+log(`Validation: ${confirmedSet.length} confirmed in-scope, ${notForSeverity.length} refuted/needs-info/out-of-scope.`)
 
 // ============================ Phase 3.5 — independent factual VERIFICATION (grounding) ============================
 // A FRESH read-only agent grounds each confirmed in-scope finding against the diff/source: file
@@ -628,9 +692,9 @@ log(`Validation: ${confirmedReportable.length} reportable, ${validationAppendix.
 phase('Verify')
 const VERIFY_CHUNK = 8
 const verifyResults = []
-for (let i = 0; i < confirmedReportable.length; i += VERIFY_CHUNK) {
-  const chunk = confirmedReportable.slice(i, i + VERIFY_CHUNK)
-  log(`Verifying (grounding) reportable findings ${i + 1}-${i + chunk.length} of ${confirmedReportable.length}.`)
+for (let i = 0; i < confirmedSet.length; i += VERIFY_CHUNK) {
+  const chunk = confirmedSet.slice(i, i + VERIFY_CHUNK)
+  log(`Verifying (grounding) confirmed in-scope findings ${i + 1}-${i + chunk.length} of ${confirmedSet.length}.`)
   const results = await parallel(
     chunk.map((c) => () =>
       agent(
@@ -638,7 +702,7 @@ for (let i = 0; i < confirmedReportable.length; i += VERIFY_CHUNK) {
 
 ${CHANGE_BLOCK}
 
-The finding to ground (already confirmed exploitable + in change scope; severity ${c.severity}):
+The finding to ground (already confirmed exploitable + in change scope; severity is calibrated downstream):
 - id:    ${c.id}
 - title: ${c.title}
 - file:  ${c.file}:${c.line || '?'}
@@ -668,27 +732,65 @@ A finding citing a wrong line or a non-existent sink must be corrected or reject
 // rejected is moved to the appendix so the suppression stays auditable. A dead verify agent
 // (null) keeps the finding reportable, flagged "unverified" — never silently dropped.
 const verify_counts = { verified: 0, corrected: 0, rejected: 0, unverified: 0 }
-const reportable = []
+const verified = []
 const verifyRejected = []
 for (const { finding, verify } of verifyResults) {
   if (!verify) {
     verify_counts.unverified++
-    reportable.push({ ...finding, verify: { outcome: 'unverified', rationale: 'verify agent returned no result; kept reportable, not silently dropped' } })
+    verified.push({ ...finding, verify: { outcome: 'unverified', rationale: 'verify agent returned no result; kept reportable, not silently dropped' } })
   } else if (verify.outcome === 'rejected') {
     verify_counts.rejected++
     verifyRejected.push({ ...finding, verify })
   } else if (verify.outcome === 'corrected') {
     verify_counts.corrected++
-    reportable.push({ ...finding, ...(verify.corrected_fields || {}), verify })
+    verified.push({ ...finding, ...(verify.corrected_fields || {}), verify })
   } else {
     verify_counts.verified++
-    reportable.push({ ...finding, verify })
+    verified.push({ ...finding, verify })
   }
 }
+log(`Verification: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (agent died)` : ''}. ${verified.length} grounded finding(s) proceed to severity calibration.`)
+
+// ============================ Phase 4 — severity / attack-path calibration ============================
+// Dedicated auditor-grade stage (issue #22): per confirmed in-scope finding, severityPrompt (above)
+// derives an attacker-path FACTS record, calibrates severity, then runs a mechanical over-rating
+// POLICY pass (self-XSS, theoretical, internal-no-boundary, could-matter-if-chained, missing 2nd
+// defense layer, bare OWASP-checklist) that downgrades/drops. Suppression stays VISIBLE — downgraded/
+// dropped findings still land in the appendix. Chunked like Validate; read-only agentType.
+phase('Severity')
+const meetsThreshold = (sev) => (sevRank[sev] ?? 9) <= (sevRank[THRESHOLD] ?? 9)
+const mergeSeverity = (c, s) => s
+  ? { ...c, facts: s.facts, calibrated_severity: s.calibrated_severity, severity: s.final_severity, policy_decision: s.policy_decision, anti_pattern: s.anti_pattern || '', cvss_vector: s.cvss_vector || '', severity_rationale: s.rationale }
+  // Severity agent died: keep the confirmed finding visible (never silently drop a real one) at a
+  // conservative MEDIUM, flagged so the calibration gap is honest.
+  : { ...c, severity: 'medium', calibrated_severity: 'medium', policy_decision: 'keep', anti_pattern: '', severity_rationale: 'severity stage returned no result; conservative fallback', severity_failed: true }
+const SEVERITY_CHUNK = 8
+const calibrated = []
+if (verified.length) {
+  log(`Calibrating severity + attack-path for ${verified.length} grounded in-scope finding(s).`)
+  for (let i = 0; i < verified.length; i += SEVERITY_CHUNK) {
+    const chunk = verified.slice(i, i + SEVERITY_CHUNK)
+    const results = await parallel(
+      chunk.map((c) => () =>
+        agent(severityPrompt(c), { label: `severity:${c.id}`, phase: 'Severity', agentType: READONLY_AGENT, schema: SEVERITY_SCHEMA })
+          .then((s) => mergeSeverity(c, s))
+      )
+    )
+    calibrated.push(...results)
+  }
+}
+// Reconcile: a DROP, or a downgrade BELOW threshold, is suppressed to the appendix; a downgrade
+// that still meets the threshold stays reportable at the lower (calibrated) severity.
+const reportable = calibrated.filter((c) => c.policy_decision !== 'drop' && meetsThreshold(c.severity))
+const suppressed = calibrated.filter((c) => c.policy_decision === 'drop' || !meetsThreshold(c.severity))
 reportable.sort((a, b) => (sevRank[a.severity] ?? 9) - (sevRank[b.severity] ?? 9))
 const counts = reportable.reduce((m, v) => ((m[v.severity] = (m[v.severity] || 0) + 1), m), {})
-const appendix = validationAppendix.concat(verifyRejected) // refuted / needs-info / out-of-scope / below-threshold / verification-rejected
-log(`Verification: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (agent died)` : ''}. Reportable now ${reportable.length}; appendix ${appendix.length}. Severity: ${JSON.stringify(counts)}.`)
+const appendix = [...notForSeverity, ...verifyRejected, ...suppressed] // refuted / needs-info / out-of-scope / verification-rejected / dropped / downgraded-below-threshold
+const severity_policy = calibrated.reduce((m, c) => {
+  const k = c.policy_decision === 'drop' ? 'dropped' : (c.policy_decision === 'downgrade' ? 'downgraded' : 'kept')
+  m[k] = (m[k] || 0) + 1; return m
+}, { kept: 0, downgraded: 0, dropped: 0 })
+log(`Severity: ${reportable.length} reportable, ${appendix.length} reviewed-not-reported. Policy: ${JSON.stringify(severity_policy)}. Severity: ${JSON.stringify(counts)}.`)
 
 // ---- Sealed bundle (issue #21): fingerprinted findings doc + coverage doc + SARIF, built from
 // the confirmed in-scope set BEFORE the report so the agent can embed them and lead with what's
@@ -697,7 +799,7 @@ const { bundle, sarif, newFindings } = buildBundle(reportable, coverageCtx)
 const isIncremental = !!PRIOR.fps
 if (isIncremental) log(`Incremental diff vs ${PRIOR.ref}: ${bundle.coverage.delta.new} new, ${bundle.coverage.delta.carried_over} carried-over, ${bundle.coverage.delta.resolved} resolved.`)
 
-// ============================ Phase 4 — one synthesized report ============================
+// ============================ Phase 5 — one synthesized report ============================
 // The workflow runtime blocks subagents from WRITING report files it treats as "findings text"
 // (report.md is rejected; report.html is allowed). Align with that: write ONLY report.html,
 // embed the markdown base64 inside it, and RETURN the full markdown as structured output so the
@@ -717,13 +819,20 @@ const REPORT_SCHEMA = {
 const reportResult = await agent(
   `You are writing the final report for a CHANGE-SCOPED security review of ${SCOPE} (repo at "${TARGET}").
 
-Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/change_ref/root-cause/payload/fix against the actual diff/source. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}.
+Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/change_ref/root-cause/payload/fix against the actual diff/source — and THEN a dedicated SEVERITY / ATTACK-PATH stage calibrated its severity (impact x reachability x preconditions) and applied a mechanical over-rating policy pass. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}. Severity policy: ${JSON.stringify(severity_policy)} (kept/downgraded/dropped).
 
-Reportable findings (confirmed, in change scope, factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each carries a "verify" object with its grounding outcome; for any with verify.outcome="corrected", render the corrected facts in the body AND note the correction (what changed) as an audit trail so the edit is traceable:
+Reportable findings (confirmed, in change scope, factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each "severity" is the CALIBRATED severity from the dedicated severity / attack-path stage (AFTER the over-rating policy pass) — render it as authoritative. Each also carries a "verify" object with its grounding outcome (for verify.outcome="corrected", render the corrected facts in the body AND note what changed as an audit trail) and a facts record + any anti_pattern that was applied:
 ${JSON.stringify(reportable, null, 2)}
 
-Reviewed-but-not-reported — refuted / needs-info / out-of-change-scope / below threshold, plus VERIFICATION-REJECTED findings (validated as exploitable but factually wrong about the code). These go in an appendix so suppression is visible, NOT deleted:
-${JSON.stringify(appendix.map((v) => ({ title: v.title, file: v.file, line: v.line, change_ref: v.change_ref, disposition: v.disposition, severity: v.severity, in_change_scope: v.in_change_scope, reason: v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}` : (v.evidence || v.proof_gap || v.rationale) })), null, 2)}
+Reviewed-but-not-reported — refuted / needs-info / out-of-change-scope / VERIFICATION-REJECTED (validated exploitable but factually wrong about the code) / policy-DROPPED / policy-DOWNGRADED-below-threshold. These go in an appendix so suppression is VISIBLE, NOT deleted. Render the reason: for a verification rejection, its grounding outcome; for a policy action, the anti-pattern that fired (e.g. a self-XSS downgraded out of HIGH, a theoretical-only finding dropped):
+${JSON.stringify(appendix.map((v) => ({
+  title: v.title, file: v.file, line: v.line, change_ref: v.change_ref, disposition: v.disposition,
+  severity: v.severity || 'info', calibrated_severity: v.calibrated_severity, in_change_scope: v.in_change_scope, policy_decision: v.policy_decision, anti_pattern: v.anti_pattern,
+  reason: v.policy_decision === 'drop' ? `policy DROP (${v.anti_pattern || 'over-rating'}): ${v.severity_rationale || ''}`
+        : v.policy_decision === 'downgrade' ? `policy DOWNGRADE to ${v.severity} (${v.anti_pattern || 'over-rating'}): ${v.severity_rationale || ''}`
+        : v.verify ? `verification-${v.verify.outcome}: ${v.verify.rationale}`
+        : (v.evidence || v.proof_gap || v.rationale),
+})), null, 2)}
 
 Coverage facts (render the COVERAGE STATEMENT verbatim): ${COVERAGE} Factual-verification gate: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected, ${verify_counts.rejected} rejected.
 ${WORKERS.length} independent discovery workers ran (lenses + threat models below), ~${hunksReviewed} hunk-reviews total, ${unique.length} unique candidates after merge.
@@ -776,7 +885,9 @@ return {
   hunks_reviewed: hunksReviewed,
   coverage: COVERAGE,
   candidates: unique.length,
+  confirmed: confirmedSet.length,
   counts,
+  severity_policy,
   reportable,
   appendix_count: appendix.length,
   verify_counts, // factual-grounding gate tallies: verified / corrected / rejected / unverified (additive)
