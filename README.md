@@ -65,6 +65,8 @@ claude plugin install shipofclaudius@shipofclaudius
 
 Each workflow is exposed as a wrapper skill (`/shipofclaudius:<name>`, e.g. `/shipofclaudius:deep-security-scan`) and by natural language (*"run a deep security scan"*). The wrapper calls the Workflow tool with the bundled script at `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js`, so an update to the plugin updates the workflows everywhere with no manual step.
 
+> **Updates / versioning.** This plugin is intentionally **unversioned** — its `plugin.json` sets no `version`, so Claude Code tracks it by git commit SHA and treats every push to `main` as a new version. Run `claude plugin update shipofclaudius@shipofclaudius` (or let auto-update fire) and you always get the latest commit — there's no version number to watch and no release to wait on. *Maintainers:* do **not** add a `version` field to `plugin.json` without also bumping it on every release; a pinned-but-unbumped version silently freezes all installers on one snapshot (this is enforced by `tests/plugin-integrity.test.mjs`). See the [version-management docs](https://code.claude.com/docs/en/plugins-reference#version-management).
+
 ## Using a workflow
 
 ### As a user (in a Claude Code session)

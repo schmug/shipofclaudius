@@ -11,17 +11,25 @@ const readJSON = async (rel) => JSON.parse(await read(rel))
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
-test('plugin.json is valid JSON with name/version/description', async () => {
+test('plugin.json is valid JSON with name/description and NO pinned version', async () => {
   const m = await readJSON('.claude-plugin/plugin.json')
   assert.equal(m.name, 'shipofclaudius', 'plugin name matches the repo slug')
-  assert.equal(typeof m.version, 'string', 'version is a string')
   assert.ok(typeof m.description === 'string' && m.description.length > 0, 'non-empty description')
+  // Intentionally unversioned: Claude Code falls back to the git commit SHA so every
+  // commit ships to installers. A pinned `version` here would gate updates off until
+  // someone remembers to bump it (it never got bumped across many feature commits).
+  // See https://code.claude.com/docs/en/plugins-reference#version-management
+  assert.ok(!('version' in m), 'plugin.json must NOT pin a version (use commit-SHA delivery)')
 })
 
-test('marketplace.json is valid JSON and lists the shipofclaudius plugin', async () => {
+test('marketplace.json is valid JSON, lists the plugin, and pins no version', async () => {
   const mk = await readJSON('.claude-plugin/marketplace.json')
   assert.ok(Array.isArray(mk.plugins) && mk.plugins.length >= 1, 'has a plugins array')
-  assert.ok(mk.plugins.some((p) => p && p.name === 'shipofclaudius'), 'lists the shipofclaudius plugin')
+  const plugin = mk.plugins.find((p) => p && p.name === 'shipofclaudius')
+  assert.ok(plugin, 'lists the shipofclaudius plugin')
+  // A version in the marketplace entry would also gate updates (resolution order:
+  // plugin.json version -> marketplace entry version -> git SHA). Keep both unset.
+  assert.ok(!('version' in plugin), 'marketplace entry must NOT pin a version')
 })
 
 import { readdir } from 'node:fs/promises'
