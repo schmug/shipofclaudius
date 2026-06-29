@@ -81,8 +81,8 @@ export const meta = {
   description: 'Read-only fan-out: one agent per open PR → MERGE/CLOSE/REBASE/FIX_CI/COMMENT/AWAITING_HUMAN/ESCALATE with CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated gh user by default, or args.author; bots & other authors excluded). Auto-gathers all open PRs when none are passed.',
   phases: [
     { title: 'Gather', detail: 'one read-only agent lists open PRs (or views the passed numbers) + resolves the gh user; the author filter is applied in code. A read-only discover agent resolves the required-status-check list once.' },
-    { title: 'Triage', detail: 'per kept PR (in sequential waves of <=8): a read-only relay fetches the untrusted PR text, then a read-only agent classifies it from nonce-fenced data + trusted CI/mergeability metadata + the pre-discovered required-check list' },
-    { title: 'Synthesize', detail: 'one read-only agent reconciles the per-PR verdicts into action-grouped buckets + a markdown roadmap report' },
+    { title: 'Triage', detail: 'a read-checkpoint loads prior verdicts and skips unchanged-and-done PRs; then per remaining kept PR (in sequential waves of <=8): a read-only relay fetches the untrusted PR text, then a read-only agent classifies it from nonce-fenced data + trusted CI/mergeability metadata + the pre-discovered required-check list' },
+    { title: 'Synthesize', detail: 'one read-only agent reconciles the per-PR verdicts (fresh + checkpoint-reused) into action-grouped buckets + a markdown roadmap report; a single writer agent then persists the merged checkpoint' },
   ],
 }
 
@@ -122,6 +122,102 @@ async function runWaves(items, fn, batchSize = 8) {
     log(`Wave ${w + 1}/${waves} done — ${out.filter(Boolean).length}/${items.length} triaged so far.`)
   }
   return out
+}
+
+// ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
+// Read-only PR triage is expensive (relay→classify chain per PR). Re-running should not
+// re-pay for PRs that have not changed since last time. We persist each item's result to
+// ~/.claude/workflows/state/<repo>-<wf>.json, keyed by {number, updatedAt, SPINE_VERSION}.
+// On re-run we skip an entry iff it is present, done, its PR's `updatedAt` is unchanged,
+// AND it was written by THIS spine version. (PR triage already has state-derived skipping
+// for non-OPEN PRs; this is the orthogonal READ checkpoint for OPEN PRs that are unchanged.)
+//
+// Workflow scripts cannot do file IO, so the mechanism is agent-mediated and runs through
+// the read-only agentType like everything else:
+//   - a LOAD agent (ckpt-load) resolves the state path and `cat`s the file (empty if
+//     missing); the script JSON.parses it DEFENSIVELY (malformed → treated as empty).
+//   - a METADATA agent (ckpt-meta) resolves each kept PR's CURRENT `updatedAt` in ONE
+//     batched gh call, so the skip decision happens BEFORE the expensive chain.
+//   - a single WRITER agent (ckpt-write) runs SEQUENTIALLY at the end (never inside a
+//     concurrent wave → no clobber race) to persist the merged state (old unchanged
+//     entries + newly computed ones).
+// args.fresh:true bypasses LOAD entirely (recompute everything) but still WRITES back.
+const FRESH = A.fresh === true
+const CKPT_WF = 'pr-triage-fanout'
+
+// The load/meta/write agents read the state file, which is WORKFLOW-AUTHORED data — not
+// attacker-writable like PR bodies. Still parse it defensively (never throw on a missing
+// dir / truncated file / hand-edited junk) and keep these agents read-only on GitHub (they
+// only touch the local state file + read-only gh metadata).
+const CKPT_LOAD_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['raw', 'path'],
+  properties: {
+    raw: { type: 'string', description: 'Verbatim contents of the state file, or an empty string if it does not exist yet.' },
+    path: { type: 'string', description: 'The absolute path that was read (and that the writer must write back to).' },
+  },
+}
+const CKPT_LOAD_PROMPT =
+  `You are a READ-ONLY checkpoint loader. Do exactly this and nothing else:\n` +
+  `1. Resolve the repo slug: \`gh repo view ${REPO} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
+  `Replace its "/" with "-" to form <repo>; if it cannot be resolved use "repo".\n` +
+  `2. Compute the state file path: \`$HOME/.claude/workflows/state/<repo>-${CKPT_WF}.json\` (expand $HOME to an absolute path).\n` +
+  `3. Print the file if it exists: \`cat "<path>" 2>/dev/null\` — if the file or its directory does not exist, that prints nothing; return an EMPTY string for raw (do NOT create it, do NOT error).\n` +
+  `Return { raw, path } where raw is the verbatim file contents (or "") and path is the absolute path from step 2. ` +
+  `Do NOT edit, comment, merge, push, or open anything; run no mutating command.`
+
+const CKPT_META_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['items'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['number', 'updatedAt'],
+        properties: {
+          number: { type: 'integer' },
+          updatedAt: { type: 'string', description: 'The PR\'s current updatedAt timestamp (ISO8601), or "" if the number could not be resolved.' },
+        },
+      },
+    },
+  },
+}
+const CKPT_META_PROMPT = (nums) =>
+  `You are a READ-ONLY metadata relay. For these PR numbers — ${nums.join(', ')} — resolve each one's CURRENT \`updatedAt\` timestamp so a checkpoint can tell which PRs changed since last run.\n` +
+  `Run (one call): \`gh pr list ${REPO} --state all --json number,updatedAt --jq '[.[] | {number, updatedAt}]'\` and keep only the requested numbers; for any requested number not returned, use updatedAt "" (treat as changed).\n` +
+  `Return { items: [{ number, updatedAt }, ...] } covering EVERY requested number. Read-only: run no mutating command; do NOT edit, comment, merge, push, or open anything.`
+
+const CKPT_WRITE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['written'],
+  properties: { written: { type: 'boolean', description: 'true once the merged state file has been written.' } },
+}
+const CKPT_WRITE_PROMPT = (path, json) =>
+  `You are a READ-ONLY-on-GitHub checkpoint writer. Persist this workflow's read-checkpoint to the LOCAL state file ONLY.\n` +
+  `1. Ensure the directory exists: \`mkdir -p "$(dirname "${path}")"\`.\n` +
+  `2. Write EXACTLY the following JSON (verbatim, no edits, no commentary) to \`${path}\`, overwriting any existing file:\n` +
+  `<<<CKPT_STATE_JSON>>>\n${json}\n<<<END_CKPT_STATE_JSON>>>\n` +
+  `(Write only the bytes BETWEEN the markers — not the markers themselves.)\n` +
+  `Return { written: true } on success. Touch ONLY that local file; do NOT edit, comment, merge, push, or open anything on GitHub; run no other mutating command.`
+
+// Parse the loaded state defensively: a missing/empty/malformed file yields {} (a clean
+// full run), never a throw. Returns an object keyed by PR number (string) → entry.
+function ckptParse(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  let parsed
+  try { parsed = JSON.parse(raw) } catch { return {} }
+  if (!parsed || typeof parsed !== 'object') return {}
+  const entries = (parsed.entries && typeof parsed.entries === 'object') ? parsed.entries : {}
+  return entries
+}
+
+// An entry is REUSABLE (skip the relay→classify chain, reuse the cached result) iff it
+// exists, is done, was stamped with the current SPINE_VERSION, and its PR's current
+// `updatedAt` matches the cached one. A blank current updatedAt (unresolved) is treated as
+// changed → always re-run. FRESH disables reuse entirely.
+function ckptReusable(entry, currentUpdatedAt) {
+  if (!entry || typeof entry !== 'object') return false
+  if (entry.spineVersion !== SPINE_VERSION) return false
+  if (!entry.result) return false
+  if (!currentUpdatedAt) return false
+  return entry.updatedAt === currentUpdatedAt
 }
 
 const INJECTION_GUARD =
@@ -265,7 +361,7 @@ if (kept.length === 0) {
       author_filter: AUTHOR,
       queried_repo: QUERIED_REPO,
       total_candidates: CANDIDATES.length,
-      missing: [], roadmap: null, requiredContexts: [], spineVersion: SPINE_VERSION,
+      missing: [], roadmap: null, reused: [], checkpointWritten: false, requiredContexts: [], spineVersion: SPINE_VERSION,
     }
   }
   throw new Error(
@@ -430,40 +526,79 @@ Produce a grouped, actionable PR roadmap:
 Be decisive and concrete; always reference PR numbers. Return the structured object.`
 
 phase('Triage')
-log(`Triaging ${kept.length} kept PR(s) in waves of <=${BATCH} — each PR is a relay→classify chain (2 agents), so an unbatched fan-out would double concurrency-cliff exposure.`)
 
-// Per kept PR: a read-only relay fetches the untrusted human-text (fixed gh command), then a
-// read-only classifier reasons over it as nonce-fenced DATA while issuing only the trusted
-// metadata queries. A failed fetch drops the PR (returns null). runWaves keeps peak in-flight
-// agents <= BATCH (sequential waves) so the fan-out stays under the StructuredOutput cliff.
-const results = await runWaves(kept, async (p) => {
+// ── Read-checkpoint LOAD + skip decision (spine §2.4). ───────────────────────────────
+// 1) LOAD the prior state (skipped on args.fresh). 2) resolve each kept PR's current
+// `updatedAt` (one batched call). 3) partition the kept PRs into REUSE (unchanged + done +
+// same spine) vs TO-RUN (new / changed / fresh). The skip decision lands BEFORE the
+// expensive relay→classify chain, so a no-change re-run spawns ZERO relay/classify agents.
+const KEPT_NUMS = kept.map((p) => p.number)
+let CKPT_STATE = {}
+let CKPT_PATH = ''
+if (FRESH) {
+  log(`args.fresh: bypassing the read-checkpoint — recomputing all ${kept.length} kept PR(s) (will still write back).`)
+} else {
+  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA })
+  CKPT_STATE = ckptParse(loaded && loaded.raw)
+  CKPT_PATH = (loaded && typeof loaded.path === 'string') ? loaded.path : ''
+  log(`Checkpoint: loaded ${Object.keys(CKPT_STATE).length} prior entr(ies) from ${CKPT_PATH || '(unresolved path)'}.`)
+}
+
+const metaRes = await agent(CKPT_META_PROMPT(KEPT_NUMS), { label: 'ckpt-meta', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA })
+const UPDATED_AT = new Map()
+for (const it of ((metaRes && Array.isArray(metaRes.items)) ? metaRes.items : [])) {
+  if (it && Number.isInteger(it.number)) UPDATED_AT.set(it.number, typeof it.updatedAt === 'string' ? it.updatedAt : '')
+}
+
+const keptToRun = []
+const reused = []
+for (const p of kept) {
+  const entry = CKPT_STATE[String(p.number)]
+  if (!FRESH && ckptReusable(entry, UPDATED_AT.get(p.number))) reused.push({ number: p.number, result: entry.result })
+  else keptToRun.push(p)
+}
+if (reused.length) {
+  log(`Checkpoint: skipping ${reused.length} unchanged-and-done PR(s) (no relay/classify agents spawned): ` +
+    reused.map((r) => `#${r.number}`).join(', '))
+}
+log(`Triaging ${keptToRun.length} kept PR(s) (of ${kept.length}) in waves of <=${BATCH} — each PR is a relay→classify chain (2 agents), so an unbatched fan-out would double concurrency-cliff exposure.`)
+
+// Per kept PR (only the TO-RUN set): a read-only relay fetches the untrusted human-text
+// (fixed gh command), then a read-only classifier reasons over it as nonce-fenced DATA while
+// issuing only the trusted metadata queries. A failed fetch drops the PR (returns null).
+// runWaves keeps peak in-flight agents <= BATCH (sequential waves) under the cliff.
+const results = await runWaves(keptToRun, async (p) => {
   const fetched = await agent(FETCH_PROMPT(p.number), { label: `fetch:#${p.number}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
   if (!fetched) return null
   const fenced = fence(fetched.nonce, fetched.raw)
   return agent(PROMPT(p.number, DRAFTS.has(p.number), fenced, DISC), { label: `triage:#${p.number}`, phase: 'Triage', agentType: READONLY_AGENT, schema: TRIAGE_SCHEMA })
 }, BATCH)
 
-const clean = results.filter(Boolean)
+// Fold the freshly-computed verdicts and the reused (checkpoint-hit) verdicts into one set.
+const fresh = results.filter(Boolean)
+const clean = [...reused.map((r) => r.result), ...fresh]
 const counts = {}
 const ci = {}
 for (const r of clean) {
   counts[r.action] = (counts[r.action] || 0) + 1
   ci[r.ci_status] = (ci[r.ci_status] || 0) + 1
 }
-log(`Triaged ${clean.length}/${kept.length} kept PR(s). Actions: ${JSON.stringify(counts)} | CI: ${JSON.stringify(ci)}`)
+log(`Triaged ${clean.length}/${kept.length} kept PR(s) (${reused.length} reused from checkpoint). Actions: ${JSON.stringify(counts)} | CI: ${JSON.stringify(ci)}`)
 
 // Resilience: surface PRs that dropped (failed relay/classify or a StructuredOutput miss)
-// so a one-arg re-run can recover exactly those on a fresh budget.
+// so a one-arg re-run can recover exactly those on a fresh budget. Reused PRs are never
+// missing (their cached verdict is folded back in above).
 const assessed = new Set(clean.map((r) => r.number))
-const missing = kept.map((p) => p.number).filter((n) => !assessed.has(n))
+const missing = KEPT_NUMS.filter((n) => !assessed.has(n))
 if (missing.length) {
   log(`WARNING: ${missing.length} kept PR(s) returned no assessment: ${missing.join(', ')}. ` +
     `Re-run to recover exactly these: args.numbers=[${missing.join(',')}].`)
 }
-// No-silent-caps: one coverage line accounting for the full funnel.
-log(`coverage: candidates ${CANDIDATES.length} / kept ${kept.length} / assessed ${clean.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
+// No-silent-caps: one coverage line accounting for the full funnel (incl. checkpoint reuse).
+log(`coverage: candidates ${CANDIDATES.length} / kept ${kept.length} / assessed ${clean.length} / reused ${reused.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
 
-// Additive synthesis. Skipped (roadmap=null) when nothing was assessed. Read-only.
+// Additive synthesis. Skipped (roadmap=null) when nothing was assessed. Reasons over the
+// FULL clean set (fresh + reused) so a checkpoint re-run still gets a complete roadmap.
 let roadmap = null
 if (clean.length) {
   phase('Synthesize')
@@ -471,8 +606,35 @@ if (clean.length) {
   roadmap = await agent(SYNTH_PROMPT(clean), { label: 'synthesize', phase: 'Synthesize', agentType: READONLY_AGENT, schema: SYNTH_SCHEMA })
 }
 
+// ── Read-checkpoint WRITE-BACK (spine §2.4). ─────────────────────────────────────────
+// Merge: keep every PRIOR entry (untouched PRs stay cached), then OVERWRITE the entries for
+// the PRs we just computed with their fresh verdict + the updatedAt we resolved this run,
+// stamped with the current SPINE_VERSION. A null/missing-result PR is NOT written. The
+// single writer agent runs HERE, after the (sequential) waves — never concurrently — so
+// there is no clobber race.
+const mergedEntries = { ...CKPT_STATE }
+for (const r of fresh) {
+  if (!r || !Number.isInteger(r.number)) continue
+  mergedEntries[String(r.number)] = {
+    number: r.number,
+    updatedAt: UPDATED_AT.get(r.number) || '',
+    spineVersion: SPINE_VERSION,
+    result: r,
+  }
+}
+const ckptState = { spineVersion: SPINE_VERSION, workflow: CKPT_WF, entries: mergedEntries }
+let checkpointWritten = false
+if (fresh.length) {
+  const writeRes = await agent(CKPT_WRITE_PROMPT(CKPT_PATH || `$HOME/.claude/workflows/state/repo-${CKPT_WF}.json`, JSON.stringify(ckptState, null, 0)),
+    { label: 'ckpt-write', phase: 'Synthesize', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA })
+  checkpointWritten = !!(writeRes && writeRes.written)
+  log(`Checkpoint: ${checkpointWritten ? 'wrote' : 'attempted to write'} ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'}.`)
+} else {
+  log(`Checkpoint: nothing newly computed — leaving the existing state untouched.`)
+}
+
 // Return shape is ADDITIVE: every prior key preserved; missing / roadmap / requiredContexts /
-// defaultBranch / spineVersion are new.
+// defaultBranch / reused / checkpointWritten / spineVersion are new.
 return {
   triaged: clean,
   counts,
@@ -485,6 +647,8 @@ return {
   total_candidates: CANDIDATES.length,
   missing,
   roadmap,
+  reused: reused.map((r) => r.number),
+  checkpointWritten,
   requiredContexts: DISC.requiredContexts,
   defaultBranch: DISC.defaultBranch,
   spineVersion: SPINE_VERSION,
