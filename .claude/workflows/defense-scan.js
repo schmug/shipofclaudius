@@ -251,6 +251,16 @@ try {
 const l1Reportable = (l1 && Array.isArray(l1.reportable)) ? l1.reportable : []
 const l1ToolCoverage = (l1 && l1.tool_coverage) ? l1.tool_coverage : 'prefilter status unknown'
 const l1AppendixCount = (l1 && typeof l1.appendix_count === 'number') ? l1.appendix_count : 0
+// Severity/attack-path calibration tally from deep-security-scan (PR #37): kept/downgraded/dropped.
+// Additive + fail-open — absent on older Layer-1 output or when Layer 1 errored, so guard hard and
+// surface it only when all three counts are present as numbers (never emit a partial/undefined tally).
+const sp = l1 && l1.severity_policy
+const l1SeverityPolicy = (sp && typeof sp === 'object'
+  && typeof sp.kept === 'number' && typeof sp.downgraded === 'number' && typeof sp.dropped === 'number')
+  ? sp : null
+const l1SeverityPolicyNote = l1SeverityPolicy
+  ? ` (severity policy: kept ${l1SeverityPolicy.kept} / downgraded ${l1SeverityPolicy.downgraded} / dropped ${l1SeverityPolicy.dropped})`
+  : ''
 // Prefer the hardened sub-report path; distinguish "found nothing" from "report agent died"
 // (an infra failure must never masquerade as a clean "no candidates" coverage line).
 const l1SubHtml = l1 && (l1.report_html || (l1.report && l1.report.report_html_path) || (typeof l1.report === 'string' ? l1.report : null))
@@ -481,7 +491,7 @@ const cov1 = l1Error
   ? `Layer 1 (code-at-rest · deep-security-scan): ERROR — ${l1Error} (fail-open: orchestrator continued with remaining layers).`
   : l1Reportable.length === 0
     ? `Layer 1 (code-at-rest · deep-security-scan): RAN — 0 reportable findings (no candidates surfaced across discovery lenses; this is "looked, found nothing", NOT "clean" — see the layer report). Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
-    : `Layer 1 (code-at-rest · deep-security-scan): RAN — ${l1Reportable.length} reportable finding(s), ${l1AppendixCount} reviewed-not-reported. Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
+    : `Layer 1 (code-at-rest · deep-security-scan): RAN — ${l1Reportable.length} reportable finding(s), ${l1AppendixCount} reviewed-not-reported${l1SeverityPolicyNote}. Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
 const coverage = [cov1, cov2, cov3, cov4, cov5, cov6]
 
 const inventoryAll = (l2 && Array.isArray(l2.inventory)) ? l2.inventory : []
@@ -580,7 +590,7 @@ return {
   target: TARGET,
   scope: SCOPE,
   layers: {
-    l1: { ran: !l1Error, error: l1Error, reportable: l1Reportable.length, appendix_count: l1AppendixCount, tool_coverage: l1ToolCoverage, sub_report: l1ReportRef },
+    l1: { ran: !l1Error, error: l1Error, reportable: l1Reportable.length, appendix_count: l1AppendixCount, severity_policy: l1SeverityPolicy, tool_coverage: l1ToolCoverage, sub_report: l1ReportRef },
     l2: { ran: !!l2.ran, status: l2.status, version: l2.tool_version, findings: (l2.findings || []).length, inventory: inventoryAll.length },
     l3: { ran: !!l3.ran, status: l3.status, version: l3.tool_version, findings: (l3.findings || []).length },
     l4: { ran: !!l4.ran, status: l4.status, version: l4.tool_version, findings: (l4.findings || []).length },

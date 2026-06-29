@@ -35,6 +35,8 @@ const L1_RESULT = {
   target: '/tmp/fake', scope: 'the entire repository at /tmp/fake', rounds: 4, files_reviewed: 20,
   tool_coverage: 'Deterministic prefilter: foxguard 0.8.1, severity floor low, 12 files scanned, 5 findings ingested as candidates.',
   candidates: 7,
+  confirmed: 2,
+  severity_policy: { kept: 2, downgraded: 1, dropped: 1 },
   counts: { high: 1, low: 1 },
   reportable: [
     { id: 'f1', title: 'SQLi in db layer', file: 'src/db.ts', line: 42, vuln_class: 'sql-injection', severity: 'high', source: 'foxguard:rs-sqli-001', sink: 'db.raw', why: 'unparameterized query', rationale: 'traced', attacker_story: 'a', evidence: 'e', fix: 'parameterize' },
@@ -165,6 +167,25 @@ test('layer 1 reportable findings flow into the merged report + counts', async (
   assert.ok(map.reportPrompt.includes('SQLi in db layer'), 'L1 finding title reaches the report')
   assert.ok(result.counts.high >= 1, 'merged counts include the high L1 finding')
   assert.ok(result.reportable.some((f) => f.title === 'SQLi in db layer'), 'merged reportable carries L1 finding')
+})
+
+test('layer 1 coverage surfaces the severity-policy tally when present', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(/severity policy:/.test(cov1), 'L1 coverage names the severity policy')
+  assert.ok(/kept 2/.test(cov1), 'kept count surfaced')
+  assert.ok(/downgraded 1/.test(cov1), 'downgraded count surfaced')
+  assert.ok(/dropped 1/.test(cov1), 'dropped count surfaced')
+})
+
+test('layer 1 coverage omits the tally (no undefined) when severity_policy is absent', async () => {
+  const { severity_policy, ...l1NoPolicy } = L1_RESULT
+  const map = { l1: l1NoPolicy }
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(!/severity policy:/.test(cov1), 'no severity-policy clause when keys absent')
+  assert.ok(!/undefined/.test(cov1), 'no undefined leaks into the coverage line')
 })
 
 test('layer 1 error is fail-open: report still emitted, coverage records the error', async () => {
