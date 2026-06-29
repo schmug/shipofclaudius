@@ -71,14 +71,40 @@ function defaultSynth(assessments = []) {
   }
 }
 
-async function runScript({ args, gather, fetch, triage, synth } = {}) {
+// Checkpoint defaults: empty prior state, every requested issue resolves to a fixed
+// updatedAt, and the writer succeeds. `ckptLoad` is the raw state-file string the
+// ckpt-load agent returns; `ckptMeta(nums)` returns {items:[{number,updatedAt}]};
+// `onWrite(state)` captures what the writer was handed.
+const DEFAULT_UPDATED_AT = '2026-06-20T00:00:00Z'
+function defaultCkptMeta(nums) {
+  return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })) }
+}
+
+async function runScript({ args, gather, fetch, triage, synth, ckptLoad, ckptMeta, onWrite } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', synthPrompt: '', parallelBatches: [] }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', synthPrompt: '', parallelBatches: [], metaNumbers: [], written: null }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const label = opts.label || ''
     await new Promise((r) => setTimeout(r, 1))
+    if (label === 'ckpt-load') {
+      return { raw: ckptLoad != null ? ckptLoad : '', path: '/home/u/.claude/workflows/state/o-r-issue-triage-fanout.json' }
+    }
+    if (label === 'ckpt-meta') {
+      const m = prompt.match(/numbers — ([0-9,\s]+) —/)
+      const nums = m ? m[1].split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : []
+      calls.metaNumbers = nums
+      return ckptMeta ? ckptMeta(nums) : defaultCkptMeta(nums)
+    }
+    if (label === 'ckpt-write') {
+      const mm = prompt.match(/<<<CKPT_STATE_JSON>>>\n([\s\S]*?)\n<<<END_CKPT_STATE_JSON>>>/)
+      let parsed = null
+      if (mm) { try { parsed = JSON.parse(mm[1]) } catch { parsed = null } }
+      calls.written = parsed
+      if (onWrite) onWrite(parsed)
+      return { written: true }
+    }
     if (label.startsWith('gather')) { calls.gatherPrompt = prompt; return gather ?? { numbers: [] } }
     if (label.startsWith('fetch:#')) {
       const n = Number(label.slice('fetch:#'.length))
@@ -298,6 +324,131 @@ test('batching + synthesis do not weaken the injection-hardening call shapes', a
   }
   // every agent (relay, classify, synthesis) is read-only
   for (const a of calls.agents) assert.equal(a.opts.agentType, 'Explore', `${a.opts.label} stays read-only`)
+})
+
+// ===================== READ-CHECKPOINT (spine §2.4) =====================
+const readSpineVersion = async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const m = src.match(/const\s+SPINE_VERSION\s*=\s*['"]([^'"]+)['"]/)
+  return m ? m[1] : null
+}
+const priorState = (nums, { updatedAt = DEFAULT_UPDATED_AT, spineVersion } = {}) => {
+  const entries = {}
+  for (const n of nums) {
+    entries[String(n)] = { number: n, updatedAt, spineVersion, result: { ...defaultTriage(n), rationale: 'CACHED' } }
+  }
+  return JSON.stringify({ spineVersion, workflow: 'issue-triage-fanout', entries })
+}
+
+test('re-run with no changes: unchanged-and-done issues are SKIPPED (no relay/classify agents) and reused', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [7, 8] },
+    ckptLoad: priorState([7, 8], { spineVersion: SPINE }),
+  })
+  assert.equal(agentsByLabelPrefix(calls, 'fetch:#').length, 0, 'no relay agents for the unchanged issues')
+  assert.equal(agentsByLabelPrefix(calls, 'triage:#').length, 0, 'no classify agents for the unchanged issues')
+  assert.deepEqual(result.reused.sort(), [7, 8], 'both issues reused from the checkpoint')
+  assert.equal(result.triaged.length, 2, 'cached results folded back into the output')
+  assert.ok(result.triaged.every((r) => r.rationale === 'CACHED'), 'reuses the CACHED result objects verbatim')
+})
+
+test('a changed updatedAt invalidates the cached entry and re-runs that issue', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [7, 8] },
+    ckptLoad: priorState([7, 8], { updatedAt: '2026-01-01T00:00:00Z', spineVersion: SPINE }),
+    ckptMeta: (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: n === 8 ? 'CHANGED' : '2026-01-01T00:00:00Z' })) }),
+  })
+  assert.deepEqual(result.reused, [7], 'only the unchanged issue is reused')
+  assert.deepEqual(agentsByLabelPrefix(calls, 'triage:#').map((a) => Number((a.opts.label || '').slice('triage:#'.length))), [8], 'only the changed issue is re-classified')
+})
+
+test('a bumped SPINE_VERSION invalidates the cached entry and re-runs the issue', async () => {
+  const { result, calls } = await runScript({
+    args: { numbers: [7] },
+    ckptLoad: priorState([7], { spineVersion: '0.0.1-old' }),
+  })
+  assert.deepEqual(result.reused, [], 'stale-spine entry not reused')
+  assert.equal(agentsByLabelPrefix(calls, 'triage:#').length, 1, 'the issue is re-classified under the current spine')
+})
+
+test('args.fresh:true ignores any existing checkpoint and recomputes all items (no ckpt-load)', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [7, 8], fresh: true },
+    ckptLoad: priorState([7, 8], { spineVersion: SPINE }),
+  })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-load').length, 0, 'fresh bypasses the load agent entirely')
+  assert.deepEqual(result.reused, [], 'nothing reused under fresh')
+  assert.equal(agentsByLabelPrefix(calls, 'triage:#').length, 2, 'both issues recomputed')
+  assert.ok(calls.written, 'fresh still persists the merged state')
+})
+
+test('a missing or malformed state file is a clean full run (no throw)', async () => {
+  const a = await runScript({ args: { numbers: [7] }, ckptLoad: '' })
+  assert.deepEqual(a.result.reused, [], 'empty file reuses nothing')
+  assert.equal(agentsByLabelPrefix(a.calls, 'triage:#').length, 1, 'missing-file run classifies the issue')
+  const b = await runScript({ args: { numbers: [7] }, ckptLoad: '<<garbage not json' })
+  assert.deepEqual(b.result.reused, [], 'malformed cache reuses nothing')
+  assert.equal(agentsByLabelPrefix(b.calls, 'triage:#').length, 1, 'malformed-file run still classifies the issue')
+})
+
+test('the writer persists a MERGED state: prior untouched entries + the newly computed one', async () => {
+  const SPINE = await readSpineVersion()
+  const prior = JSON.stringify({
+    spineVersion: SPINE, workflow: 'issue-triage-fanout',
+    entries: {
+      '99': { number: 99, updatedAt: 'x', spineVersion: SPINE, result: { ...defaultTriage(99), rationale: 'OLD99' } },
+      '7': { number: 7, updatedAt: 'y', spineVersion: '0.0.1-old', result: { ...defaultTriage(7), rationale: 'STALE' } },
+    },
+  })
+  const { calls } = await runScript({ args: { numbers: [7] }, ckptLoad: prior })
+  assert.ok(calls.written && calls.written.entries, 'writer handed a state object with entries')
+  assert.ok(calls.written.entries['99'], 'untouched prior entry (#99) preserved in the merge')
+  assert.equal(calls.written.entries['99'].result.rationale, 'OLD99', '#99 cached result kept verbatim')
+  assert.equal(calls.written.entries['7'].spineVersion, SPINE, '#7 re-stamped with the current spine version')
+  assert.notEqual(calls.written.entries['7'].result.rationale, 'STALE', '#7 carries the fresh result, not the stale cached one')
+})
+
+test('the writer is skipped when nothing was newly computed (full reuse leaves state untouched)', async () => {
+  const SPINE = await readSpineVersion()
+  const { calls } = await runScript({ args: { numbers: [7] }, ckptLoad: priorState([7], { spineVersion: SPINE }) })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-write').length, 0, 'no writer agent when there is nothing fresh to persist')
+})
+
+test('the load / meta / write checkpoint agents are read-only (Explore default + override)', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  for (const lbl of ['ckpt-load', 'ckpt-meta', 'ckpt-write']) {
+    const a = calls.agents.find((x) => x.opts.label === lbl)
+    assert.ok(a, `${lbl} agent ran`)
+    assert.equal(a.opts.agentType, 'Explore', `${lbl} is read-only`)
+  }
+  const { calls: c2 } = await runScript({ args: { numbers: [7], readonlyAgent: 'gh-ro' } })
+  for (const lbl of ['ckpt-load', 'ckpt-meta', 'ckpt-write']) {
+    assert.equal(c2.agents.find((x) => x.opts.label === lbl).opts.agentType, 'gh-ro', `${lbl} honors the override`)
+  }
+})
+
+test('the checkpoint synthesis still reasons over the FULL set (fresh + reused)', async () => {
+  // #7 cached (reused), #9 fresh. Both must appear in the synthesis input + roadmap path.
+  const SPINE = await readSpineVersion()
+  const { calls } = await runScript({
+    args: { numbers: [7, 9] },
+    ckptLoad: priorState([7], { spineVersion: SPINE }),
+  })
+  const synth = agentsByLabelPrefix(calls, 'synth')[0]
+  assert.ok(synth, 'synthesis ran even though one issue was reused')
+  assert.ok(/#?7\b/.test(synth.prompt) && /#?9\b/.test(synth.prompt), 'both the reused (#7) and fresh (#9) issues are in the synthesis input')
+})
+
+test('the read-checkpoint preserves the existing return contract (additive: reused / checkpointWritten)', async () => {
+  const { result } = await runScript({ args: { numbers: [7] } })
+  for (const k of ['triaged', 'counts', 'total', 'missing', 'roadmap', 'spineVersion']) {
+    assert.ok(k in result, `existing key '${k}' preserved`)
+  }
+  assert.ok(Array.isArray(result.reused), 'reused[] added')
+  assert.equal(typeof result.checkpointWritten, 'boolean', 'checkpointWritten added')
 })
 
 // ---- runner ----
