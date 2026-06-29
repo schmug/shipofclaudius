@@ -631,6 +631,13 @@ test('#25: a wildcard / creative generalist pass is produced beyond the named le
 const roundOf = (opts) => Number((opts.label || '').match(/discover:r(\d+)-/)?.[1] || 0)
 const discoverCalls = (calls) => calls.agents.filter((a) => (a.opts.label || '').startsWith('discover:'))
 
+// A budget.spent() stub that climbs by `perRound` between the before/after readings the loop
+// takes each round, so the workflow MEASURES a per-round cost of exactly `perRound`. The loop
+// calls spent() exactly twice per round (once before the fan-out, once after) and nowhere else,
+// so odd calls are the "before" reading (k rounds done) and even calls the "after" (k+1 done) —
+// making each round's measured delta a clean `perRound`.
+const spentStub = (perRound) => { let n = 0; return () => { n++; return Math.floor(n / 2) * perRound } }
+
 test('saturation: stops after the first round that adds zero new candidates', async () => {
   // Same candidates every round => round 2 adds nothing new => saturated.
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
@@ -682,26 +689,57 @@ test('saturation: terminal_state and rounds_run appear in the return and the rep
   assert.ok(/round/i.test(map.reportPrompt), 'coverage statement mentions discovery rounds')
 })
 
-test('saturation: stops with terminal_state=budget when the budget floor is hit', async () => {
-  // Discovery never goes dry, so only the budget gate can stop it before maxRounds.
+test('saturation: stops with terminal_state=budget when the MEASURED floor cannot fund another round + tail', async () => {
+  // Discovery never goes dry, so only the budget gate can stop it before maxRounds. Each round
+  // MEASURES a cost of 500k (budget.spent() delta); the measured floor reserves that round PLUS
+  // an equal tail for validation/report = ~1M.
   const discovery = (_p, opts) => {
     const r = roundOf(opts)
     return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `f${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
   }
-  // remaining() always reports below any per-round floor: round 1 runs, round 2's gate stops it.
-  const budget = { total: 1_000_000, remaining: () => 1 }
+  // remaining (800k) is MORE than one measured round (500k) but LESS than round + tail (~1M):
+  // the headroom reserve for the downstream validation/report phases is what trips the gate.
+  // The old flat estimate (WORKERS.length*60000 = 60k here) would NOT have stopped — a measured
+  // floor is what makes this a true "can't finish" stop.
+  const budget = { total: 2_000_000, spent: spentStub(500_000), remaining: () => 800_000 }
   const map = { tool: toolMissing, discovery }
   const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 6 }, stubs: stubsFor(map), budget })
-  assert.equal(result.terminal_state, 'budget', 'budget floor stops the loop before the cap')
-  assert.equal(result.rounds_run, 1, 'only the first round completed')
+  assert.equal(result.terminal_state, 'budget', 'measured floor (round + validation/report tail) stops the loop before the cap')
+  assert.equal(result.rounds_run, 1, 'only the first round completed before the measured gate tripped')
+})
+
+test('saturation: measured floor does NOT stop early where the flat estimate would have (no false budget trip)', async () => {
+  // 8 workers => the OLD flat estimate would reserve 8*60000 = 480k per round. But each round
+  // actually MEASURES cheap (50k), so the measured floor is only ~100k (round + tail). With
+  // remaining = 200k — BELOW the flat estimate but ABOVE the measured floor — the loop must keep
+  // going and stop on saturation, not falsely as 'budget'. This is the recall win of #38.
+  const budget = { total: 5_000_000, spent: spentStub(50_000), remaining: () => 200_000 }
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 8, maxRounds: 6 }, stubs: stubsFor(map), budget })
+  assert.equal(result.terminal_state, 'saturated', 'measured floor permits the round the flat estimate would have refused')
+  assert.equal(result.rounds_run, 2, 'round 1 productive, round 2 dry => saturated (not a premature budget stop)')
 })
 
 test('saturation: ample budget does not trip the budget gate', async () => {
-  const budget = { total: 10_000_000, remaining: () => 10_000_000 }
+  const budget = { total: 10_000_000, spent: spentStub(100_000), remaining: () => 10_000_000 }
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map), budget })
   assert.equal(result.terminal_state, 'saturated', 'with budget to spare it runs to saturation')
   assert.equal(result.rounds_run, 2, 'two rounds: one productive, one dry')
+})
+
+test('saturation: no budget target => measured floor is inert (loop bounded only by saturation/cap)', async () => {
+  // No budget => HAS_BUDGET false => the budget gate never fires regardless of measured cost.
+  // Backward-compat: the no-target path is unchanged by the measured-floor work.
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `f${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+  }
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.notEqual(result.terminal_state, 'budget', 'budget gate inert without a target')
+  assert.equal(result.terminal_state, 'capped', 'no budget => capped by maxRounds, never budget')
+  assert.equal(result.rounds_run, 3, 'ran to the round cap, unaffected by any budget floor')
 })
 
 // ================= SEVERITY / ATTACK-PATH STAGE (issue #22) =================

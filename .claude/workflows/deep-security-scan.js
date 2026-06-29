@@ -110,11 +110,22 @@ const WORKERS = Array.from({ length: ROUNDS }, (_, i) => {
   }
 })
 
-// Budget floor: estimated tokens to START one more discovery round (one fan-out of
-// WORKERS.length workers). When a budget target is set and remaining dips below this,
-// the saturation loop stops with terminal_state='budget' rather than begin a round it
-// likely can't finish (and still leave room for validation + the report).
-const PER_ROUND_TOKEN_EST = WORKERS.length * 60000
+// Budget floor (issue #38): MEASURED, not a flat estimate. The saturation loop records
+// budget.spent() before/after each completed round; `maxRoundCost` (tracked in the loop) holds
+// the largest observed per-round delta, and the next-round gate reserves that measured cost
+// PLUS a tail reserve for the downstream validation + report phases — the floor is "enough for
+// another round AND to finish", derived from what THIS run actually cost rather than a guess.
+// Round 1 always runs (no measured data exists yet). The flat WORKERS.length*60000 estimate
+// survives only as a fallback for a runtime that exposes no budget.spent(); a normal budgeted
+// run never uses it.
+const HAS_SPENT = HAS_BUDGET && typeof budget.spent === 'function'
+const PER_ROUND_TOKEN_EST = WORKERS.length * 60000   // fallback floor only (used until a round is measured / if spent() is absent)
+// Tail reserve expressed as a MULTIPLE of the measured round cost (not a flat constant, so it
+// tracks THIS run's real per-round cost): after discovery, validation fans out one agent per
+// surviving candidate, then verify + severity + one report agent — empirically on the order of
+// a discovery round — so we hold back one more round-cost for the tail.
+// floor = maxRoundCost * (1 + TAIL_HEADROOM_FACTOR).
+const TAIL_HEADROOM_FACTOR = 1
 
 const CANDIDATE_ITEM = {
   type: 'object',
@@ -489,12 +500,19 @@ const clean = []          // every successful worker pass, across all rounds
 let filesReviewed = 0
 let roundsRun = 0
 let terminalState = 'capped'
+let maxRoundCost = 0   // largest MEASURED budget.spent() delta across completed rounds (issue #38)
 for (let round = 1; round <= MAX_ROUNDS; round++) {
-  // Budget floor: never START a round we likely can't finish (round 1 always runs).
-  if (round > 1 && HAS_BUDGET && budget.remaining() < PER_ROUND_TOKEN_EST) {
-    terminalState = 'budget'
-    break
+  // Budget floor: never START a round we likely can't finish AND still fund validation+report
+  // (round 1 always runs — no measured data yet). The floor is the largest MEASURED round cost
+  // so far plus a tail reserve; it falls back to the flat estimate only until a round has been
+  // measured (or if the runtime exposes no budget.spent()).
+  if (round > 1 && HAS_BUDGET) {
+    const floor = (HAS_SPENT && maxRoundCost > 0)
+      ? maxRoundCost * (1 + TAIL_HEADROOM_FACTOR)
+      : PER_ROUND_TOKEN_EST
+    if (budget.remaining() < floor) { terminalState = 'budget'; break }
   }
+  const spentBefore = HAS_SPENT ? budget.spent() : 0
   const before = uniqueTotal
   const discoveries = await parallel(
     WORKERS.map((w) => () =>
@@ -522,6 +540,9 @@ You are ONE of several independent workers with different lenses; do not try to 
     filesReviewed += d.files_reviewed || 0
     for (const c of (d.candidates || [])) addCandidate(c)
   }
+  // Measure what this round actually cost (budget.spent() delta) and keep the max observed —
+  // that measured cost (plus the tail reserve) is the floor the NEXT round's gate consults.
+  if (HAS_SPENT) maxRoundCost = Math.max(maxRoundCost, budget.spent() - spentBefore)
   const added = uniqueTotal - before
   log(`Round ${round}/${MAX_ROUNDS}: ${roundClean.length}/${WORKERS.length} workers, +${added} new unique (cumulative ${uniqueTotal}).`)
   if (added === 0) { terminalState = 'saturated'; break }   // loop-until-dry: a dry round ends it

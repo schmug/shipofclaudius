@@ -193,7 +193,7 @@ node tests/fix-finding-sim.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
-Requires Node ≥ 18 (developed on Node 22). Current status: **442 passing** (12 + 63 + 49 + 31 + 28 + 34 + 19 + 29 + 18 + 62 + 26 + 24 + 20 + 23 + 4), 0 failing.
+Requires Node ≥ 18 (developed on Node 22). Current status: **444 passing** (12 + 65 + 49 + 31 + 28 + 34 + 19 + 29 + 18 + 62 + 26 + 24 + 20 + 23 + 4), 0 failing.
 
 ## Layout
 
