@@ -54,14 +54,40 @@ function defaultSynth() {
   }
 }
 
-async function runScript({ args, gather, fetch, triage, discover, synth } = {}) {
+// Checkpoint defaults: empty prior state, every requested PR resolves to a fixed
+// updatedAt, and the writer succeeds. `ckptLoad` is the raw state-file string the
+// ckpt-load agent returns; `ckptMeta(nums)` returns {items:[{number,updatedAt}]};
+// `onWrite(state)` captures what the writer was handed.
+const DEFAULT_UPDATED_AT = '2026-06-20T00:00:00Z'
+function defaultCkptMeta(nums) {
+  return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })) }
+}
+
+async function runScript({ args, gather, fetch, triage, discover, synth, ckptLoad, ckptMeta, onWrite } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', discoverPrompt: '', synthPrompt: '', parallelBatches: [] }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', discoverPrompt: '', synthPrompt: '', parallelBatches: [], metaNumbers: [], written: null }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const label = opts.label || ''
     await new Promise((r) => setTimeout(r, 1))
+    if (label === 'ckpt-load') {
+      return { raw: ckptLoad != null ? ckptLoad : '', path: '/home/u/.claude/workflows/state/o-r-pr-triage-fanout.json' }
+    }
+    if (label === 'ckpt-meta') {
+      const m = prompt.match(/numbers — ([0-9,\s]+) —/)
+      const nums = m ? m[1].split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : []
+      calls.metaNumbers = nums
+      return ckptMeta ? ckptMeta(nums) : defaultCkptMeta(nums)
+    }
+    if (label === 'ckpt-write') {
+      const mm = prompt.match(/<<<CKPT_STATE_JSON>>>\n([\s\S]*?)\n<<<END_CKPT_STATE_JSON>>>/)
+      let parsed = null
+      if (mm) { try { parsed = JSON.parse(mm[1]) } catch { parsed = null } }
+      calls.written = parsed
+      if (onWrite) onWrite(parsed)
+      return { written: true }
+    }
     if (label === 'gather-open-prs') { calls.gatherPrompt = prompt; return gather }
     if (label.startsWith('discover')) {
       calls.discoverPrompt = prompt
@@ -333,6 +359,131 @@ test('batching + discover + synthesis do not weaken the injection-hardening call
     assert.ok(!/--json[^`\n]*\breviews\b/.test(cls.prompt), `classify #${n} never re-fetches reviews live`)
   }
   for (const a of calls.agents) assert.equal(a.opts.agentType, 'Explore', `${a.opts.label} stays read-only`)
+})
+
+// ===================== READ-CHECKPOINT (spine §2.4) =====================
+const readSpineVersion = async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const m = src.match(/const\s+SPINE_VERSION\s*=\s*['"]([^'"]+)['"]/)
+  return m ? m[1] : null
+}
+const cachedVerdict = (n, extra = {}) => ({ number: n, action: 'AWAITING_HUMAN', ci_status: 'PASSING', mergeability: 'CLEAN', rationale: 'CACHED', ...extra })
+const priorState = (nums, { updatedAt = DEFAULT_UPDATED_AT, spineVersion } = {}) => {
+  const entries = {}
+  for (const n of nums) entries[String(n)] = { number: n, updatedAt, spineVersion, result: cachedVerdict(n) }
+  return JSON.stringify({ spineVersion, workflow: 'pr-triage-fanout', entries })
+}
+
+test('re-run with no changes: unchanged-and-done PRs are SKIPPED (no relay/classify agents) and reused', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: {}, gather: manyAlice(2),
+    ckptLoad: priorState([1, 2], { spineVersion: SPINE }),
+  })
+  assert.equal(byPrefix(calls, 'fetch:#').length, 0, 'no relay agents for the unchanged PRs')
+  assert.equal(byPrefix(calls, 'triage:#').length, 0, 'no classify agents for the unchanged PRs')
+  assert.deepEqual(result.reused.sort(), [1, 2], 'both PRs reused from the checkpoint')
+  assert.equal(result.triaged.length, 2, 'cached verdicts folded back into the output')
+  assert.ok(result.triaged.every((r) => r.rationale === 'CACHED'), 'reuses the CACHED verdict objects verbatim')
+})
+
+test('a changed updatedAt invalidates the cached entry and re-runs that PR', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: {}, gather: manyAlice(2),
+    ckptLoad: priorState([1, 2], { updatedAt: '2026-01-01T00:00:00Z', spineVersion: SPINE }),
+    ckptMeta: (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: n === 2 ? 'CHANGED' : '2026-01-01T00:00:00Z' })) }),
+  })
+  assert.deepEqual(result.reused, [1], 'only the unchanged PR is reused')
+  assert.deepEqual(byPrefix(calls, 'triage:#').map((a) => Number((a.opts.label || '').slice('triage:#'.length))), [2], 'only the changed PR is re-classified')
+})
+
+test('a bumped SPINE_VERSION invalidates the cached entry and re-runs the PR', async () => {
+  const { result, calls } = await runScript({
+    args: {}, gather: manyAlice(1),
+    ckptLoad: priorState([1], { spineVersion: '0.0.1-old' }),
+  })
+  assert.deepEqual(result.reused, [], 'stale-spine entry not reused')
+  assert.equal(byPrefix(calls, 'triage:#').length, 1, 'the PR is re-classified under the current spine')
+})
+
+test('args.fresh:true ignores any existing checkpoint and recomputes all PRs (no ckpt-load)', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { fresh: true }, gather: manyAlice(2),
+    ckptLoad: priorState([1, 2], { spineVersion: SPINE }),
+  })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-load').length, 0, 'fresh bypasses the load agent entirely')
+  assert.deepEqual(result.reused, [], 'nothing reused under fresh')
+  assert.equal(byPrefix(calls, 'triage:#').length, 2, 'both PRs recomputed')
+  assert.ok(calls.written, 'fresh still persists the merged state')
+})
+
+test('a missing or malformed state file is a clean full run (no throw)', async () => {
+  const a = await runScript({ args: {}, gather: manyAlice(1), ckptLoad: '' })
+  assert.deepEqual(a.result.reused, [], 'empty file reuses nothing')
+  assert.equal(byPrefix(a.calls, 'triage:#').length, 1, 'missing-file run classifies the PR')
+  const b = await runScript({ args: {}, gather: manyAlice(1), ckptLoad: 'not-json{' })
+  assert.deepEqual(b.result.reused, [], 'malformed cache reuses nothing')
+  assert.equal(byPrefix(b.calls, 'triage:#').length, 1, 'malformed-file run still classifies the PR')
+})
+
+test('the writer persists a MERGED state: prior untouched entries + the newly computed one', async () => {
+  const SPINE = await readSpineVersion()
+  const prior = JSON.stringify({
+    spineVersion: SPINE, workflow: 'pr-triage-fanout',
+    entries: {
+      '99': { number: 99, updatedAt: 'x', spineVersion: SPINE, result: cachedVerdict(99, { rationale: 'OLD99' }) },
+      '1': { number: 1, updatedAt: 'y', spineVersion: '0.0.1-old', result: cachedVerdict(1, { rationale: 'STALE' }) },
+    },
+  })
+  const { calls } = await runScript({ args: {}, gather: manyAlice(1), ckptLoad: prior })
+  assert.ok(calls.written && calls.written.entries, 'writer handed a state object with entries')
+  assert.ok(calls.written.entries['99'], 'untouched prior entry (#99) preserved in the merge')
+  assert.equal(calls.written.entries['99'].result.rationale, 'OLD99', '#99 cached verdict kept verbatim')
+  assert.equal(calls.written.entries['1'].spineVersion, SPINE, '#1 re-stamped with the current spine version')
+  assert.notEqual(calls.written.entries['1'].result.rationale, 'STALE', '#1 carries the fresh verdict, not the stale cached one')
+})
+
+test('the writer is skipped when nothing was newly computed (full reuse leaves state untouched)', async () => {
+  const SPINE = await readSpineVersion()
+  const { calls } = await runScript({ args: {}, gather: manyAlice(1), ckptLoad: priorState([1], { spineVersion: SPINE }) })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-write').length, 0, 'no writer agent when there is nothing fresh to persist')
+})
+
+test('the load / meta / write checkpoint agents are read-only (Explore default + override)', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(1) })
+  for (const lbl of ['ckpt-load', 'ckpt-meta', 'ckpt-write']) {
+    const a = calls.agents.find((x) => x.opts.label === lbl)
+    assert.ok(a, `${lbl} agent ran`)
+    assert.equal(a.opts.agentType, 'Explore', `${lbl} is read-only`)
+  }
+  const { calls: c2 } = await runScript({ args: { readonlyAgent: 'gh-ro' }, gather: manyAlice(1) })
+  for (const lbl of ['ckpt-load', 'ckpt-meta', 'ckpt-write']) {
+    assert.equal(c2.agents.find((x) => x.opts.label === lbl).opts.agentType, 'gh-ro', `${lbl} honors the override`)
+  }
+})
+
+test('the ckpt-meta agent keys on the KEPT PR numbers (author-filtered), not every candidate', async () => {
+  // PR #2 is a non-author candidate and must be dropped BEFORE the checkpoint metadata step.
+  const gather = { repo: 'o/r', viewer: 'alice', prs: [
+    { number: 1, author: 'alice', state: 'OPEN' },
+    { number: 2, author: 'bob', state: 'OPEN' },
+  ] }
+  const { calls } = await runScript({ args: {}, gather })
+  assert.deepEqual(calls.metaNumbers, [1], 'metadata step only asks about the kept (author-matching) PR')
+})
+
+test('the read-checkpoint preserves the existing return contract (additive: reused / checkpointWritten)', async () => {
+  const { result } = await runScript({ args: {}, gather: manyAlice(1) })
+  for (const k of ['triaged', 'counts', 'ci_counts', 'kept', 'dropped', 'skipped_not_open', 'author_filter', 'queried_repo', 'total_candidates', 'missing', 'roadmap', 'requiredContexts', 'spineVersion']) {
+    assert.ok(k in result, `existing key '${k}' preserved`)
+  }
+  assert.ok(Array.isArray(result.reused), 'reused[] added')
+  assert.equal(typeof result.checkpointWritten, 'boolean', 'checkpointWritten added')
+  // the "no PRs are mine" early-return path also carries the additive keys
+  const empty = await runScript({ args: {}, gather: { repo: 'o/r', viewer: 'alice', prs: [{ number: 9, author: 'bob', state: 'OPEN' }] } })
+  assert.ok(Array.isArray(empty.result.reused) && empty.result.checkpointWritten === false, 'empty-success path carries reused[]/checkpointWritten too')
 })
 
 // ---- runner ----
