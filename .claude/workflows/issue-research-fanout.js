@@ -68,7 +68,7 @@ export const meta = {
   whenToUse: 'After issue-triage-fanout: resolve the RESEARCH bucket so those issues become GREEN (implementable). Not for triage (use issue-triage-fanout) or implementation (use stacked-impl-lanes).',
   phases: [
     { title: 'Gather', detail: 'when no args.numbers: one read-only agent runs gh issue list --label <label> to collect RESEARCH issue numbers' },
-    { title: 'Research', detail: 'per issue (in sequential waves of <=8): a read-only relay fetches the untrusted issue text, then a read-only web-enabled agent investigates over nonce-fenced data and returns a verdict; the web-enabled agent is bounded by a stall timeout so a hung web call fails one issue, not the run' },
+    { title: 'Research', detail: 'a read-checkpoint loads prior results and skips unchanged-and-done issues; then per remaining issue (in sequential waves of <=8): a read-only relay fetches the untrusted issue text, then a read-only web-enabled agent investigates over nonce-fenced data and returns a verdict (bounded by a stall timeout so a hung web call fails one issue, not the run); a single writer agent persists the merged checkpoint at the end' },
   ],
 }
 
@@ -138,6 +138,101 @@ async function runWaves(items, fn, batchSize = 8) {
     log(`Wave ${w + 1}/${waves} done — ${out.filter(Boolean).length}/${items.length} researched so far.`)
   }
   return out
+}
+
+// ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
+// Read-only analysis is expensive (relay→research chain per issue, some web-enabled).
+// Re-running should not re-pay for issues that have not changed since last time. We
+// persist each item's result to ~/.claude/workflows/state/<repo>-<wf>.json, keyed by
+// {number, updatedAt, SPINE_VERSION}. On re-run we skip an entry iff it is present,
+// done, its issue's `updatedAt` is unchanged, AND it was written by THIS spine version.
+//
+// Workflow scripts cannot do file IO, so the mechanism is agent-mediated and runs through
+// the read-only agentType like everything else:
+//   - a LOAD agent (ckpt-load) resolves the state path and `cat`s the file (empty if
+//     missing); the script JSON.parses it DEFENSIVELY (malformed → treated as empty).
+//   - a METADATA agent (ckpt-meta) resolves each requested item's CURRENT `updatedAt`
+//     in ONE batched gh call, so the skip decision happens BEFORE the expensive chain.
+//   - a single WRITER agent (ckpt-write) runs SEQUENTIALLY at the end (never inside a
+//     concurrent wave → no clobber race) to persist the merged state (old unchanged
+//     entries + newly computed ones).
+// args.fresh:true bypasses LOAD entirely (recompute everything) but still WRITES back.
+const FRESH = A.fresh === true
+const CKPT_WF = 'issue-research-fanout'
+
+// The load/meta/write agents read the state file, which is WORKFLOW-AUTHORED data — not
+// attacker-writable like issue bodies. Still parse it defensively (never throw on a
+// missing dir / truncated file / hand-edited junk) and keep these agents read-only on
+// GitHub (they only touch the local state file + read-only gh metadata).
+const CKPT_LOAD_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['raw', 'path'],
+  properties: {
+    raw: { type: 'string', description: 'Verbatim contents of the state file, or an empty string if it does not exist yet.' },
+    path: { type: 'string', description: 'The absolute path that was read (and that the writer must write back to).' },
+  },
+}
+const CKPT_LOAD_PROMPT =
+  `You are a READ-ONLY checkpoint loader. Do exactly this and nothing else:\n` +
+  `1. Resolve the repo slug: \`gh repo view ${REPO} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
+  `Replace its "/" with "-" to form <repo>; if it cannot be resolved use "repo".\n` +
+  `2. Compute the state file path: \`$HOME/.claude/workflows/state/<repo>-${CKPT_WF}.json\` (expand $HOME to an absolute path).\n` +
+  `3. Print the file if it exists: \`cat "<path>" 2>/dev/null\` — if the file or its directory does not exist, that prints nothing; return an EMPTY string for raw (do NOT create it, do NOT error).\n` +
+  `Return { raw, path } where raw is the verbatim file contents (or "") and path is the absolute path from step 2. ` +
+  `Do NOT edit, comment, relabel, push, merge, or open anything; run no mutating command.`
+
+const CKPT_META_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['items'],
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['number', 'updatedAt'],
+        properties: {
+          number: { type: 'integer' },
+          updatedAt: { type: 'string', description: 'The issue\'s current updatedAt timestamp (ISO8601), or "" if the number could not be resolved.' },
+        },
+      },
+    },
+  },
+}
+const CKPT_META_PROMPT = (nums) =>
+  `You are a READ-ONLY metadata relay. For these issue numbers — ${nums.join(', ')} — resolve each one's CURRENT \`updatedAt\` timestamp so a checkpoint can tell which issues changed since last run.\n` +
+  `Run (one call): \`gh issue list ${REPO} --state all --json number,updatedAt --jq '[.[] | {number, updatedAt}]'\` and keep only the requested numbers; for any requested number not returned, use updatedAt "" (treat as changed).\n` +
+  `Return { items: [{ number, updatedAt }, ...] } covering EVERY requested number. Read-only: run no mutating command; do NOT edit, comment, relabel, push, merge, or open anything.`
+
+const CKPT_WRITE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['written'],
+  properties: { written: { type: 'boolean', description: 'true once the merged state file has been written.' } },
+}
+const CKPT_WRITE_PROMPT = (path, json) =>
+  `You are a READ-ONLY-on-GitHub checkpoint writer. Persist this workflow's read-checkpoint to the LOCAL state file ONLY.\n` +
+  `1. Ensure the directory exists: \`mkdir -p "$(dirname "${path}")"\`.\n` +
+  `2. Write EXACTLY the following JSON (verbatim, no edits, no commentary) to \`${path}\`, overwriting any existing file:\n` +
+  `<<<CKPT_STATE_JSON>>>\n${json}\n<<<END_CKPT_STATE_JSON>>>\n` +
+  `(Write only the bytes BETWEEN the markers — not the markers themselves.)\n` +
+  `Return { written: true } on success. Touch ONLY that local file; do NOT edit, comment, relabel, push, merge, or open anything on GitHub; run no other mutating command.`
+
+// Parse the loaded state defensively: a missing/empty/malformed file yields {} (a clean
+// full run), never a throw. Returns an object keyed by issue number (string) → entry.
+function ckptParse(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  let parsed
+  try { parsed = JSON.parse(raw) } catch { return {} }
+  if (!parsed || typeof parsed !== 'object') return {}
+  const entries = (parsed.entries && typeof parsed.entries === 'object') ? parsed.entries : {}
+  return entries
+}
+
+// An entry is REUSABLE (skip the relay→research chain, reuse the cached result) iff it
+// exists, is done, was stamped with the current SPINE_VERSION, and its issue's current
+// `updatedAt` matches the cached one. A blank current updatedAt (unresolved) is treated
+// as changed → always re-run. FRESH disables reuse entirely.
+function ckptReusable(entry, currentUpdatedAt) {
+  if (!entry || typeof entry !== 'object') return false
+  if (entry.spineVersion !== SPINE_VERSION) return false
+  if (!entry.result) return false
+  if (!currentUpdatedAt) return false
+  return entry.updatedAt === currentUpdatedAt
 }
 
 const INJECTION_GUARD =
@@ -295,17 +390,51 @@ Be skeptical and concrete; cite evidence. The cost of a wrong GREEN is high (sta
 }
 
 phase('Research')
-log(`Researching ${NUMBERS.length} issue(s) in waves of <=${BATCH}` +
+
+// ── Read-checkpoint LOAD + skip decision (spine §2.4). ───────────────────────────────
+// 1) LOAD the prior state (skipped on args.fresh). 2) resolve each issue's current
+// `updatedAt` (one batched call). 3) partition NUMBERS into REUSE (unchanged + done +
+// same spine) vs TO-RUN (new / changed / fresh). The skip decision lands BEFORE the
+// expensive relay→research chain, so a no-change re-run spawns ZERO relay/research agents.
+let CKPT_STATE = {}
+let CKPT_PATH = ''
+if (FRESH) {
+  log(`args.fresh: bypassing the read-checkpoint — recomputing all ${NUMBERS.length} issue(s) (will still write back).`)
+} else {
+  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Research', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA })
+  CKPT_STATE = ckptParse(loaded && loaded.raw)
+  CKPT_PATH = (loaded && typeof loaded.path === 'string') ? loaded.path : ''
+  log(`Checkpoint: loaded ${Object.keys(CKPT_STATE).length} prior entr(ies) from ${CKPT_PATH || '(unresolved path)'}.`)
+}
+
+const metaRes = await agent(CKPT_META_PROMPT(NUMBERS), { label: 'ckpt-meta', phase: 'Research', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA })
+const UPDATED_AT = new Map()
+for (const it of ((metaRes && Array.isArray(metaRes.items)) ? metaRes.items : [])) {
+  if (it && Number.isInteger(it.number)) UPDATED_AT.set(it.number, typeof it.updatedAt === 'string' ? it.updatedAt : '')
+}
+
+const toRun = []
+const reused = []
+for (const n of NUMBERS) {
+  const entry = CKPT_STATE[String(n)]
+  if (!FRESH && ckptReusable(entry, UPDATED_AT.get(n))) reused.push({ number: n, result: entry.result })
+  else toRun.push(n)
+}
+if (reused.length) {
+  log(`Checkpoint: skipping ${reused.length} unchanged-and-done issue(s) (no relay/research agents spawned): ` +
+    reused.map((r) => `#${r.number}`).join(', '))
+}
+log(`Researching ${toRun.length} issue(s) (of ${NUMBERS.length}) in waves of <=${BATCH}` +
   (WEB_TIMEOUT_MS > 0
     ? `; web-stall timeout ${WEB_TIMEOUT_MS}ms/agent (a hung web call fails one issue, not the run).`
     : ' (web-stall timeout disabled).'))
 
-// Per issue: a read-only relay fetches the untrusted text, then the read-only research
-// agent investigates over it as nonce-fenced DATA. A failed fetch drops the issue
-// (returns null) so the missing-tracking re-runs it. The research agent — the only one
-// with web access — is wrapped in withTimeout so a hung WebSearch/WebFetch fails just THIS
-// issue. runWaves keeps peak in-flight agents <= BATCH (sequential waves).
-const results = await runWaves(NUMBERS, async (n) => {
+// Per issue (only the TO-RUN set): a read-only relay fetches the untrusted text, then the
+// read-only research agent investigates over it as nonce-fenced DATA. A failed fetch drops
+// the issue (returns null) so the missing-tracking re-runs it. The research agent — the only
+// one with web access — is wrapped in withTimeout so a hung WebSearch/WebFetch fails just
+// THIS issue. runWaves keeps peak in-flight agents <= BATCH (sequential waves).
+const results = await runWaves(toRun, async (n) => {
   const fetched = await agent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Research', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
   if (!fetched) return null
   const fenced = fence(fetched.nonce, fetched.raw)
@@ -319,11 +448,13 @@ const results = await runWaves(NUMBERS, async (n) => {
   return r
 }, BATCH)
 
-// Partial-tolerant: log which issues came back null so a re-run can target just those
-// (map a null parallel[idx] back to NUMBERS[idx]; a fresh invocation gets its own budget).
-const clean = []
+// Fold the freshly-computed results and the reused (checkpoint-hit) results into one set.
+// missing[] = TO-RUN issues that came back null (re-runnable on a fresh budget); reused
+// issues are never missing. The reused results carry their cached number forward.
+const fresh = []
 const missing = []
-results.forEach((r, i) => { if (r) clean.push(r); else missing.push(NUMBERS[i]) })
+results.forEach((r, i) => { if (r) fresh.push(r); else missing.push(toRun[i]) })
+const clean = [...reused.map((r) => r.result), ...fresh]
 if (missing.length) {
   log(`⚠️ ${missing.length} issue(s) returned no result (re-run with args.numbers: [${missing.join(', ')}]): ` +
     missing.map((n) => `#${n}`).join(', '))
@@ -349,17 +480,46 @@ const green_lanes = green.map((r) => ({
   depends_on: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((n) => n !== r.number),
 }))
 
-log(`Researched ${clean.length}/${NUMBERS.length}: ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
-// No-silent-caps coverage line accounting for every requested issue.
-log(`coverage: requested ${NUMBERS.length} / researched ${clean.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
+log(`Researched ${clean.length}/${NUMBERS.length} (${reused.length} reused from checkpoint): ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
+// No-silent-caps coverage line accounting for every requested issue (incl. checkpoint reuse).
+log(`coverage: requested ${NUMBERS.length} / researched ${clean.length} / reused ${reused.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
+
+// ── Read-checkpoint WRITE-BACK (spine §2.4). ─────────────────────────────────────────
+// Merge: keep every PRIOR entry (untouched issues stay cached), then OVERWRITE the entries
+// for the issues we just computed with their fresh result + the updatedAt we resolved this
+// run, stamped with the current SPINE_VERSION. A null/missing-result issue is NOT written
+// (so a failed run re-attempts it next time). The single writer agent runs HERE, after the
+// (sequential) waves — never concurrently — so there is no clobber race.
+const mergedEntries = { ...CKPT_STATE }
+for (const r of fresh) {
+  if (!r || !Number.isInteger(r.number)) continue
+  mergedEntries[String(r.number)] = {
+    number: r.number,
+    updatedAt: UPDATED_AT.get(r.number) || '',
+    spineVersion: SPINE_VERSION,
+    result: r,
+  }
+}
+const ckptState = { spineVersion: SPINE_VERSION, workflow: CKPT_WF, entries: mergedEntries }
+let checkpointWritten = false
+if (fresh.length) {
+  const writeRes = await agent(CKPT_WRITE_PROMPT(CKPT_PATH || `$HOME/.claude/workflows/state/repo-${CKPT_WF}.json`, JSON.stringify(ckptState, null, 0)),
+    { label: 'ckpt-write', phase: 'Research', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA })
+  checkpointWritten = !!(writeRes && writeRes.written)
+  log(`Checkpoint: ${checkpointWritten ? 'wrote' : 'attempted to write'} ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'}.`)
+} else {
+  log(`Checkpoint: nothing newly computed — leaving the existing state untouched.`)
+}
 
 // Return shape is ADDITIVE: researched/counts/green_lanes/missing/total preserved for the
-// orchestrator + stacked-impl-lanes handoff; spineVersion is new.
+// orchestrator + stacked-impl-lanes handoff; spineVersion / reused / checkpointWritten are new.
 return {
   researched: clean,
   counts,
   green_lanes,
   missing,
+  reused: reused.map((r) => r.number),
   total: NUMBERS.length,
+  checkpointWritten,
   spineVersion: SPINE_VERSION,
 }
