@@ -177,6 +177,90 @@ test('branches are pruned ONLY after the whole stack lands, and only then', asyn
   assert.ok(/whole stack has landed|after the whole stack lands/i.test(c.prompt), 'cleanup is explicit it runs only after the stack lands')
 })
 
+// Regression (run wf_da881f06-76e): with numbers-only args every item.branch stayed null, so
+// cleanup received "(none)" and pruned nothing even after the whole stack landed. The branch
+// must be resolved from the agents' structured output (verify's TRUSTED headRefName, or the
+// land actor's step-1 resolve) and threaded into the cleanup list.
+test('numbers-only args: cleanup receives the branch names resolved by the verify agent (not "(none)")', async () => {
+  const { result, calls } = await runScript({
+    args: { prs: [52, 53, 54] },
+    verify: (ref) => verdict(ref, { head_branch: `feat/w${ref}` }),
+  })
+  assert.equal(result.complete, true)
+  const c = one(calls, 'cleanup')
+  assert.ok(c, 'cleanup runs')
+  assert.ok(!/\(none\)/.test(c.prompt), 'cleanup list is not empty')
+  for (const b of ['feat/w52', 'feat/w53', 'feat/w54']) assert.ok(c.prompt.includes(`\`${b}\``), `resolved branch ${b} is in the prune list`)
+})
+
+test('numbers-only args: the land actor\'s head_branch is the fallback when verify omits it', async () => {
+  const { result, calls } = await runScript({
+    args: { prs: [52, 53] },
+    land: (ref) => landed(ref, { head_branch: `feat/w${ref}` }),
+  })
+  assert.equal(result.complete, true)
+  const c = one(calls, 'cleanup')
+  assert.ok(c.prompt.includes('`feat/w52`') && c.prompt.includes('`feat/w53`'), 'land-resolved branches reach cleanup')
+})
+
+test('numbers-only args: verify\'s resolved head branch also drives the child\'s --onto rebase upstream', async () => {
+  const { calls } = await runScript({
+    args: { prs: [52, 53] },
+    verify: (ref) => verdict(ref, { head_branch: `feat/w${ref}` }),
+  })
+  const child = one(calls, 'land:#53').prompt
+  assert.ok(/origin\/feat\/w52\b/.test(child), 'child rebases --onto excluding the RESOLVED parent branch')
+  assert.ok(!child.includes('<parentHeadBranch>'), 'no unresolved placeholder once verify supplied the branch')
+})
+
+test('an args-provided branch takes precedence over the agent-resolved head_branch', async () => {
+  const { calls } = await runScript({
+    args: { prs: [{ pr: 1, branch: 'feat/args' }] },
+    verify: (ref) => verdict(ref, { head_branch: 'feat/agent' }),
+  })
+  const c = one(calls, 'cleanup')
+  assert.ok(c.prompt.includes('`feat/args`'), 'the args branch is pruned')
+  assert.ok(!c.prompt.includes('feat/agent'), 'the agent value does not override it')
+})
+
+test('a junk/hostile head_branch (whitespace, backticks) is rejected — never interpolated into cleanup', async () => {
+  const { result, calls } = await runScript({
+    args: { prs: [1] },
+    verify: (ref) => verdict(ref, { head_branch: 'feat/x` && rm -rf / #' }),
+    land: (ref) => landed(ref, { head_branch: '   ' }),
+  })
+  assert.equal(result.complete, true)
+  const c = one(calls, 'cleanup')
+  assert.ok(!c.prompt.includes('rm -rf'), 'the hostile value never reaches the cleanup prompt')
+  assert.ok(/\(none\)/.test(c.prompt), 'an unresolvable branch just stays unpruned (fail-safe)')
+})
+
+test('numbers-only args with no head_branch from any agent keeps the old fail-safe (cleanup "(none)", no crash)', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2] } })
+  assert.equal(result.complete, true)
+  const c = one(calls, 'cleanup')
+  assert.ok(c, 'cleanup still runs')
+  assert.ok(/\(none\)/.test(c.prompt), 'nothing resolvable → nothing pruned, no crash')
+})
+
+test('the verify and land schemas advertise head_branch and their prompts ask for it', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const v = one(calls, 'verify:#1')
+  const l = one(calls, 'land:#1')
+  assert.ok(v.opts.schema.properties.head_branch, 'VERIFY_SCHEMA carries head_branch')
+  assert.ok(l.opts.schema.properties.head_branch, 'LAND_SCHEMA carries head_branch')
+  assert.ok(/head_branch/.test(v.prompt), 'verify prompt asks for headRefName as head_branch')
+  assert.ok(/head_branch/.test(l.prompt), 'land prompt asks to echo head_branch')
+})
+
+test('stage mode (no execute) reports the verify-resolved branch in the staged plan', async () => {
+  const { result } = await runScript({
+    args: { prs: [52, 53], execute: false },
+    verify: (ref) => verdict(ref, { head_branch: `feat/w${ref}` }),
+  })
+  assert.deepEqual(result.staged.map((s) => s.branch), ['feat/w52', 'feat/w53'], 'staged plan carries the resolved branches')
+})
+
 // ───────────────────────────── escalate / stop walk ─────────────────────────────
 test('a non-landable verify verdict ESCALATES and STOPS the walk (rest of stack skipped, no cleanup)', async () => {
   const { result, calls } = await runScript({
