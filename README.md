@@ -200,7 +200,7 @@ node tests/merge-pr-with-gate.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
-Requires Node ≥ 18 (developed on Node 22). Current status: **493 passing** (12 + 65 + 49 + 31 + 28 + 34 + 19 + 29 + 18 + 62 + 26 + 24 + 20 + 23 + 23 + 26 + 4), 0 failing.
+Requires Node ≥ 18 (developed on Node 22). Current status: **501 passing** (12 + 65 + 49 + 31 + 28 + 34 + 19 + 37 + 18 + 62 + 26 + 24 + 20 + 23 + 23 + 26 + 4), 0 failing.
 
 ## Layout
 
