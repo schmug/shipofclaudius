@@ -202,6 +202,12 @@ node tests/plugin-integrity.test.mjs
 
 Requires Node ≥ 18 (developed on Node 22). Current status: **501 passing** (12 + 65 + 49 + 31 + 28 + 34 + 19 + 37 + 18 + 62 + 26 + 24 + 20 + 23 + 23 + 26 + 4), 0 failing.
 
+## Process skills
+
+Alongside the 1:1 workflow wrappers, the plugin ships **process skills** — session-long playbooks declared with `workflow: none` in their frontmatter, carrying reference templates instead of a Workflow script.
+
+- **`critic-gated-build`** — autonomous greenfield build loop gated by an independent third-party LLM critic (e.g. Codex CLI in a read-only sandbox with a fresh context per cycle). Intake → spec → TDD PR loop → deploy → critic scores a fixed 5-category rubric from a clean checkout plus a live-capture evidence bundle; ship gate = every category ≥ 8 on two consecutive cycles, with a hard cycle cap. Bundles rubric-prompt and critic-runner templates that the session scaffolds into the target repo. Proven on schmug/shelflife (idea → live multiplayer game, gate met at cycle 5 of 12).
+
 ## Layout
 
 ```
