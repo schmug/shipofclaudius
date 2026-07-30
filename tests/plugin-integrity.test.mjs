@@ -49,9 +49,41 @@ const skillNames = async () => {
   return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort()
 }
 
+// Process skills are session-long playbooks, not Workflow wrappers. They opt out
+// of the 1:1 mapping EXPLICITLY via `workflow: none` in frontmatter — an absent
+// workflow script alone is still an orphan and still fails the 1:1 check.
+const isProcessSkill = async (name) => {
+  const md = await read(`skills/${name}/SKILL.md`)
+  return /^workflow:\s*none$/m.test(md)
+}
+
+const partitionedSkills = async () => {
+  const wrappers = []
+  const process = []
+  for (const name of await skillNames()) {
+    ;(await isProcessSkill(name)) ? process.push(name) : wrappers.push(name)
+  }
+  return { wrappers, process }
+}
+
 test('every workflow has exactly one wrapper skill, and vice versa (1:1, no orphans)', async () => {
-  assert.deepEqual(await skillNames(), await workflowNames(),
-    'skills/<name>/ set must equal .claude/workflows/<name>.js set')
+  const { wrappers } = await partitionedSkills()
+  assert.deepEqual(wrappers, await workflowNames(),
+    'non-process skills/<name>/ set must equal .claude/workflows/<name>.js set')
+})
+
+test('process skills: declared explicitly, self-consistent, and never Workflow wrappers', async () => {
+  const { process } = await partitionedSkills()
+  for (const name of process) {
+    const md = await read(`skills/${name}/SKILL.md`)
+    assert.ok(/^---[\s\S]*?\ndescription:\s*\S.*\n[\s\S]*?---/m.test(md), `${name}: frontmatter has a non-empty description`)
+    assert.ok(md.includes(`name: ${name}`), `${name}: frontmatter name matches the directory`)
+    assert.ok(!md.includes('scriptPath'), `${name}: a process skill must not masquerade as a Workflow wrapper`)
+    // every bundled reference the body mentions must exist
+    for (const m of md.matchAll(/references\/([\w.-]+)/g)) {
+      await read(`skills/${name}/references/${m[1]}`)
+    }
+  }
 })
 
 test('each wrapper targets its own bundled workflow via scriptPath + has a description', async () => {

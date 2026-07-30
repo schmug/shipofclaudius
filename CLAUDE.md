@@ -31,6 +31,7 @@ After editing a workflow, run `npm test` and confirm the count (README tracks th
 These are not style preferences — `tests/plugin-integrity.test.mjs` fails the build if you break them:
 
 - **1:1 workflow ↔ wrapper skill.** Every `.claude/workflows/<name>.js` must have exactly one `skills/<name>/SKILL.md` and vice versa (no orphans). When you add a workflow, add the matching skill dir.
+  - **Exception — process skills.** A skill whose frontmatter declares `workflow: none` is a session-long playbook (no Workflow script) and is exempt from the 1:1 mapping; the integrity test still enforces its frontmatter, forbids `scriptPath` in its body, and requires every `references/<file>` it mentions to exist. Currently: `critic-gated-build`.
 - **Wrapper shape.** Each `SKILL.md` frontmatter must have `name: <name>` matching the workflow and a non-empty `description`, and the body must instruct a `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js", ... })` call referencing **its own** bundled script.
 - **`package.json` `test` script lists each suite explicitly.** A new `tests/<name>-sim.test.mjs` must be appended to the `&&`-chain in the `test` script, or CI never runs it.
 - **No pinned plugin version.** Neither `.claude-plugin/plugin.json` nor `.claude-plugin/marketplace.json` may contain a `version` field. The plugin is delivered by git commit SHA so every push to `main` ships; a pinned-but-unbumped version silently freezes all installers. (See [README.md](README.md) "Updates / versioning".)
