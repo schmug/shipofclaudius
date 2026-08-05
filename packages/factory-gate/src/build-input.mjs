@@ -46,6 +46,25 @@ export function resolveLinkedIssue(prBody) {
 }
 
 /**
+ * Build the `gh api` path for discovering a base branch's required-check contexts.
+ *
+ * `gh api` does NOT accept `-R/--repo` — it resolves `{owner}/{repo}` from the current directory's
+ * git remote instead. Passing `-R` makes the call fail, which silently yields ZERO required
+ * contexts, which makes `ci_green` fail on every PR forever. So when the caller named a repo we
+ * interpolate it into the path, and only fall back to the placeholders when it did not.
+ *
+ * @param {string|null|undefined} repo  "owner/name", or null to use the cwd's repo
+ * @param {string} base                 the base branch
+ * @param {'protection'|'rules'} kind
+ * @returns {string} the api path
+ */
+export function requiredContextsPath(repo, base, kind) {
+  const slug = (typeof repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(repo.trim())) ? repo.trim() : '{owner}/{repo}'
+  const b = encodeURIComponent(String(base == null ? '' : base))
+  return kind === 'rules' ? `repos/${slug}/rules/branches/${b}` : `repos/${slug}/branches/${b}/protection`
+}
+
+/**
  * Shape the gate input from raw `gh` payloads.
  *
  * @param {object} o

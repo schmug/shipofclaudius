@@ -206,9 +206,14 @@ const relayPrompt = (what, cmd) =>
 
 const PR_CMD = `gh pr view ${PR} ${REPOFLAG} --json number,title,author,body,labels,files,additions,deletions,mergeable,mergeStateStatus,statusCheckRollup,baseRefName,headRefName,isDraft,state`
 const issueCmd = (n) => `gh issue view ${n} ${REPOFLAG} --json number,title,author,body,labels,state`
+// `gh api` takes NO `-R/--repo` — it resolves `{owner}/{repo}` from the cwd's git remote — so when
+// args.repo names a repo it must be interpolated into the PATH. Getting this wrong does not error
+// loudly: it yields ZERO required contexts, which fails `ci_green` on every PR forever.
+// Classic branch protection 404s on repos governed by rulesets, hence the `||` fallback.
+const API_SLUG = (typeof A.repo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(A.repo.trim())) ? A.repo.trim() : '{owner}/{repo}'
 const requiredCmd = (base) =>
-  `gh api repos/{owner}/{repo}/branches/${base}/protection --jq '.required_status_checks.contexts' 2>/dev/null ` +
-  `|| gh api repos/{owner}/{repo}/rules/branches/${base} --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]' 2>/dev/null`
+  `gh api repos/${API_SLUG}/branches/${encodeURIComponent(base)}/protection --jq '.required_status_checks.contexts' 2>/dev/null ` +
+  `|| gh api repos/${API_SLUG}/rules/branches/${encodeURIComponent(base)} --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]' 2>/dev/null`
 const CONFIG_CMD = `git fetch origin ${GATE_FROM_REF} 2>/dev/null; git show origin/${GATE_FROM_REF}:.factory/gate.json 2>/dev/null || git show ${GATE_FROM_REF}:.factory/gate.json 2>/dev/null`
 
 const GATE_RUN_PROMPT = (inputJson, configJson) =>

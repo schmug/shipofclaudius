@@ -14,7 +14,7 @@
 import { writeFile, readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { buildGateInput, resolveLinkedIssue } from '../src/build-input.mjs'
+import { buildGateInput, resolveLinkedIssue, requiredContextsPath } from '../src/build-input.mjs'
 
 const run = promisify(execFile)
 
@@ -44,14 +44,15 @@ const ghJSON = async (args, what) => {
  * fallback. Returns [] when neither resolves — and [] makes `ci_green` FAIL, which is correct: a
  * repo whose required checks cannot be discovered has not proven anything about its CI.
  */
-async function requiredContexts(repoArgs, base) {
-  const jq = '.required_status_checks.contexts'
+async function requiredContexts(repo, base) {
+  // NOTE: `gh api` takes no `-R` — the repo goes in the PATH (see requiredContextsPath).
   try {
-    const v = JSON.parse(await gh([...repoArgs, 'api', `repos/{owner}/{repo}/branches/${base}/protection`, '--jq', jq]))
-    if (Array.isArray(v)) return v.map(String)
-  } catch { /* fall through to rulesets */ }
+    const v = JSON.parse(await gh(['api', requiredContextsPath(repo, base, 'protection'),
+      '--jq', '.required_status_checks.contexts']))
+    if (Array.isArray(v) && v.length) return v.map(String)
+  } catch { /* classic branch protection is absent — repos on rulesets 404 here */ }
   try {
-    const v = JSON.parse(await gh([...repoArgs, 'api', `repos/{owner}/{repo}/rules/branches/${base}`,
+    const v = JSON.parse(await gh(['api', requiredContextsPath(repo, base, 'rules'),
       '--jq', '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]']))
     if (Array.isArray(v)) return v.map(String)
   } catch { /* neither resolved */ }
@@ -84,7 +85,7 @@ async function main() {
   }
 
   const base = a.base && a.base !== true ? String(a.base) : (pr.baseRefName || 'main')
-  const input = buildGateInput({ pr, issue, requiredContexts: await requiredContexts(R, base), evidence })
+  const input = buildGateInput({ pr, issue, requiredContexts: await requiredContexts(a.repo, base), evidence })
 
   await writeFile(String(a.out), JSON.stringify(input, null, 2) + '\n')
   console.error(`build-input: wrote ${a.out} (PR #${input.pr.number} -> issue ${input.issue.number ?? 'unresolved'}, ` +

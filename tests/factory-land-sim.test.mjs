@@ -495,6 +495,23 @@ test('requireFixtureEvidence stays satisfiable end to end once a repo opts in', 
   assert.ok(bare.failed.includes('fixture_evidence'))
 })
 
+test('the required-contexts relay puts the repo in the API PATH (`gh api` takes no -R)', async () => {
+  // Regression from a live dry run: `gh api -R owner/name ...` FAILS, yielding zero required
+  // contexts, which fails ci_green on every PR forever instead of erroring loudly.
+  const { calls } = await runScript({ args: baseArgs() })
+  const r = byPrefix(calls, 'relay-required')[0]
+  assert.ok(/gh api repos\/o\/r\/branches\/main\/protection/.test(r.prompt), 'the repo is interpolated into the path')
+  assert.ok(/gh api repos\/o\/r\/rules\/branches\/main/.test(r.prompt), 'and into the rulesets fallback')
+  assert.ok(!/gh api\s+-R/.test(r.prompt), '`gh api` is never given -R')
+  assert.ok(/\|\|/.test(r.prompt), 'classic protection falls back to rulesets (it 404s on ruleset-governed repos)')
+})
+
+test('with no args.repo the relay keeps the {owner}/{repo} placeholders', async () => {
+  const { calls } = await runScript({ args: { pr: 900 } })
+  const r = byPrefix(calls, 'relay-required')[0]
+  assert.ok(/repos\/\{owner\}\/\{repo\}\/rules\/branches\/main/.test(r.prompt), 'gh resolves the repo from the cwd')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

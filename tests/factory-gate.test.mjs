@@ -10,7 +10,7 @@ import { globToRegExp, matches, firstMatch } from '../packages/factory-gate/src/
 import { stripNonSemantic, extractCloses, extractScopeGlobs } from '../packages/factory-gate/src/extract.mjs'
 import { normalizeConfig, MANDATORY_DENYLIST, DEFAULTS } from '../packages/factory-gate/src/config.mjs'
 import { evaluate, renderVerdict, CONDITION_ORDER } from '../packages/factory-gate/src/gate-core.mjs'
-import { buildGateInput, normalizeChecks, resolveLinkedIssue } from '../packages/factory-gate/src/build-input.mjs'
+import { buildGateInput, normalizeChecks, resolveLinkedIssue, requiredContextsPath } from '../packages/factory-gate/src/build-input.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -439,6 +439,27 @@ test('build-input: the evidence block passes through untouched for the opt-in co
   const bare = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'] })
   assert.equal(bare.evidence, null, 'absent evidence is null, never a permissive default')
   assert.ok(evaluate(bare, { ...CONFIG, requireFixtureEvidence: true }).failed.includes('fixture_evidence'))
+})
+
+test('requiredContextsPath: the repo goes in the PATH — `gh api` takes no -R', () => {
+  // Regression: passing `-R owner/name` to `gh api` makes the call FAIL, which yields zero
+  // required contexts, which fails ci_green on EVERY PR forever. Caught by a live dry run
+  // against schmug/dmarcheck, whose main branch is governed by a ruleset (classic protection 404s).
+  assert.equal(requiredContextsPath('schmug/dmarcheck', 'main', 'protection'), 'repos/schmug/dmarcheck/branches/main/protection')
+  assert.equal(requiredContextsPath('schmug/dmarcheck', 'main', 'rules'), 'repos/schmug/dmarcheck/rules/branches/main')
+})
+
+test('requiredContextsPath: falls back to the {owner}/{repo} placeholders when no repo is named', () => {
+  assert.equal(requiredContextsPath(null, 'main', 'rules'), 'repos/{owner}/{repo}/rules/branches/main')
+  assert.equal(requiredContextsPath(undefined, 'main', 'protection'), 'repos/{owner}/{repo}/branches/main/protection')
+  assert.equal(requiredContextsPath(true, 'main', 'rules'), 'repos/{owner}/{repo}/rules/branches/main', 'a bare --repo flag is not a slug')
+  assert.equal(requiredContextsPath('not-a-slug', 'main', 'rules'), 'repos/{owner}/{repo}/rules/branches/main')
+})
+
+test('requiredContextsPath: a branch name with a slash is encoded, not injected into the path', () => {
+  const p = requiredContextsPath('o/r', 'release/v2', 'rules')
+  assert.equal(p, 'repos/o/r/rules/branches/release%2Fv2')
+  assert.ok(!p.endsWith('/v2'), 'the slash must not create an extra path segment')
 })
 
 // ---- runner ----
