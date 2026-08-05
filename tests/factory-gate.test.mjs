@@ -10,6 +10,7 @@ import { globToRegExp, matches, firstMatch } from '../packages/factory-gate/src/
 import { stripNonSemantic, extractCloses, extractScopeGlobs } from '../packages/factory-gate/src/extract.mjs'
 import { normalizeConfig, MANDATORY_DENYLIST, DEFAULTS } from '../packages/factory-gate/src/config.mjs'
 import { evaluate, renderVerdict, CONDITION_ORDER } from '../packages/factory-gate/src/gate-core.mjs'
+import { buildGateInput, normalizeChecks, resolveLinkedIssue } from '../packages/factory-gate/src/build-input.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -339,6 +340,105 @@ test('renderVerdict: escapes pipes so a hostile filename cannot break the table'
   const i = okInput(); i.pr.changedFiles = ['src/views/a|b.ts']
   const md = renderVerdict(evaluate(i, CONFIG))
   assert.ok(!/\| src\/views\/a\|b\.ts/.test(md), 'raw pipes must be escaped')
+})
+
+// ---------- build-input (the gate-input shape contract) ----------
+// The shape of gate-input.json is a contract between four callers: the Action's land job,
+// factory-land, factory-issue-fix's evidence block, and gate-core's nine conditions. A silent
+// shape drift would DISABLE a condition rather than fail it, so the shaping is pure and tested.
+
+const ghPr = (over = {}) => ({
+  number: 900,
+  body: 'Closes #417\n\n```scope\nsrc/a.ts\n```',
+  labels: [{ name: 'fix-verified' }],
+  files: [{ path: 'src/a.ts' }],
+  additions: 10,
+  deletions: 2,
+  mergeStateStatus: 'CLEAN',
+  baseRefName: 'main',
+  statusCheckRollup: [{ name: 'check', conclusion: 'SUCCESS' }],
+  ...over,
+})
+const ghIssue = (over = {}) => ({
+  number: 417, author: { login: 'schmug' }, body: '```scope\nsrc/a.ts\n```', labels: [{ name: 'factory' }], ...over,
+})
+
+test('build-input: shapes gh JSON into an input the gate accepts end to end', () => {
+  const input = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'] })
+  const v = evaluate(input, CONFIG)
+  assert.equal(v.pass, true, 'a clean PR shaped by build-input passes all nine conditions')
+  assert.deepEqual(v.failed, [])
+})
+
+test('build-input: emits exactly the keys gate-core reads', () => {
+  const input = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.deepEqual(Object.keys(input).sort(), ['evidence', 'issue', 'pr', 'requiredContexts'])
+  assert.deepEqual(Object.keys(input.issue).sort(), ['author', 'body', 'labels', 'number'])
+  assert.deepEqual(Object.keys(input.pr).sort(),
+    ['additions', 'body', 'changedFiles', 'checks', 'deletions', 'labels', 'mergeStateStatus', 'number'])
+})
+
+test('build-input: labels are unwrapped from {name} and from bare strings alike', () => {
+  const a = buildGateInput({ pr: ghPr({ labels: [{ name: 'x' }] }) })
+  const b = buildGateInput({ pr: ghPr({ labels: ['x'] }) })
+  assert.deepEqual(a.pr.labels, ['x'])
+  assert.deepEqual(b.pr.labels, ['x'])
+})
+
+test('build-input: an absent issue fails closed rather than inventing an author', () => {
+  const input = buildGateInput({ pr: ghPr(), issue: null, requiredContexts: ['check'] })
+  assert.equal(input.issue.author, null, 'no author is invented')
+  assert.equal(input.issue.body, '', 'no scope block is invented')
+  const v = evaluate(input, CONFIG)
+  assert.equal(v.pass, false)
+  assert.ok(v.failed.includes('author_allowlisted'), 'an unknown author cannot be allowlisted')
+  assert.ok(v.failed.includes('no_scope_drift'), 'no scope block means every file is drift')
+})
+
+test('build-input: missing size data becomes null, and null fails within_size_limits', () => {
+  const input = buildGateInput({ pr: ghPr({ additions: undefined, deletions: undefined }), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(input.pr.additions, null)
+  assert.ok(evaluate(input, CONFIG).failed.includes('within_size_limits'), 'unprovable size is a FAIL')
+})
+
+test('build-input: an absent file list becomes null, not an empty allow-everything list', () => {
+  const input = buildGateInput({ pr: ghPr({ files: undefined }), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(input.pr.changedFiles, null, 'null, never []')
+  assert.ok(evaluate(input, CONFIG).failed.includes('no_risk_paths'), 'an unknown file list cannot be proven safe')
+})
+
+test('normalizeChecks: an absent rollup is null (UNKNOWN), never an empty green list', () => {
+  assert.equal(normalizeChecks(undefined), null)
+  assert.equal(normalizeChecks(null), null)
+  const input = buildGateInput({ pr: ghPr({ statusCheckRollup: undefined }), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.ok(evaluate(input, CONFIG).failed.includes('ci_green'), 'UNKNOWN CI is never a pass')
+})
+
+test('normalizeChecks: conclusions are lowercased and `context`/`state` aliases are accepted', () => {
+  assert.deepEqual(normalizeChecks([{ name: 'a', conclusion: 'SUCCESS' }]), [{ name: 'a', conclusion: 'success' }])
+  assert.deepEqual(normalizeChecks([{ context: 'b', state: 'FAILURE' }]), [{ name: 'b', conclusion: 'failure' }])
+})
+
+test('build-input: no required contexts resolved means ci_green FAILS', () => {
+  const input = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: [] })
+  assert.ok(evaluate(input, CONFIG).failed.includes('ci_green'), 'a repo whose required checks are undiscoverable proves nothing')
+})
+
+test('resolveLinkedIssue: routing matches the gate, and ambiguity routes nowhere', () => {
+  assert.equal(resolveLinkedIssue('Closes #417'), 417)
+  assert.equal(resolveLinkedIssue('Closes #417\nCloses #418'), null, 'ambiguous references route nowhere')
+  assert.equal(resolveLinkedIssue('`Closes #417`'), null, 'an example in a code span is not a declaration')
+  assert.equal(resolveLinkedIssue(''), null)
+})
+
+test('build-input: the evidence block passes through untouched for the opt-in condition', () => {
+  const evidence = { fixtureTest: 'test/a.test.ts::x', redOnBase: true, greenOnHead: true }
+  const input = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'], evidence })
+  assert.deepEqual(input.evidence, evidence)
+  assert.equal(evaluate(input, { ...CONFIG, requireFixtureEvidence: true }).pass, true)
+  const bare = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(bare.evidence, null, 'absent evidence is null, never a permissive default')
+  assert.ok(evaluate(bare, { ...CONFIG, requireFixtureEvidence: true }).failed.includes('fixture_evidence'))
 })
 
 // ---- runner ----

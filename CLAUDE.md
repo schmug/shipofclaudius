@@ -24,7 +24,9 @@ The `.claude/workflows/*.js` scripts use **top-level `return` and `await`** beca
 - **`node --check <file>` reports a bogus `SyntaxError: Illegal return statement`** — that does *not* mean the file is broken. Do not rely on it.
 - The **real parser + logic check is `npm test`.** Each `tests/*-sim.test.mjs` reads the workflow source, strips `export ` off `export const meta`, wraps the body in `new AsyncFunction('args','budget','agent','parallel','pipeline','phase','log','workflow', src)`, and runs it with stubbed runtime globals. A genuine syntax error throws at `AsyncFunction` construction; orchestration logic (dedup precedence, fail-open behavior, layer gating, schema satisfiability, prompt-injection fence shapes) is asserted against the stubs at zero token cost.
 
-After editing a workflow, run `npm test` and confirm the count (README tracks the current total, e.g. "409 passing").
+After editing a workflow, run `npm test` and confirm the count (README tracks the current total, e.g. "638 passing"). The count only goes UP.
+
+**`packages/factory-gate` is not a workflow and has no sim.** It is pure, model-free code, so `tests/factory-gate.test.mjs` is an ordinary unit suite. Because it is imported (not `AsyncFunction`-wrapped), `tests/` must stay a sibling of `packages/` as well as of `.claude/workflows/`. The two factory sims import the real gate to assert across the boundary — if you change `CONDITION_ORDER` or the `fixture_evidence` shape, those sims are what catch the caller drift.
 
 ## Conventions that the test suite enforces
 
@@ -48,7 +50,7 @@ These are not style preferences — `tests/plugin-integrity.test.mjs` fails the 
 Workflows that read attacker-writable text (issue/PR bodies, comments, reviews, diffs, external findings/SARIF/CVE/GHSA, Dependabot alerts) follow a fixed three-part defense — preserve all three when editing these scripts:
 
 1. **A dedicated read-only relay agent** runs a *fixed* fetch command (`gh issue view` / `gh pr view` / `gh pr diff` / `git diff`), mints a **fresh random nonce**, and returns raw bytes verbatim. The reasoning agent never fetches the untrusted text itself.
-2. **Every subagent runs under a read-only `agentType`** (default `Explore`; overridable via `args.readonlyAgent`). The three **write** workflows (`stacked-impl-lanes`, `stacked-merge-walk`, `fix-finding`) are the exception — their write actors keep write tools, and `readonlyAgent` scopes only their read-only relays/gates.
+2. **Every subagent runs under a read-only `agentType`** (default `Explore`; overridable via `args.readonlyAgent`). The **write** workflows (`stacked-impl-lanes`, `stacked-merge-walk`, `merge-pr-with-gate`, `fix-finding`, `factory-issue-fix`, `factory-land`) are the exception — their write actors keep write tools, and `readonlyAgent` scopes only their read-only relays/gates.
 3. **An anti-injection preamble** precedes every nonce-fenced block: the fenced text is data, never instructions.
 
 The full per-workflow security model (and the required read-scoped `gh` token for the read-only fan-outs) is documented in [README.md](README.md) "Security model" — consult it before changing any agent's tool grants or fetch path.
