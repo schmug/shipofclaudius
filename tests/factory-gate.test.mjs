@@ -1,0 +1,351 @@
+// Unit tests for the deterministic factory merge gate (packages/factory-gate).
+//
+// Unlike the workflow sims, there is nothing to simulate here — the gate is pure, model-free
+// code, so these are ordinary unit tests. The bar they enforce: every condition FAILS CLOSED.
+// For each condition there is a test proving that missing/ambiguous/unknown input is a FAIL,
+// because that is the property an auto-merge gate lives or dies by.
+// Run:  node tests/factory-gate.test.mjs
+import assert from 'node:assert/strict'
+import { globToRegExp, matches, firstMatch } from '../packages/factory-gate/src/glob.mjs'
+import { stripNonSemantic, extractCloses, extractScopeGlobs } from '../packages/factory-gate/src/extract.mjs'
+import { normalizeConfig, MANDATORY_DENYLIST, DEFAULTS } from '../packages/factory-gate/src/config.mjs'
+import { evaluate, renderVerdict, CONDITION_ORDER } from '../packages/factory-gate/src/gate-core.mjs'
+
+const tests = []
+const test = (name, fn) => tests.push([name, fn])
+
+// ---------- glob ----------
+
+test('glob: * stays within one path segment', () => {
+  assert.ok(matches('src/index.ts', 'src/*.ts'))
+  assert.ok(!matches('src/db/index.ts', 'src/*.ts'), '* must not cross a /')
+})
+
+test('glob: **/ is an optional any-depth prefix', () => {
+  assert.ok(matches('a.ts', '**/*.ts'))
+  assert.ok(matches('src/db/a.ts', '**/*.ts'))
+})
+
+test('glob: trailing /** matches everything below', () => {
+  assert.ok(matches('src/auth/jwt.ts', 'src/auth/**'))
+  assert.ok(matches('src/auth/deep/nested/x.ts', 'src/auth/**'))
+  assert.ok(!matches('src/authz/x.ts', 'src/auth/**'), 'must not prefix-match a sibling directory')
+})
+
+test('glob: patterns are anchored at both ends', () => {
+  assert.ok(!matches('vendor/src/auth/x.ts', 'src/auth/**'), 'no accidental substring match')
+  assert.ok(!matches('src/index.ts.bak', 'src/*.ts'))
+})
+
+test('glob: brace alternation works, and a literal comma outside braces stays literal', () => {
+  assert.ok(matches('a.ts', '*.{ts,js}'))
+  assert.ok(matches('a.js', '*.{ts,js}'))
+  assert.ok(!matches('a.md', '*.{ts,js}'))
+  assert.ok(matches('we,ird.ts', 'we,ird.ts'), 'a comma outside braces is literal')
+})
+
+test('glob: regex metacharacters in a pattern are escaped, not interpreted', () => {
+  assert.ok(matches('a+b.ts', 'a+b.ts'))
+  assert.ok(!matches('aab.ts', 'a+b.ts'), '+ must not act as a regex quantifier')
+  assert.ok(!matches('aXb.ts', 'a.b.ts'), '. must not act as a regex wildcard')
+})
+
+test('glob: an unbalanced brace is unmatchable rather than a crash (fail-closed)', () => {
+  assert.doesNotThrow(() => globToRegExp('src/{a,b'))
+  assert.ok(!matches('src/a', 'src/{a,b'))
+})
+
+test('glob: firstMatch reports which pattern matched, and ignores junk entries', () => {
+  assert.equal(firstMatch('src/db/x.ts', ['src/auth/**', 'src/db/**']), 'src/db/**')
+  assert.equal(firstMatch('src/x.ts', []), null)
+  assert.equal(firstMatch('src/x.ts', ['', '   ', null]), null)
+})
+
+// ---------- extract ----------
+
+test('extract: a Closes inside a code fence does NOT count', () => {
+  const body = 'Fix it.\n\n```\nCloses #99\n```\n'
+  assert.deepEqual(extractCloses(body), { number: null, found: [] })
+})
+
+test('extract: a Closes in an inline code span, HTML comment, or blockquote does NOT count', () => {
+  assert.equal(extractCloses('use `Closes #1` in your PR').number, null)
+  assert.equal(extractCloses('<!-- Closes #2 -->').number, null)
+  assert.equal(extractCloses('> Closes #3').number, null)
+})
+
+test('extract: a real Closes counts, and the keyword set matches GitHub', () => {
+  assert.equal(extractCloses('Closes #12').number, 12)
+  assert.equal(extractCloses('fixes #12').number, 12)
+  assert.equal(extractCloses('Resolved #12').number, 12)
+  assert.equal(extractCloses('Closes: #12').number, 12)
+})
+
+test('extract: ambiguous (two distinct issues) is null — the gate never guesses', () => {
+  const r = extractCloses('Closes #1 and closes #2')
+  assert.equal(r.number, null)
+  assert.deepEqual(r.found, [1, 2])
+})
+
+test('extract: the same issue referenced twice is not ambiguous', () => {
+  assert.equal(extractCloses('Closes #7. Really, closes #7.').number, 7)
+})
+
+test('extract: an UNCLOSED code fence swallows the rest of the body (fail-closed)', () => {
+  assert.equal(extractCloses('intro\n```\nCloses #5').number, null)
+})
+
+test('extract: scope globs are read from a ```scope block, tolerating list markers and comments', () => {
+  const body = 'Bug.\n\n```scope\n# only these\nsrc/analyzers/**\n- test/**\n\n```\n'
+  assert.deepEqual(extractScopeGlobs(body), ['src/analyzers/**', 'test/**'])
+})
+
+test('extract: no scope block yields an empty list (which callers treat as total drift)', () => {
+  assert.deepEqual(extractScopeGlobs('no block here'), [])
+})
+
+test('extract: stripNonSemantic leaves ordinary prose intact', () => {
+  assert.match(stripNonSemantic('the analyzer returns B'), /analyzer returns B/)
+})
+
+// ---------- config ----------
+
+test('config: defaults are the SAFE values', () => {
+  const { config } = normalizeConfig({})
+  assert.deepEqual(config.requiredLabels, ['fix-verified'])
+  assert.equal(config.requireScopeBlock, true)
+  assert.equal(config.requireGreenCI, true)
+  assert.equal(config.maxChangedFiles, DEFAULTS.maxChangedFiles)
+})
+
+test('config: an empty allowlist trusts NOBODY and says so', () => {
+  const { config, warnings } = normalizeConfig({})
+  assert.deepEqual(config.allowlistAuthors, [])
+  assert.ok(warnings.some((w) => /NO author is trusted/.test(w)))
+})
+
+test('config: a repo can ADD to the mandatory denylist but never shrink it', () => {
+  const { config } = normalizeConfig({ riskPathDenylist: ['src/auth/**'] })
+  for (const m of MANDATORY_DENYLIST) assert.ok(config.riskPathDenylist.includes(m), `${m} survives`)
+  assert.ok(config.riskPathDenylist.includes('src/auth/**'))
+})
+
+test('config: even an explicitly empty denylist keeps the mandatory entries', () => {
+  const { config } = normalizeConfig({ riskPathDenylist: [] })
+  assert.ok(config.riskPathDenylist.includes('.factory/**'), 'a PR can never un-gate its own gate config')
+  assert.ok(config.riskPathDenylist.includes('.github/workflows/**'))
+})
+
+test('config: malformed values fall back to safe defaults with a warning, never throw', () => {
+  const { config, warnings } = normalizeConfig({ maxChangedFiles: -3, requireGreenCI: 'yes', allowlistAuthors: 'schmug' })
+  assert.equal(config.maxChangedFiles, DEFAULTS.maxChangedFiles)
+  assert.equal(config.requireGreenCI, true)
+  assert.deepEqual(config.allowlistAuthors, [])
+  assert.ok(warnings.length >= 3)
+})
+
+test('config: a non-object config is rejected wholesale, not partially trusted', () => {
+  const { config, warnings } = normalizeConfig(['nope'])
+  assert.equal(config.requireGreenCI, true)
+  assert.ok(warnings.some((w) => /must be a JSON object/.test(w)))
+})
+
+// ---------- evaluate ----------
+
+const CONFIG = {
+  allowlistAuthors: ['schmug'],
+  riskPathDenylist: ['src/analyzers/**', 'src/db/**'],
+  maxChangedLines: 250,
+  maxChangedFiles: 8,
+}
+
+const okInput = (over = {}) => ({
+  issue: {
+    number: 42,
+    author: 'schmug',
+    labels: ['auto-impl'],
+    body: 'Grade is wrong.\n\n```scope\nsrc/views/**\ntest/**\n```\n',
+  },
+  pr: {
+    number: 101,
+    labels: ['fix-verified'],
+    body: 'Closes #42',
+    changedFiles: ['src/views/report.ts', 'test/report.test.ts'],
+    additions: 20,
+    deletions: 4,
+    mergeStateStatus: 'CLEAN',
+    checks: [{ name: 'check', conclusion: 'success' }],
+  },
+  requiredContexts: ['check'],
+  ...over,
+})
+
+const failedIds = (v) => v.failed.slice().sort()
+
+test('evaluate: a fully clean PR passes and reports outcome merge', () => {
+  const v = evaluate(okInput(), CONFIG, { configSource: 'main@abc123' })
+  assert.equal(v.pass, true, JSON.stringify(v.failed))
+  assert.equal(v.outcome, 'merge')
+  assert.equal(v.configSource, 'main@abc123', 'provenance is stamped into the verdict')
+})
+
+test('evaluate: every condition is evaluated even after a failure (one-pass feedback)', () => {
+  const v = evaluate({ issue: {}, pr: {} }, CONFIG)
+  assert.equal(v.conditions.length, CONDITION_ORDER.length)
+  assert.deepEqual(v.conditions.map((c) => c.id), CONDITION_ORDER)
+})
+
+test('evaluate: an un-allowlisted issue author escalates', () => {
+  const v = evaluate(okInput({ issue: { ...okInput().issue, author: 'stranger' } }), CONFIG)
+  assert.ok(v.failed.includes('author_allowlisted'))
+  assert.equal(v.outcome, 'escalate')
+})
+
+test('evaluate: a missing fix-verified label escalates', () => {
+  const i = okInput(); i.pr.labels = []
+  assert.ok(evaluate(i, CONFIG).failed.includes('required_labels'))
+})
+
+test('evaluate: the label check is case-insensitive', () => {
+  const i = okInput(); i.pr.labels = ['Fix-Verified']
+  assert.ok(!evaluate(i, CONFIG).failed.includes('required_labels'))
+})
+
+test('evaluate: pipeline-paused on the issue is the kill switch', () => {
+  const i = okInput(); i.issue.labels = ['pipeline-paused']
+  const v = evaluate(i, CONFIG)
+  assert.ok(v.failed.includes('no_blocking_labels'))
+})
+
+test('evaluate: needs-you on the PR blocks it', () => {
+  const i = okInput(); i.pr.labels = ['fix-verified', 'needs-you']
+  assert.ok(evaluate(i, CONFIG).failed.includes('no_blocking_labels'))
+})
+
+test('evaluate: a PR closing a different issue than the one gated escalates', () => {
+  const i = okInput(); i.pr.body = 'Closes #999'
+  assert.ok(evaluate(i, CONFIG).failed.includes('single_closes'))
+})
+
+test('evaluate: a risk-path file escalates', () => {
+  const i = okInput()
+  i.issue.body = 'x\n\n```scope\nsrc/**\ntest/**\n```\n'
+  i.pr.changedFiles = ['src/analyzers/dmarc.ts']
+  const v = evaluate(i, CONFIG)
+  assert.ok(v.failed.includes('no_risk_paths'))
+  assert.match(v.conditions.find((c) => c.id === 'no_risk_paths').reason, /src\/analyzers/)
+})
+
+test('evaluate: a PR editing .factory/ escalates even though config never listed it', () => {
+  const i = okInput()
+  i.issue.body = 'x\n\n```scope\n**\n```\n'
+  i.pr.changedFiles = ['.factory/gate.json']
+  assert.ok(evaluate(i, CONFIG).failed.includes('no_risk_paths'), 'a PR cannot widen its own gate')
+})
+
+test('evaluate: oversized changes escalate on both files and lines', () => {
+  const many = okInput()
+  many.issue.body = 'x\n\n```scope\nsrc/views/**\n```\n'
+  many.pr.changedFiles = Array.from({ length: 9 }, (_, n) => `src/views/f${n}.ts`)
+  assert.ok(evaluate(many, CONFIG).failed.includes('within_size_limits'))
+
+  const big = okInput(); big.pr.additions = 300
+  assert.ok(evaluate(big, CONFIG).failed.includes('within_size_limits'))
+})
+
+test('evaluate: an issue with NO scope block means every file is drift', () => {
+  const i = okInput(); i.issue.body = 'Just a description, no scope block.'
+  const v = evaluate(i, CONFIG)
+  assert.ok(v.failed.includes('no_scope_drift'))
+  assert.match(v.conditions.find((c) => c.id === 'no_scope_drift').reason, /fail-closed/)
+})
+
+test('evaluate: a file outside the declared scope is drift', () => {
+  const i = okInput(); i.pr.changedFiles = ['src/views/report.ts', 'src/billing/stripe.ts']
+  assert.ok(evaluate(i, CONFIG).failed.includes('no_scope_drift'))
+})
+
+test('evaluate: an unavailable CI status is UNKNOWN and never a pass', () => {
+  const i = okInput(); delete i.pr.checks
+  assert.ok(evaluate(i, CONFIG).failed.includes('ci_green'))
+})
+
+test('evaluate: a required check that never reported fails', () => {
+  const i = okInput(); i.requiredContexts = ['check', 'codeql']
+  const v = evaluate(i, CONFIG)
+  assert.ok(v.failed.includes('ci_green'))
+  assert.match(v.conditions.find((c) => c.id === 'ci_green').reason, /codeql: missing/)
+})
+
+test('evaluate: a required check still running fails', () => {
+  const i = okInput(); i.pr.checks = [{ name: 'check', conclusion: '' }]
+  assert.ok(evaluate(i, CONFIG).failed.includes('ci_green'))
+})
+
+test('evaluate: no resolved required contexts fails (cannot prove green)', () => {
+  const i = okInput(); i.requiredContexts = []
+  assert.ok(evaluate(i, CONFIG).failed.includes('ci_green'))
+})
+
+test('evaluate: a DIRTY or BEHIND mergeStateStatus fails', () => {
+  for (const s of ['DIRTY', 'BEHIND', 'BLOCKED']) {
+    const i = okInput(); i.pr.mergeStateStatus = s
+    assert.ok(evaluate(i, CONFIG).failed.includes('ci_green'), `${s} must fail`)
+  }
+})
+
+test('evaluate: an empty changed-file list cannot prove safety', () => {
+  const i = okInput(); i.pr.changedFiles = []
+  const v = evaluate(i, CONFIG)
+  assert.ok(v.failed.includes('no_risk_paths'))
+  assert.ok(v.failed.includes('no_scope_drift'))
+})
+
+test('evaluate: fixture evidence is skipped unless required', () => {
+  assert.ok(!evaluate(okInput(), CONFIG).failed.includes('fixture_evidence'))
+})
+
+test('evaluate: when required, fixture evidence must be red-on-base AND green-on-head', () => {
+  const c = { ...CONFIG, requireFixtureEvidence: true }
+  assert.ok(evaluate(okInput(), c).failed.includes('fixture_evidence'), 'absent evidence fails')
+
+  const partial = okInput({ evidence: { fixtureTest: 'test/fixtures/foo.test.ts', greenOnHead: true } })
+  assert.ok(evaluate(partial, c).failed.includes('fixture_evidence'), 'green-only is not proof')
+
+  const full = okInput({ evidence: { fixtureTest: 'test/fixtures/foo.test.ts', redOnBase: true, greenOnHead: true } })
+  assert.ok(!evaluate(full, c).failed.includes('fixture_evidence'))
+})
+
+test('evaluate: a wholly empty input fails EVERY substantive condition', () => {
+  const v = evaluate({}, CONFIG)
+  assert.equal(v.pass, false)
+  for (const id of ['author_allowlisted', 'required_labels', 'single_closes', 'no_risk_paths', 'within_size_limits', 'no_scope_drift', 'ci_green']) {
+    assert.ok(v.failed.includes(id), `${id} must fail on empty input`)
+  }
+})
+
+test('evaluate: with no config at all, nothing merges', () => {
+  assert.equal(evaluate(okInput(), undefined).pass, false, 'absent config must not be permissive')
+})
+
+test('renderVerdict: emits one table row per condition and states the provenance', () => {
+  const md = renderVerdict(evaluate(okInput(), CONFIG, { configSource: 'main@deadbee' }))
+  assert.match(md, /Factory gate — ✅ merge/)
+  assert.match(md, /main@deadbee/)
+  for (const id of CONDITION_ORDER) assert.ok(md.includes(`\`${id}\``), `${id} appears in the audit comment`)
+})
+
+test('renderVerdict: escapes pipes so a hostile filename cannot break the table', () => {
+  const i = okInput(); i.pr.changedFiles = ['src/views/a|b.ts']
+  const md = renderVerdict(evaluate(i, CONFIG))
+  assert.ok(!/\| src\/views\/a\|b\.ts/.test(md), 'raw pipes must be escaped')
+})
+
+// ---- runner ----
+let failed = 0
+for (const [name, fn] of tests) {
+  try { await fn(); console.log('PASS', name) }
+  catch (e) { failed++; console.error('FAIL', name, '\n  ', e.message) }
+}
+console.log(failed ? `\n${failed}/${tests.length} FAILED` : `\nall ${tests.length} passed`)
+process.exit(failed ? 1 : 0)
