@@ -1,0 +1,31 @@
+{
+  "//": "TEMPLATE: copy to `.factory/gate.json` in the adopting repo and STRIP EVERY `//` KEY — the gate reports unknown keys as config warnings that then appear in the audit comment on every PR. Read from the BASE ref on every run, never from the PR — a PR must not be able to widen the rules it is judged by. Every key below is OPTIONAL; each omitted key falls back to the SAFE default in packages/factory-gate/src/config.mjs, so a truncated or malformed file produces a gate that refuses to merge rather than one that waves things through.",
+
+  "//allowlistAuthors": "Issue authors trusted to define work for the factory. EMPTY (the default) means NOBODY is trusted and every PR escalates — that is deliberate, not a bug.",
+  "allowlistAuthors": [],
+
+  "//requiredLabels": "The trust token. Matched case-insensitively across the PR's AND the issue's labels.",
+  "requiredLabels": ["fix-verified"],
+
+  "//blockingLabels": "Any of these on the PR or the issue blocks the merge outright.",
+  "blockingLabels": ["needs-you", "pipeline-paused", "impl-blocked", "awaiting-human", "wontfix", "duplicate"],
+
+  "//riskPathDenylist": "Paths the factory may never auto-merge. Mirror your CODEOWNERS: anything a code owner must approve is something the gate should refuse to land unattended. `.factory/**`, `.github/workflows/**`, `.github/CODEOWNERS` and `CODEOWNERS` are added AUTOMATICALLY and cannot be removed by this file — a PR must not be able to edit its own gate, its own CI, or its own reviewers.",
+  "riskPathDenylist": [],
+
+  "//size": "A change small enough that CI plus a glance is meaningful review. Missing size data FAILS.",
+  "maxChangedLines": 250,
+  "maxChangedFiles": 8,
+
+  "//requireScopeBlock": "Every changed file must match a glob in the issue's ```scope block. An issue with NO scope block yields no globs, and no globs means every file is drift — no declared scope is not permission, it is an unfinished spec. Pair this with an issue template that has a required scope field.",
+  "requireScopeBlock": true,
+
+  "//requireGreenCI": "Every required context must be present AND conclusive. UNKNOWN is never a pass.",
+  "requireGreenCI": true,
+
+  "//requireFixtureEvidence": "Condition 9, the mechanical-verification dial. Leave FALSE until this repo's reproduction harness has a track record — with no harness it fails every PR. Turning it on is what eventually makes a machine-minted `fix-verified` defensible.",
+  "requireFixtureEvidence": false,
+
+  "//gateFromRef": "The ref the gate config is read from. Keep this as your protected default branch.",
+  "gateFromRef": "main"
+}

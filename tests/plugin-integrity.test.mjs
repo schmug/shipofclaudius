@@ -96,6 +96,71 @@ test('each wrapper targets its own bundled workflow via scriptPath + has a descr
   }
 })
 
+// ---- the Action template ----
+// The adoption kit ships a GitHub Actions workflow that no simulator covers, because it is YAML
+// executed by GitHub rather than a Workflow script. These are string-shape assertions (Node
+// built-ins only, no YAML parser) over the properties that are load-bearing for SAFETY or that
+// have already broken once. Each one below corresponds to a real defect, not a style preference.
+
+const factoryYml = async () => read('.factory/templates/factory.yml')
+// Comments legitimately NAME the forbidden things in order to warn against them ("do NOT add
+// --admin"), so a check for a dangerous string must read the executable YAML only.
+const factoryCode = async () =>
+  (await factoryYml()).split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')
+
+test('factory.yml: the land job readies the draft BEFORE gating', async () => {
+  const y = await factoryYml()
+  const ready = y.indexOf('gh pr ready')
+  const build = y.indexOf('build-input.mjs')
+  assert.ok(ready > 0, 'a `gh pr ready` step exists')
+  assert.ok(build > 0 && ready < build,
+    'readying must precede the gate input: factory-issue-fix opens a DRAFT, a draft reports ' +
+    'mergeStateStatus=DRAFT, and gate condition 8 rejects DRAFT — so without this the factory ' +
+    'can never land anything it produced')
+  assert.ok(/--undo/.test(y), 'an escalated PR is converted back to a draft (the ladder still ends at a draft)')
+})
+
+test('factory.yml: the gate exit code is captured, not swallowed by the inherited `bash -e`', async () => {
+  const y = await factoryYml()
+  assert.ok(/\|\| code=\$\?/.test(y),
+    'GitHub runs run: blocks as `bash -e {0}` and `set -uo pipefail` does not clear it — without ' +
+    '`|| code=$?` the normal escalate path (exit 2) aborts the step before the code is captured')
+  assert.ok(/if: always\(\)/.test(y), 'the comment/escalate steps run under always(), or they are skipped on escalate')
+})
+
+test('factory.yml: pull_request_target never checks out or executes PR-authored code', async () => {
+  const y = await factoryCode()
+  assert.ok(/pull_request_target/.test(y), 'the workflow uses pull_request_target')
+  assert.ok(!/head\.sha|head\.ref/.test(y),
+    'the land job must never check out the PR head — pull_request_target runs with write access')
+  assert.ok(/ref: \$\{\{ github\.event\.pull_request\.base\.ref \}\}/.test(y), 'it checks out the BASE ref')
+  const land = y.slice(y.indexOf('  land:'))
+  assert.ok(!/npm ci|npm install|npm run build/.test(land),
+    'no install or build step in the land job — the gate is dependency-free on purpose')
+})
+
+test('factory.yml: the gate config is read from the base ref, never the PR', async () => {
+  const y = await factoryYml()
+  assert.ok(/\.factory\/gate\.json/.test(y), 'it passes the repo gate config')
+  assert.ok(/--config-source/.test(y), 'provenance is stamped into the verdict')
+})
+
+test('factory.yml: the merge is never forced', async () => {
+  const y = await factoryCode()
+  assert.ok(/gh pr merge/.test(y), 'it merges')
+  assert.ok(!/--admin/.test(y), 'never --admin (it would bypass the protections the gate mirrors)')
+  assert.ok(!/--delete-branch/.test(y), 'never --delete-branch')
+  assert.ok(!/force/.test(y.slice(y.indexOf('  land:'))), 'never force-pushes')
+})
+
+test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
+  const y = await factoryYml()
+  for (const field of ['issue.title', 'pull_request.title', 'pull_request.body', 'issue.body', 'head_commit.message']) {
+    assert.ok(!y.includes(`github.event.${field}`), `${field} is never interpolated (injection vector)`)
+  }
+  assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
