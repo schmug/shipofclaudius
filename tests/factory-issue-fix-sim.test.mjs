@@ -465,6 +465,12 @@ test('the fix is scoped to the diagnosed boundary and told to write the gate-req
   assert.ok(/EXACTLY ONE closing reference/i.test(p), 'ambiguity is called out as a gate failure')
   assert.ok(/```scope/.test(p), 'the PR body must carry a scope block (gate condition 7)')
   assert.ok(/scope drift/i.test(p), 'scope drift is named as the failure mode')
+  // Condition 7 reads extractScopeGlobs(input.issue.body) — the ISSUE's block, not the PR's.
+  // Telling the agent its own block satisfies the gate would be a lie it could act on.
+  assert.ok(/gate reads the authoritative scope block from the ISSUE body/i.test(p),
+    'the agent is told which body the gate actually reads')
+  assert.ok(/declares NO scope block.*BLOCKED/is.test(p),
+    'an issue with no scope block is a BLOCKED outcome, not a PR the gate will refuse')
 })
 
 test('the control-not-weakened guard is present in the fix prompt', async () => {
@@ -596,6 +602,67 @@ test('a verifier that disagrees with the diagnosis caps confidence below the thr
   const { result } = await runScript({ args: baseArgs(), verify: () => verified({ disagrees_with_diagnosis: true }) })
   assert.ok(result.confidence < result.confidenceThreshold, 'a contested diagnosis cannot clear the bar')
   assert.equal(result.autonomy, 'gated')
+})
+
+// ---------- restartability: startAt must SKIP earlier phases, not end the run ----------
+
+test('startAt="verify" runs Verify and Fix — it does not dead-end at Reproduce', async () => {
+  // Regression: the stop checks used !runs(p), which is false BOTH for phases a previous run
+  // already did (startAt) and for phases beyond this run (stopAfter). So startAt:'verify' halted
+  // at Reproduce, reported phase_complete, and regressed the labels to an earlier state.
+  const { result, calls } = await runScript({
+    args: baseArgs({ startAt: 'verify', prior: { reproduce: reproduced(), diagnose: diagnosed() } }),
+  })
+  assert.equal(byPrefix(calls, 'reproduce').length, 0, 'the completed reproduce phase is not re-run')
+  assert.equal(byPrefix(calls, 'diagnose').length, 0, 'nor the completed diagnose phase')
+  assert.equal(byPrefix(calls, 'verify').length, 1, 'verify RUNS')
+  assert.equal(byPrefix(calls, 'fix').length, 1, 'and so does fix')
+  assert.equal(result.phase_reached, 'fix')
+  assert.equal(result.outcome, 'fix_proposed')
+  assert.ok(result.transition.labels.add.includes('fix-proposed'), 'labels advance, never regress')
+})
+
+test('startAt="fix" runs only the write phase', async () => {
+  const { result, calls } = await runScript({
+    args: baseArgs({ startAt: 'fix', prior: { reproduce: reproduced(), diagnose: diagnosed(), verify: verified() } }),
+  })
+  for (const l of ['reproduce', 'diagnose', 'verify']) {
+    assert.equal(byPrefix(calls, l).length, 0, `${l} is not re-run`)
+  }
+  assert.equal(byPrefix(calls, 'fix').length, 1, 'only the fix phase runs')
+  assert.equal(result.outcome, 'fix_proposed')
+})
+
+test('startAt + stopAfter together advance exactly one phase', async () => {
+  const { result, calls } = await runScript({
+    args: baseArgs({ startAt: 'diagnose', stopAfter: 'diagnose', prior: { reproduce: reproduced() } }),
+  })
+  assert.equal(byPrefix(calls, 'diagnose').length, 1, 'the one requested phase runs')
+  assert.equal(byPrefix(calls, 'verify').length, 0, 'and nothing after it')
+  assert.equal(byPrefix(calls, 'fix').length, 0, 'no write agent')
+  assert.equal(result.phase_reached, 'diagnose')
+  assert.equal(result.outcome, 'phase_complete')
+})
+
+test('an unrecognized phase name is rejected — it must never fail OPEN into the write agent', async () => {
+  await assert.rejects(() => runScript({ args: baseArgs({ stopAfter: 'diagnos' }) }), /must be one of/i,
+    'a typo in stopAfter must throw, not silently widen the run through Fix')
+  await assert.rejects(() => runScript({ args: baseArgs({ startAt: 'reproduse' }) }), /must be one of/i,
+    'same for startAt')
+  const { result } = await runScript({ args: baseArgs({ stopAfter: '' }) })
+  assert.equal(result.outcome, 'fix_proposed', 'an absent/blank value still means "use the default"')
+})
+
+test('a blank nonce falls back to a content-derived fence, never a guessable constant', async () => {
+  const { calls } = await runScript({ args: baseArgs(), relay: { raw: ISSUE_RAW, nonce: '' } })
+  const p = byPrefix(calls, 'reproduce')[0].prompt
+  assert.ok(!/NO_NONCE/.test(p), 'no fixed fallback delimiter an attacker could pre-forge')
+  const m = p.match(/<<<UNTRUSTED_ISSUE_([0-9a-z]+)>>>/)
+  assert.ok(m, 'a fence is still emitted')
+  const open = p.indexOf(m[0])
+  const close = p.indexOf(`<<<END_UNTRUSTED_ISSUE_${m[1]}>>>`)
+  const inj = p.indexOf(ISSUE_INJECTION)
+  assert.ok(inj > open && inj < close, 'the hostile text is still fenced as data')
 })
 
 // ---- runner ----

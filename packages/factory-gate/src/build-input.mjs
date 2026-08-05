@@ -78,8 +78,11 @@ export function buildGateInput({ pr, issue, requiredContexts, evidence } = {}) {
   const p = (pr && typeof pr === 'object') ? pr : {}
   const i = (issue && typeof issue === 'object') ? issue : null
 
-  const additions = Number(p.additions)
-  const deletions = Number(p.deletions)
+  // `Number(null) === 0` and 0 IS finite — so a null additions/deletions would become a real 0 and
+  // PASS within_size_limits, when the truth is "the size is unavailable". Demand an actual number.
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v : null
+  const additions = num(p.additions)
+  const deletions = num(p.deletions)
 
   return {
     issue: {
@@ -93,8 +96,8 @@ export function buildGateInput({ pr, issue, requiredContexts, evidence } = {}) {
       body: typeof p.body === 'string' ? p.body : '',
       labels: labelNames(p.labels),
       changedFiles: filePaths(p.files),
-      additions: Number.isFinite(additions) ? additions : null,
-      deletions: Number.isFinite(deletions) ? deletions : null,
+      additions,
+      deletions,
       mergeStateStatus: p.mergeStateStatus || null,
       checks: normalizeChecks(p.statusCheckRollup),
     },

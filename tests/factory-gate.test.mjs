@@ -462,6 +462,22 @@ test('requiredContextsPath: a branch name with a slash is encoded, not injected 
   assert.ok(!p.endsWith('/v2'), 'the slash must not create an extra path segment')
 })
 
+test('build-input: NULL size data fails closed — Number(null) is 0, which must not read as "0 lines"', () => {
+  // `Number(null) === 0` and 0 is finite, so a naive Number.isFinite() guard turns "size
+  // unavailable" into a real, passing 0-line change.
+  for (const bad of [null, undefined, '', 'abc', NaN]) {
+    const input = buildGateInput({ pr: ghPr({ additions: bad, deletions: bad }), issue: ghIssue(), requiredContexts: ['check'] })
+    assert.equal(input.pr.additions, null, `additions=${JSON.stringify(bad)} must become null`)
+    assert.ok(evaluate(input, CONFIG).failed.includes('within_size_limits'), `additions=${JSON.stringify(bad)} must FAIL the size condition`)
+  }
+})
+
+test('build-input: a genuine zero-line change is still reported as 0, not conflated with null', () => {
+  const input = buildGateInput({ pr: ghPr({ additions: 0, deletions: 0 }), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(input.pr.additions, 0, 'a real 0 survives')
+  assert.equal(evaluate(input, CONFIG).pass, true, 'and it is within limits')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

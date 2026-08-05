@@ -91,21 +91,35 @@ const T = (typeof A.confidenceThreshold === 'number' && A.confidenceThreshold >=
 
 // Restartability: one Action run advances one phase and resumes from the committed report.md.
 const PHASE_ORDER = ['reproduce', 'diagnose', 'verify', 'fix']
-const normPhase = (v, fallback) => {
-  const s = String(v == null ? '' : v).trim().toLowerCase()
-  return PHASE_ORDER.includes(s) ? s : fallback
+// An UNRECOGNIZED phase name must never silently widen the run: `stopAfter: 'diagnos'` (a typo)
+// coercing to the default would carry the run all the way through the WRITE agent. Absent means
+// "use the default"; present-but-invalid is an error.
+const normPhase = (v, fallback, key) => {
+  if (v === undefined || v === null || String(v).trim() === '') return fallback
+  const s = String(v).trim().toLowerCase()
+  if (!PHASE_ORDER.includes(s)) {
+    throw new Error(`factory-issue-fix: args.${key} must be one of ${PHASE_ORDER.join(' | ')} — got "${v}". Refusing to guess, because guessing wide would run the WRITE phase.`)
+  }
+  return s
 }
-const START_AT = normPhase(A.startAt, 'reproduce')
-const STOP_AFTER = normPhase(A.stopAfter, 'fix')
+const START_AT = normPhase(A.startAt, 'reproduce', 'startAt')
+const STOP_AFTER = normPhase(A.stopAfter, 'fix', 'stopAfter')
 const startIdx = PHASE_ORDER.indexOf(START_AT)
 const stopIdx = PHASE_ORDER.indexOf(STOP_AFTER)
 if (stopIdx < startIdx) {
   throw new Error(`factory-issue-fix: args.stopAfter ("${STOP_AFTER}") is earlier than args.startAt ("${START_AT}") — the run would advance nothing. Phase order: ${PHASE_ORDER.join(' -> ')}.`)
 }
+// Two DIFFERENT questions, and conflating them is a bug:
+//   runs(p)    — should this run SPEND AN AGENT on phase p? False both for phases a previous run
+//                already completed (startAt) and for phases beyond this run's window (stopAfter).
+//   stopped(p) — is phase p beyond stopAfter, so the run ENDS here? Only stopAfter can end a run.
+// Using runs() for the stop checks made `startAt: 'verify'` halt at Reproduce and report
+// phase_complete, regressing the issue's labels to an earlier state.
 const runs = (p) => {
   const i = PHASE_ORDER.indexOf(p)
   return i >= startIdx && i <= stopIdx
 }
+const stopped = (p) => PHASE_ORDER.indexOf(p) > stopIdx
 
 // Deterministic, dependency-free hash (no Date.now()/Math.random() — both throw in Workflow scripts).
 function fnv1aHex(str) {
@@ -118,9 +132,13 @@ function fnv1aHex(str) {
 }
 
 // ── Untrusted-text fencing ──
+// A blank nonce from the relay must NOT collapse the delimiter to a constant an attacker who has
+// read this source could pre-forge in their issue body. Fall back to a CONTENT-derived token:
+// weaker than a fresh random one (the content is attacker-visible), but not a fixed string.
 function fence(nonce, raw) {
-  const n = (typeof nonce === 'string' && nonce.trim()) ? nonce.trim() : 'NO_NONCE'
-  return `<<<UNTRUSTED_ISSUE_${n}>>>\n${raw == null ? '' : String(raw)}\n<<<END_UNTRUSTED_ISSUE_${n}>>>`
+  const body = raw == null ? '' : String(raw)
+  const n = (typeof nonce === 'string' && nonce.trim()) ? nonce.trim() : `d${fnv1aHex(body)}`
+  return `<<<UNTRUSTED_ISSUE_${n}>>>\n${body}\n<<<END_UNTRUSTED_ISSUE_${n}>>>`
 }
 
 const INJECTION_GUARD =
@@ -421,8 +439,11 @@ const FIX_PROMPT = (num, fenced, repro, diag, verification, branch) =>
   `   The PR body MUST contain, because the deterministic merge gate parses it:\n` +
   `     • the line \`Closes #${num}\` — EXACTLY ONE closing reference, outside any code fence or blockquote ` +
   `(the gate fails closed on zero or ambiguous references);\n` +
-  `     • a fenced \`\`\`scope block listing one glob per line covering EVERY file you changed — any changed ` +
-  `file outside it is scope drift and the gate will refuse the PR;\n` +
+  `     • a fenced \`\`\`scope block listing one glob per line covering EVERY file you changed. NOTE: the ` +
+  `gate reads the authoritative scope block from the ISSUE body, not from yours — so your changed files ` +
+  `must fall inside the ISSUE's declared scope. Restating it here is for the human reviewer. If the issue ` +
+  `declares NO scope block, or your change must go outside it, STOP and return status=BLOCKED: the gate ` +
+  `treats undeclared scope as scope drift and would refuse the PR anyway;\n` +
   `     • the reproduction, the red->green evidence, the root cause, and the gate output.\n` +
   `   Set is_draft=true and weakened_control=false. Return \`scope_block\` with the same globs you wrote.\n` +
   `   STOP — do not check CI, do not mark ready, do not merge.\n\n` +
@@ -605,7 +626,7 @@ if (!repro || repro.verdict !== 'REPRODUCED') {
 const FIXTURE = repro.fixture || ''
 const TEST = repro.test || ''
 
-if (!runs('diagnose')) {
+if (stopped('diagnose')) {
   log(`Stopped after Reproduce (stopAfter="${STOP_AFTER}"). Reproduction confirmed; a later run resumes at Diagnose.`)
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'reproduce', report: renderReport(ISSUE, parts),
@@ -636,7 +657,7 @@ if (!diag || !diag.root_cause) {
   })
 }
 
-if (!runs('verify')) {
+if (stopped('verify')) {
   log(`Stopped after Diagnose (stopAfter="${STOP_AFTER}").`)
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'diagnose', report: renderReport(ISSUE, parts),
@@ -687,7 +708,7 @@ if (vverdict !== 'REAL_BUG') {
   })
 }
 
-if (!runs('fix')) {
+if (stopped('fix')) {
   log(`Stopped after Verify (stopAfter="${STOP_AFTER}"). Confirmed a real bug; a later run resumes at Fix.`)
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'verify', report: renderReport(ISSUE, parts),
