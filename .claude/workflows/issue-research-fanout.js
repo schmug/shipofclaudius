@@ -140,6 +140,146 @@ async function runWaves(items, fn, batchSize = 8) {
   return out
 }
 
+// ── File-overlap wave plan (PURE, MODEL-FREE). ───────────────────────────────────────
+// NO MODEL RUNS HERE: no agent(), no prompt, no tokens. The partition is arithmetic over the
+// `files[]` + `depends_on[]` the assessments already carry, so an injected instruction inside
+// an issue body cannot move a set intersection — the same reason packages/factory-gate is
+// deterministic script code instead of a judgement handed to a model.
+//
+// FAIL-CLOSED: an ABSENT or EMPTY files[] is an UNKNOWN footprint. Unknown is never a proof of
+// disjointness, so such an item gets its OWN SERIAL wave (and mode 'sequential') rather than
+// being silently parallelized. An unorderable dependency (a cycle) is treated the same way.
+//
+// NOTE: unrelated to runWaves() above — that batches AGENT CONCURRENCY; this partitions FILE
+// FOOTPRINTS. This block is copied VERBATIM into issue-triage-fanout.js and
+// issue-research-fanout.js (Workflow scripts cannot `import`; inlining shared helpers is this
+// repo's convention — see the "Spine helpers (inlined…)" comment in stacked-impl-lanes.js).
+// Diff the two files to check for drift. Both copies carry all five entry points even though
+// each fan-out calls only some: triage returns waves[]/overlaps[], research derives each green
+// lane's mode via planMode().
+
+// Normalize a raw files[] into a deduped, sorted array of comparable paths. Non-strings and
+// blanks are dropped; a leading "./" is stripped so "./a.js" and "a.js" collide as they should.
+function normFiles(files) {
+  if (!Array.isArray(files)) return []
+  const out = new Set()
+  for (const f of files) {
+    if (typeof f !== 'string') continue
+    const t = f.trim().replace(/^(\.\/)+/, '')
+    if (t) out.add(t)
+  }
+  return [...out].sort()
+}
+
+// Normalize a result set into plan items {number, files[], deps[], unknown}. An item without an
+// integer `number` is dropped; a repeated number keeps its first occurrence; a self-referential
+// depends_on is dropped (it would otherwise be unsatisfiable).
+function normPlanItems(items) {
+  const seen = new Set()
+  const out = []
+  for (const r of (Array.isArray(items) ? items : [])) {
+    if (!r || !Number.isInteger(r.number) || seen.has(r.number)) continue
+    seen.add(r.number)
+    const files = normFiles(r.files)
+    const deps = (Array.isArray(r.depends_on) ? r.depends_on : []).filter((d) => Number.isInteger(d) && d !== r.number)
+    out.push({ number: r.number, files, deps, unknown: files.length === 0 })
+  }
+  return out
+}
+
+// The files two normalized footprints share (sorted; empty === provably disjoint).
+function sharedFiles(a, b) {
+  const other = new Set(b)
+  return a.filter((f) => other.has(f))
+}
+
+// overlaps: every unordered pair whose footprints intersect, naming the shared files. An
+// unknown-footprint item yields no pair (there is nothing to name) — it is handled by the
+// fail-closed serial rule in planWaves/planMode, never by silence here.
+function computeOverlaps(items) {
+  const norm = normPlanItems(items)
+  const out = []
+  for (let i = 0; i < norm.length; i++) {
+    for (let j = i + 1; j < norm.length; j++) {
+      const files = sharedFiles(norm[i].files, norm[j].files)
+      if (!files.length) continue
+      out.push({ a: Math.min(norm[i].number, norm[j].number), b: Math.max(norm[i].number, norm[j].number), files })
+    }
+  }
+  return out.sort((x, y) => (x.a - y.a) || (x.b - y.b))
+}
+
+// planWaves: a layered partition. Every item inside ONE wave is PROVABLY file-disjoint from
+// every other item in that wave, and a dependent never shares a wave with — or precedes —
+// anything it depends on. Returns [{ order, parallel: [numbers] }] with a 1-based order.
+function planWaves(items) {
+  const norm = normPlanItems(items)
+  const byNumber = new Map(norm.map((it) => [it.number, it]))
+  // Dependency depth by bounded relaxation (no recursion; a cycle simply stops converging).
+  const depth = new Map(norm.map((it) => [it.number, 0]))
+  for (let pass = 0; pass < norm.length; pass++) {
+    let changed = false
+    for (const it of norm) {
+      let d = 0
+      for (const dep of it.deps) {
+        if (!byNumber.has(dep)) continue
+        d = Math.max(d, depth.get(dep) + 1)
+      }
+      if (d > depth.get(it.number)) { depth.set(it.number, d); changed = true }
+    }
+    if (!changed) break
+  }
+  // Deterministic placement: shallowest first, then by issue number — so a dependency is always
+  // placed before its dependent, and the same input always yields the same plan.
+  const ordered = [...norm].sort((a, b) => (depth.get(a.number) - depth.get(b.number)) || (a.number - b.number))
+  const waves = []           // [{ items: [], serial: boolean }]
+  const placedAt = new Map() // issue number -> wave index
+  for (const it of ordered) {
+    let earliest = 0
+    let unresolved = false
+    for (const dep of it.deps) {
+      if (!byNumber.has(dep)) continue                       // out-of-set dep: not ours to order
+      if (!placedAt.has(dep)) { unresolved = true; continue } // cycle: no order can be proven
+      earliest = Math.max(earliest, placedAt.get(dep) + 1)
+    }
+    let idx = -1
+    if (!it.unknown && !unresolved) {
+      for (let w = earliest; w < waves.length; w++) {
+        if (waves[w].serial) continue
+        if (waves[w].items.some((o) => sharedFiles(o.files, it.files).length > 0)) continue
+        idx = w
+        break
+      }
+    }
+    if (idx < 0) {
+      // Appending is always >= earliest: every already-placed dep sits at index <= waves.length-1.
+      waves.push({ items: [], serial: it.unknown || unresolved })
+      idx = waves.length - 1
+    }
+    waves[idx].items.push(it)
+    placedAt.set(it.number, idx)
+  }
+  return waves
+    .filter((w) => w.items.length > 0)
+    .map((w, i) => ({ order: i + 1, parallel: w.items.map((it) => it.number).sort((a, b) => a - b) }))
+}
+
+// planMode: 'parallel' iff this item's footprint is KNOWN and provably disjoint from every OTHER
+// item in the set, with no dependency edge tying it to one of them. Everything else is
+// 'sequential' — the safe direction: a wrong 'sequential' costs wall-clock, a wrong 'parallel'
+// races two writers on one file.
+function planMode(number, items) {
+  const norm = normPlanItems(items)
+  const self = norm.find((it) => it.number === number)
+  if (!self || self.unknown) return 'sequential'
+  for (const other of norm) {
+    if (other.number === self.number) continue
+    if (sharedFiles(self.files, other.files).length > 0) return 'sequential'
+    if (self.deps.includes(other.number) || other.deps.includes(self.number)) return 'sequential'
+  }
+  return 'parallel'
+}
+
 // ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
 // Read-only analysis is expensive (relay→research chain per issue, some web-enabled).
 // Re-running should not re-pay for issues that have not changed since last time. We
@@ -463,9 +603,9 @@ if (missing.length) {
 const counts = {}
 for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
 
-// GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief})
-// so triage -> research -> impl chains cleanly through the orchestrator (with a review
-// gate at each hop). brief = the implementable spec produced by the research.
+// GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief,
+// files,mode}) so triage -> research -> impl chains cleanly through the orchestrator (with a
+// review gate at each hop). brief = the implementable spec produced by the research.
 const green = clean.filter((r) => r.verdict === 'GREEN')
 const green_lanes = green.map((r) => ({
   key: r.group || `issue-${r.number}`,
@@ -478,9 +618,21 @@ const green_lanes = green.map((r) => ({
   brief: r.spec || r.chosen_approach || r.rationale || '',
   // Sequencing hint for the orchestrator only (kept off `issues`): order lanes so deps land first.
   depends_on: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((n) => n !== r.number),
+  // Footprint + execution mode, computed IN SCRIPT CODE (no agent, no prompt — see the
+  // file-overlap helpers above). `files` used to be DROPPED here, so stacked-impl-lanes never
+  // saw the footprint the research had already established and args.mode stayed a human guess.
+  // `files` is the normalized researched footprint — exactly the set `mode` was computed from —
+  // and `mode` is 'parallel' only when this lane is PROVABLY disjoint from every OTHER green
+  // lane; an unknown (absent/empty) footprint, a shared file, or a dependency edge between two
+  // green lanes all fail closed to 'sequential'.
+  files: normFiles(r.files),
+  mode: planMode(r.number, green),
 }))
+const parallelLanes = green_lanes.filter((l) => l.mode === 'parallel').length
 
 log(`Researched ${clean.length}/${NUMBERS.length} (${reused.length} reused from checkpoint): ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
+log(`lane plan: ${parallelLanes} parallel / ${green_lanes.length - parallelLanes} sequential — ` +
+  `file-overlap computed in script code, no agent; a lane with no files[] is sequential (fail-closed).`)
 // No-silent-caps coverage line accounting for every requested issue (incl. checkpoint reuse).
 log(`coverage: requested ${NUMBERS.length} / researched ${clean.length} / reused ${reused.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
 

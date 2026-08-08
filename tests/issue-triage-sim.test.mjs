@@ -451,6 +451,109 @@ test('the read-checkpoint preserves the existing return contract (additive: reus
   assert.equal(typeof result.checkpointWritten, 'boolean', 'checkpointWritten added')
 })
 
+// ===================== FILE-OVERLAP WAVE PLAN (pure, model-free) =====================
+// waves[] / overlaps[] are computed in SCRIPT code from the files[] + depends_on[] the
+// assessments already carry — no agent(), no prompt, no tokens. The agent-count assertion
+// below is the point: an injected instruction inside an issue body cannot move a set
+// intersection (same reason packages/factory-gate is model-free).
+//
+// FAIL-CLOSED: an absent/empty files[] is an UNKNOWN footprint, never a proof of
+// disjointness — it gets its OWN serial wave rather than being silently parallelized.
+
+// #1 and #2 both touch src/hub.js; #3 is provably disjoint from both.
+const HUB_FILES = { 1: ['src/hub.js', 'src/a.js'], 2: ['src/hub.js'], 3: ['docs/guide.md'] }
+const hubTriage = (n) => ({ ...defaultTriage(n), files: HUB_FILES[n] || [] })
+const waveOf = (result, n) => {
+  assert.ok(Array.isArray(result.waves), 'waves[] is returned')
+  return result.waves.find((w) => Array.isArray(w.parallel) && w.parallel.includes(n))
+}
+
+test('two issues sharing a file never share a wave, while a disjoint third parallelizes', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  assert.ok(Array.isArray(result.waves) && result.waves.length > 0, 'a wave plan is returned')
+  for (const w of result.waves) {
+    assert.ok(!(w.parallel.includes(1) && w.parallel.includes(2)),
+      `#1 and #2 both touch src/hub.js — they must never be in one parallel wave (wave ${w.order}: ${w.parallel})`)
+  }
+  const w1 = waveOf(result, 1)
+  const w2 = waveOf(result, 2)
+  const w3 = waveOf(result, 3)
+  assert.ok(w1 && w2 && w3, 'every assessed issue is placed in exactly one wave')
+  assert.notEqual(w1.order, w2.order, 'the colliding pair is split across waves')
+  assert.equal(w3.order, w1.order, 'the file-disjoint issue DOES parallelize with #1')
+  assert.ok(w1.parallel.includes(1) && w1.parallel.includes(3), 'wave 1 runs #1 and #3 together')
+  // every issue appears exactly once across the whole plan (a partition, not a copy)
+  const flat = result.waves.flatMap((w) => w.parallel)
+  assert.deepEqual(flat.slice().sort(), [1, 2, 3], 'the waves partition the assessed set exactly once each')
+  assert.deepEqual(result.waves.map((w) => w.order), result.waves.map((_, i) => i + 1), 'order is 1-based and contiguous')
+})
+
+test('overlaps[] names every colliding pair and the exact shared files', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  assert.ok(Array.isArray(result.overlaps), 'overlaps[] is returned')
+  assert.equal(result.overlaps.length, 1, 'exactly one colliding pair among the three issues')
+  const o = result.overlaps[0]
+  assert.equal(o.a, 1, 'pair is reported low-number first')
+  assert.equal(o.b, 2)
+  assert.deepEqual(o.files, ['src/hub.js'], 'the shared file is named (not just a boolean collision flag)')
+})
+
+test('the wave plan spawns ZERO agents — agent count is IDENTICAL to the baseline run', async () => {
+  const numbers = [1, 2, 3]
+  // Baseline: the pre-existing fixture (no files[] at all). Planned: colliding footprints.
+  const base = await runScript({ args: { numbers } })
+  const planned = await runScript({ args: { numbers }, triage: hubTriage })
+  assert.equal(planned.calls.agents.length, base.calls.agents.length,
+    'computing waves[]/overlaps[] must not add a single agent call vs the baseline run')
+  // ckpt-load + ckpt-meta + 3x(fetch + triage) + synthesize + ckpt-write = 10
+  assert.equal(base.calls.agents.length, 10, 'the baseline agent budget is 10 for 3 issues')
+  assert.equal(planned.calls.agents.length, 10, 'the wave plan does not move the agent budget')
+  const labels = planned.calls.agents.map((a) => a.opts.label || '')
+  assert.ok(!labels.some((l) => /wave|overlap|partition|plan/i.test(l)),
+    `no wave-planning agent may exist — labels were: ${labels.join(', ')}`)
+  assert.ok(!planned.calls.agents.some((a) => /overlaps\[|waves\[|wave plan/i.test(a.prompt)),
+    'no prompt asks a model to compute the wave plan')
+})
+
+test('an issue with no files[] is serialized into its OWN wave (fail-closed), never parallelized', async () => {
+  // #1 and #2 have disjoint footprints; #3 has an EMPTY files[] and #4 has none at all.
+  const files = { 1: ['a.js'], 2: ['b.js'], 3: [] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 3, 4] },
+    triage: (n) => (n === 4 ? defaultTriage(n) : { ...defaultTriage(n), files: files[n] }),
+  })
+  for (const n of [3, 4]) {
+    const w = waveOf(result, n)
+    assert.ok(w, `#${n} is placed`)
+    assert.deepEqual(w.parallel, [n], `#${n} has an UNKNOWN footprint -> its own serial wave, alone`)
+  }
+  const w1 = waveOf(result, 1)
+  assert.ok(w1.parallel.includes(2), 'the two KNOWN, disjoint footprints still parallelize')
+})
+
+test('depends_on is respected: a dependent lands in a strictly later wave than its dependency', async () => {
+  // #5 depends on #4; their files are disjoint, so ONLY the dependency edge can separate them.
+  const { result } = await runScript({
+    args: { numbers: [4, 5] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: n === 5 ? [4] : [] }),
+  })
+  const w4 = waveOf(result, 4)
+  const w5 = waveOf(result, 5)
+  assert.ok(w4 && w5, 'both issues placed')
+  assert.notEqual(w4.order, w5.order, 'a dependent must not share a wave with what it depends on')
+  assert.ok(w5.order > w4.order, 'the dependent must not precede its dependency')
+})
+
+test('the wave plan is additive: every pre-existing return key is still present', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  for (const k of ['triaged', 'counts', 'total', 'missing', 'roadmap', 'reused', 'checkpointWritten', 'spineVersion']) {
+    assert.ok(k in result, `pre-existing key '${k}' preserved`)
+  }
+  assert.ok(Array.isArray(result.waves), 'waves[] added')
+  assert.ok(Array.isArray(result.overlaps), 'overlaps[] added')
+  assert.equal(result.triaged.length, 3, 'the triaged payload is unchanged')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

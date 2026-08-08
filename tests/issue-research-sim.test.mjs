@@ -397,6 +397,100 @@ test('the read-checkpoint preserves the existing return contract (additive: reus
   assert.equal(typeof result.checkpointWritten, 'boolean', 'checkpointWritten added')
 })
 
+// ============ GREEN-LANE FOOTPRINT + mode (pure, model-free file-overlap math) ============
+// green_lanes is shaped as stacked-impl-lanes' args.lanes. It must carry the researched
+// footprint (files[]) forward — the executor cannot see a collision it was never told about —
+// plus a `mode` computed IN SCRIPT CODE from overlap against the OTHER GREEN lanes, so
+// args.mode stops being a human guess. FAIL-CLOSED: unknown footprint -> 'sequential'.
+
+const laneFor = (result, n) => {
+  assert.ok(Array.isArray(result.green_lanes), 'green_lanes[] is returned')
+  return result.green_lanes.find((l) => Array.isArray(l.issues) && l.issues.includes(n))
+}
+
+test('green_lanes entries carry files[] and a mode in {parallel, sequential}', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), files: [`src/f${n}.js`] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'a lane per GREEN issue')
+  for (const lane of result.green_lanes) {
+    assert.ok(Array.isArray(lane.files), `lane ${lane.key} retains files[] (the executor needs the footprint)`)
+    assert.ok(lane.files.length > 0, `lane ${lane.key} carries the researched files, not an empty stub`)
+    assert.ok(['parallel', 'sequential'].includes(lane.mode), `lane ${lane.key} carries a computed mode, got ${lane.mode}`)
+  }
+  assert.deepEqual(laneFor(result, 12).files, ['src/f12.js'], 'the lane footprint is the researched files[]')
+})
+
+test('two GREEN issues both touching README.md are BOTH emitted mode:sequential', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), files: n === 12 ? ['README.md', 'src/a.js'] : ['README.md'] }),
+  })
+  assert.equal(laneFor(result, 12).mode, 'sequential', '#12 collides with #13 on README.md')
+  assert.equal(laneFor(result, 13).mode, 'sequential', '#13 collides with #12 on README.md')
+})
+
+test('file-disjoint GREEN issues are emitted mode:parallel (the mode is computed, not hardcoded)', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), files: n === 12 ? ['src/a.js'] : ['docs/b.md'] }),
+  })
+  assert.equal(laneFor(result, 12).mode, 'parallel', 'provably disjoint footprint -> parallel')
+  assert.equal(laneFor(result, 13).mode, 'parallel', 'provably disjoint footprint -> parallel')
+})
+
+test('a GREEN issue with no files[] is mode:sequential (fail-closed on an unknown footprint)', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13, 14] },
+    research: (n) => ({
+      ...greenResearch(n),
+      files: n === 12 ? [] : (n === 13 ? ['docs/b.md'] : ['src/c.js']),
+    }),
+  })
+  assert.deepEqual(laneFor(result, 12).files, [], 'the empty footprint is reported honestly, not invented')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'an unknown footprint is never proof of disjointness')
+  assert.equal(laneFor(result, 13).mode, 'parallel', 'the known-disjoint lanes are unaffected')
+  // ...and files[] omitted entirely behaves the same way.
+  const { result: r2 } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => { const g = greenResearch(n); delete g.files; return g },
+  })
+  assert.deepEqual(laneFor(r2, 12).files, [], 'an absent files[] normalizes to an empty footprint')
+  assert.equal(laneFor(r2, 12).mode, 'sequential', 'an ABSENT files[] is fail-closed too')
+})
+
+test('an in-set depends_on forces mode:sequential even when the footprints are disjoint', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), files: [`src/f${n}.js`], depends_on: n === 13 ? [12] : [] }),
+  })
+  assert.equal(laneFor(result, 13).mode, 'sequential', 'a lane that must land after another cannot run in parallel')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'and neither can the lane it waits on')
+})
+
+test('green_lanes keep every pre-existing key — additive only, and issues[] still closes ONLY this issue', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), files: ['src/a.js'], depends_on: [99, n] }),
+  })
+  const lane = laneFor(result, 12)
+  for (const k of ['key', 'branch', 'issues', 'invariant', 'brief', 'depends_on']) {
+    assert.ok(k in lane, `pre-existing lane key '${k}' preserved`)
+  }
+  assert.equal(lane.key, 'feature')
+  assert.equal(lane.branch, 'feat/issue-12')
+  assert.equal(lane.invariant, false)
+  assert.equal(lane.brief, 'do X')
+  // The `issues` contract is load-bearing: stacked-impl-lanes emits `Closes #n` for each entry,
+  // so depends_on must NEVER leak into it (a dependency would be falsely closed).
+  assert.deepEqual(lane.issues, [12], 'issues[] still closes ONLY the researched issue')
+  assert.deepEqual(lane.depends_on, [99], 'depends_on stays a sequencing hint (self-reference filtered)')
+  for (const k of ['researched', 'counts', 'green_lanes', 'missing', 'total', 'reused', 'checkpointWritten', 'spineVersion']) {
+    assert.ok(k in result, `pre-existing return key '${k}' preserved`)
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
