@@ -123,16 +123,28 @@ const DEFAULT_DIMENSIONS = [
   { key: 'types-api', title: 'Types & API design', focus: 'Type-safety and interface-design issues in the change: loose/any types, unsafe casts, nullable types not handled, leaky or inconsistent public API shapes, breaking changes to callers, poor naming/contracts, and signatures that invite misuse. Is the new surface area sound and hard to misuse?' },
   { key: 'perf', title: 'Performance', focus: 'Performance regressions in the diff: accidental O(n^2) or work-in-a-loop, N+1 queries, unbounded allocations/collections, blocking I/O on hot paths, missing pagination/limits, and redundant recomputation. Does the change add avoidable cost at scale?' },
 ]
+// Two corrections over the naive slugify (mirrored in stacked-impl-lanes' DEFECT_CLASSES
+// normalizer, which copied this one verbatim — fix both here, fix both there):
+//   1. UNIQUENESS. findings[].dimension must be attributable to the dimension that
+//      produced it, so two caller dimensions colliding onto one key would make that
+//      impossible. Collisions are resolved deterministically by position with a
+//      `-2`, `-3`, … suffix rather than silently shadowing.
+//   2. TRIM AFTER SLICE. Capping at 24 chars BEFORE trimming means the cap can land on
+//      a separator and emit a trailing dash; trimming last removes it.
+const slugifyDimensionKey = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24).replace(/^-+|-+$/g, '')
 const DIMENSIONS = (() => {
   const raw = Array.isArray(A.dimensions) && A.dimensions.length ? A.dimensions : DEFAULT_DIMENSIONS
+  const seen = new Set()
+  const uniq = (base, i) => {
+    let key = base || `dim-${i}`
+    for (let n = 2; seen.has(key); n++) key = `${base || `dim-${i}`}-${n}`
+    seen.add(key)
+    return key
+  }
   return raw.map((d, i) => {
-    if (typeof d === 'string') {
-      const key = d.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || `dim-${i}`
-      return { key, title: d, focus: d }
-    }
+    if (typeof d === 'string') return { key: uniq(slugifyDimensionKey(d), i), title: d, focus: d }
     const title = d.title || d.key || `dimension ${i}`
-    const key = (d.key || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || `dim-${i}`
-    return { key, title, focus: d.focus || title }
+    return { key: uniq(slugifyDimensionKey(d.key || title), i), title, focus: d.focus || title }
   })
 })()
 

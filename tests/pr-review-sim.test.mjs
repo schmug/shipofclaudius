@@ -167,6 +167,51 @@ test('missing PR number throws (the PR is required)', async () => {
   await assert.rejects(runScript({ args: {} }), /no PR to review/)
 })
 
+// ============================ DIMENSION KEY NORMALIZATION ============================
+// findings[].dimension must be attributable to the dimension that produced it (see the
+// dedup section below and the review prompt's "Through your lens (${dim.key}) ONLY").
+// The naive slugify had no collision check and trimmed BEFORE slicing, so the cap could
+// emit a trailing dash. Mirrors stacked-impl-lanes' DEFECT_CLASSES normalizer (#68),
+// which copied this normalizer verbatim and fixed both flaws there.
+
+const reviewKeys = (calls) => byPrefix(calls, 'review:#').map((a) => a.opts.label.split(':')[2])
+
+test('two dimensions that slugify identically get DISTINCT, deterministic keys', async () => {
+  const { calls } = await runScript({ args: { number: 1, dimensions: ['Error Handling', 'error-handling', 'ERROR   HANDLING'] } })
+  const keys = reviewKeys(calls)
+  assert.deepEqual(keys, ['error-handling', 'error-handling-2', 'error-handling-3'], 'colliding keys are suffixed by position')
+  assert.equal(new Set(keys).size, keys.length, 'every rendered key is unique')
+})
+
+test('the object form also de-duplicates an explicitly colliding key', async () => {
+  const { calls } = await runScript({
+    args: { number: 1, dimensions: [{ key: 'security', title: 'Security A' }, { key: 'security', title: 'Security B' }] },
+  })
+  const keys = reviewKeys(calls)
+  assert.deepEqual(keys, ['security', 'security-2'], 'the second explicit key collision is suffixed')
+})
+
+test('trailing dashes cannot survive the length cap (trim happens AFTER slice)', async () => {
+  const { calls } = await runScript({ args: { number: 1, dimensions: ['abcdefghij-klmnopqrstuv----wxyz'] } })
+  const keys = reviewKeys(calls)
+  assert.equal(keys.length, 1)
+  assert.ok(!/-$/.test(keys[0]), `key must not end in a dash, got '${keys[0]}'`)
+  assert.ok(keys[0].length <= 24, `key stays within the 24-char cap, got '${keys[0]}'`)
+  assert.equal(keys[0], 'abcdefghij-klmnopqrstuv', 'trimmed after slicing')
+})
+
+test('an unslugifiable dimension still gets a stable positional key', async () => {
+  const { calls } = await runScript({ args: { number: 1, dimensions: ['!!!', '???'] } })
+  assert.deepEqual(reviewKeys(calls), ['dim-0', 'dim-1'], 'positional fallbacks are distinct')
+})
+
+test('the shipped default dimensions are unaffected (already collision-free)', async () => {
+  const { calls } = await runScript({ args: { number: 1 } })
+  const keys = reviewKeys(calls)
+  assert.deepEqual(keys, ['correctness', 'security', 'error-handling', 'tests', 'types-api', 'perf'])
+  assert.equal(new Set(keys).size, keys.length)
+})
+
 // ============================ DEDUP + CONFIDENCE FILTER ============================
 
 test('the same issue flagged by two dimensions dedups to one finding', async () => {
