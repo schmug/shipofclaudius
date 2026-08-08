@@ -331,6 +331,113 @@ function planMode(number, items) {
   return 'parallel'
 }
 
+// ── GREEN-lane batching (PURE, MODEL-FREE). ──────────────────────────────────────────
+// Deliberately placed AFTER the shared file-overlap block above: that block is duplicated
+// byte-for-byte into issue-triage-fanout.js (a sim asserts it), and batching is research-only
+// — triage emits waves, not lanes. Keep new helpers below this line out of the shared block.
+//
+// `group` is documented in both fan-outs as "a canonical grouping key so related issues batch
+// into one PR", but green_lanes used to emit `issues: [r.number]` — one lane per issue, so it
+// batched nothing and two GREEN issues in group `ci` produced two lanes BOTH keyed `ci`.
+//
+// The rule is EVIDENCE-BASED and fail-closed. Two GREEN issues join one lane only when:
+//   (a) same non-empty `group` (compared case-insensitively — 'CI' and 'ci' are one key),
+//   (b) BOTH footprints are KNOWN (an absent/empty files[] proves nothing — see planMode),
+//   (c) the footprints OVERLAP, and
+//   (d) there is NO dependency edge between them in either direction.
+// (c) is what makes this safe in BOTH directions: an overlap is positive evidence the two
+// issues are one unit of work, and two issues that collide on a file could never have shipped
+// independently anyway — so batching them costs no parallelism it could otherwise have had,
+// it only replaces two stacked PRs with one. Two same-group issues with provably DISJOINT
+// footprints stay separate lanes and keep their `parallel` mode.
+// (d) is the load-bearing constraint: `issues[]` is ONLY what the lane CLOSES (stacked-impl-lanes
+// emits `Closes #n` for every entry), so a lane that contained both ends of a dependency edge
+// would close the dependency from its dependent's PR — and, the dependency being GREEN, get it
+// implemented twice.
+function groupKey(g) { return (typeof g === 'string' ? g.trim().toLowerCase() : '') }
+
+function batchable(a, b) {
+  if (!a.group || a.group !== b.group) return false          // (a) same non-empty group
+  if (a.unknown || b.unknown) return false                   // (b) both footprints known
+  if (!sharedFiles(a.files, b.files).length) return false     // (c) evidence of one unit of work
+  if (a.deps.includes(b.number) || b.deps.includes(a.number)) return false // (d) never merge a dep
+  return true
+}
+
+// Partition GREEN results into lane member-lists. Connected components over the batchable
+// relation (union-find), then a WHOLE-COMPONENT dependency veto: batchable() only rejects the
+// PAIR it is asked about, so a chain (A~B batchable, B~C batchable) can still transitively pull
+// together an A and a C that ARE dependency-linked. Such a component fails closed to singletons
+// rather than guessing which member to evict. Returns [[item, ...], ...] sorted by lowest issue.
+function planLaneGroups(green) {
+  const items = []
+  const seen = new Set()
+  for (const r of (Array.isArray(green) ? green : [])) {
+    if (!r || !Number.isInteger(r.number) || seen.has(r.number)) continue
+    seen.add(r.number)
+    const files = normFiles(r.files)
+    items.push({
+      r,
+      number: r.number,
+      group: groupKey(r.group),
+      files,
+      unknown: files.length === 0,
+      deps: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((d) => Number.isInteger(d) && d !== r.number),
+    })
+  }
+  const parent = new Map(items.map((it) => [it.number, it.number]))
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x) } return x }
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b)
+    if (ra !== rb) parent.set(Math.max(ra, rb), Math.min(ra, rb)) // lowest number is always the root
+  }
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (batchable(items[i], items[j])) union(items[i].number, items[j].number)
+    }
+  }
+  const comps = new Map()
+  for (const it of items) {
+    const root = find(it.number)
+    if (!comps.has(root)) comps.set(root, [])
+    comps.get(root).push(it)
+  }
+  const lanes = []
+  for (const members of comps.values()) {
+    const own = new Set(members.map((m) => m.number))
+    const linked = members.some((m) => m.deps.some((d) => own.has(d)))
+    if (linked && members.length > 1) { for (const m of members) lanes.push([m]); continue }
+    lanes.push(members.slice().sort((a, b) => a.number - b.number))
+  }
+  return lanes.sort((a, b) => a[0].number - b[0].number)
+}
+
+// Lane keys MUST be unique: stacked-impl-lanes dispatches its implementer as `impl:${lane.key}`
+// and logs every lane line by key, so two lanes sharing one key are indistinguishable in the
+// progress tree and in any key-driven lookup. A contended base key is disambiguated by the
+// lane's lowest issue number (`ci` -> `ci-12`, `ci-13`); the trailing loop guarantees uniqueness
+// even in the pathological case where a group is literally named `ci-12`.
+function uniqueLaneKeys(bases) {
+  const dup = new Set()
+  const seen = new Set()
+  for (const b of bases) { if (seen.has(b.base)) dup.add(b.base); seen.add(b.base) }
+  const used = new Set()
+  return bases.map((b) => {
+    let k = dup.has(b.base) ? `${b.base}-${b.lowest}` : b.base
+    for (let i = 2; used.has(k); i++) k = `${b.base}-${b.lowest}-${i}`
+    used.add(k)
+    return k
+  })
+}
+
+// Branch name for a BATCHED lane: the members' researched `branch` values are per-issue
+// (`feat/issue-27-foo`), so reusing one would name a branch after only part of what it closes.
+// Derived from the (already unique) lane key, so lane branches are unique by construction.
+function laneBranch(key) {
+  const s = String(key).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return `feat/lane-${s || 'green'}`
+}
+
 // ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
 // Read-only analysis is expensive (relay→research chain per issue, some web-enabled).
 // Re-running should not re-pay for issues that have not changed since last time. We
@@ -522,7 +629,7 @@ const RESEARCH_SCHEMA = {
     spec: { type: 'string', description: 'For GREEN: markdown spec ready to implement — problem, the chosen approach, a step-by-step plan, and OBJECTIVE acceptance criteria. Must be buildable as written, no further investigation. Empty otherwise.' },
     chosen_approach: { type: 'string', description: 'For GREEN: the concrete library/API/technique/dataset selected and WHY over the alternatives considered (not "use a library for X" but "use Y, integrating at Z"). Empty otherwise.' },
     sources: { type: 'array', items: { type: 'string' }, description: 'For GREEN/STILL_RESEARCH: URLs / doc refs / file paths the conclusion rests on.' },
-    group: { type: 'string', description: 'For GREEN: canonical lane grouping key (same taxonomy as triage: ci, repo-hygiene, security-fix, docs, tooling, tests, feature, ...). Empty otherwise.' },
+    group: { type: 'string', description: 'For GREEN: canonical lane grouping key (same taxonomy as triage: ci, repo-hygiene, security-fix, docs, tooling, tests, feature, ...). Two GREEN issues sharing this key are batched into ONE lane (one PR closing both) when their files[] also overlap and neither depends on the other — so pick the key that names the unit of work, and give files[] honestly. Empty otherwise.' },
     branch: { type: 'string', description: 'For GREEN: suggested branch name for the impl lane (e.g. feat/issue-27-foo). Empty otherwise.' },
     files: { type: 'array', items: { type: 'string' }, description: 'For GREEN: likely files to create/modify (collision/grouping analysis + impl head start).' },
     complexity: { type: 'string', enum: ['trivial', 'small', 'medium', 'large'], description: 'Effort to implement once GREEN.' },
@@ -658,32 +765,84 @@ for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
 // files,mode}) so triage -> research -> impl chains cleanly through the orchestrator (with a
 // review gate at each hop). brief = the implementable spec produced by the research.
 const green = clean.filter((r) => r.verdict === 'GREEN')
-const green_lanes = green.map((r) => ({
-  key: r.group || `issue-${r.number}`,
-  branch: r.branch || `feat/issue-${r.number}`,
-  // issues = ONLY what this lane CLOSES. stacked-impl-lanes emits `Closes #n` for every
-  // entry here, so depends_on (must-land-first, not closed-by-this-PR) must NOT enter it
-  // — otherwise a dependency gets falsely closed and, if itself GREEN, double-implemented.
-  issues: [r.number],
-  invariant: !!r.invariant,
-  brief: r.spec || r.chosen_approach || r.rationale || '',
-  // Sequencing hint for the orchestrator only (kept off `issues`): order lanes so deps land first.
-  depends_on: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((n) => n !== r.number),
+
+// One lane per BATCH, not per issue: same-group GREEN issues whose footprints overlap and
+// carry no dependency edge are genuinely one unit of work (see planLaneGroups above).
+const laneGroups = planLaneGroups(green)
+const laneDrafts = laneGroups.map((members) => {
+  const first = members[0]
+  const nums = members.map((m) => m.number)
+  const own = new Set(nums)
+  return {
+    members,
+    // issues = ONLY what this lane CLOSES. stacked-impl-lanes emits `Closes #n` for every
+    // entry here, so depends_on (must-land-first, not closed-by-this-PR) must NOT enter it
+    // — otherwise a dependency gets falsely closed and, if itself GREEN, double-implemented.
+    // Batching never widens this beyond the batch members, and a member's dependency can
+    // never BE a member (batchable() rejects that pair, and planLaneGroups vetoes the whole
+    // component when a chain would smuggle one in transitively).
+    issues: nums,
+    lowest: nums[0],
+    base: (typeof first.r.group === 'string' && first.r.group.trim()) ? first.r.group.trim() : `issue-${first.number}`,
+    // Sequencing hint for the orchestrator only (kept off `issues`): order lanes so deps land
+    // first. For a batch it is the union of the members' deps, minus anything the lane itself
+    // closes (which would otherwise be a self-edge).
+    depends_on: [...new Set(members.flatMap((m) => m.deps))].filter((d) => !own.has(d)).sort((a, b) => a - b),
+    invariant: members.some((m) => !!m.r.invariant), // any invariant member arms the security review
+    brief: members.length === 1
+      ? (first.r.spec || first.r.chosen_approach || first.r.rationale || '')
+      : members.map((m) => `### Issue #${m.number}${m.r.title ? ` — ${m.r.title}` : ''}\n\n` +
+          (m.r.spec || m.r.chosen_approach || m.r.rationale || '')).join('\n\n'),
+    // The lane footprint is the UNION of its members' — exactly the set `mode` is computed from.
+    files: normFiles(members.flatMap((m) => m.files)),
+    singleBranch: first.r.branch || `feat/issue-${first.number}`,
+  }
+})
+
+// Modes are computed over LANES, not issues: a collision BETWEEN two batch members is internal
+// (one lane, one writer) and must not serialize anything, while a dependency recorded against a
+// member has to be seen as an edge between the two LANES that own those issues. Each lane is
+// represented by its lowest issue number and each dep is mapped to the representative of the
+// lane that owns it, so planMode's in-set dependency check still fires across batches.
+const laneKeys = uniqueLaneKeys(laneDrafts)
+const laneRep = new Map()
+for (const d of laneDrafts) for (const n of d.issues) laneRep.set(n, d.lowest)
+const laneItems = laneDrafts.map((d) => ({
+  number: d.lowest,
+  files: d.files,
+  depends_on: [...new Set(d.depends_on.map((x) => (laneRep.has(x) ? laneRep.get(x) : x)))],
+}))
+
+const green_lanes = laneDrafts.map((d, i) => ({
+  key: laneKeys[i],
+  // A batch is named after the lane it is, not after one of the issues it closes.
+  branch: d.members.length === 1 ? d.singleBranch : laneBranch(laneKeys[i]),
+  issues: d.issues,
+  invariant: d.invariant,
+  brief: d.brief,
+  depends_on: d.depends_on,
   // Footprint + execution mode, computed IN SCRIPT CODE (no agent, no prompt — see the
   // file-overlap helpers above). `files` used to be DROPPED here, so stacked-impl-lanes never
   // saw the footprint the research had already established and args.mode stayed a human guess.
-  // `files` is the normalized researched footprint — exactly the set `mode` was computed from —
-  // and `mode` is 'parallel' only when this lane is PROVABLY disjoint from every OTHER green
-  // lane; an unknown (absent/empty) footprint, a shared file, or a dependency edge between two
-  // green lanes all fail closed to 'sequential'.
-  files: normFiles(r.files),
-  mode: planMode(r.number, green),
+  // `mode` is 'parallel' only when this lane is PROVABLY disjoint from every OTHER green lane;
+  // an unknown (absent/empty) footprint, a shared file, or a dependency edge between two green
+  // lanes all fail closed to 'sequential'.
+  files: d.files,
+  mode: planMode(d.lowest, laneItems),
 }))
 const parallelLanes = green_lanes.filter((l) => l.mode === 'parallel').length
 
 log(`Researched ${clean.length}/${NUMBERS.length} (${reused.length} reused from checkpoint): ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
 log(`lane plan: ${parallelLanes} parallel / ${green_lanes.length - parallelLanes} sequential — ` +
   `file-overlap computed in script code, no agent; a lane with no files[] is sequential (fail-closed).`)
+// No-silent-batching line: every GREEN issue is accounted for, and any lane that closes more
+// than one issue names exactly which — `issues[]` is what gets `Closes #n`d, so it is never folded
+// silently. Batching requires same group + overlapping known footprints + no dependency edge.
+const batchedLanes = green_lanes.filter((l) => l.issues.length > 1)
+log(`lane batching: ${green.length} GREEN issue(s) -> ${green_lanes.length} lane(s) with unique keys` +
+  (batchedLanes.length
+    ? `; ${batchedLanes.length} batched: ` + batchedLanes.map((l) => `${l.key}[${l.issues.map((n) => '#' + n).join(',')}]`).join(' ')
+    : '; none batched (a batch needs the same group, overlapping KNOWN footprints, and no dependency edge)'))
 // No-silent-caps coverage line accounting for every requested issue (incl. checkpoint reuse).
 log(`coverage: requested ${NUMBERS.length} / researched ${clean.length} / reused ${reused.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
 
