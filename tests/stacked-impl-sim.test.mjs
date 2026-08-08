@@ -42,7 +42,7 @@ function implOpened(key, issues) {
 
 async function runScript({ args, fetch, impl, review, preflight, doc, adversarial } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], inflightImpl: 0, peakImpl: 0 }
+  const calls = { phases: [], logs: [], agents: [], inflightImpl: 0, peakImpl: 0, inflightAll: 0, peakAll: 0 }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -51,16 +51,22 @@ async function runScript({ args, fetch, impl, review, preflight, doc, adversaria
     // results SILENTLY (it does not queue), so the wave cap has to be asserted on real
     // in-flight overlap — a return-value check would pass even with an unbounded fan-out.
     // impl agents are held longer than relays so a wave's lanes provably overlap.
+    // peakImpl measures the LANE cap (args.batchSize); peakAll measures the AGENT cap
+    // (args.agentCap) — the wave cap alone does NOT bound agents, because each lane fans
+    // its issue relays out per issue.
     const isImpl = label.startsWith('impl:')
     if (isImpl) {
       calls.inflightImpl++
       calls.peakImpl = Math.max(calls.peakImpl, calls.inflightImpl)
     }
+    calls.inflightAll++
+    calls.peakAll = Math.max(calls.peakAll, calls.inflightAll)
     try {
       await new Promise((r) => setTimeout(r, isImpl ? 5 : 1))
       return await dispatch(label)
     } finally {
       if (isImpl) calls.inflightImpl--
+      calls.inflightAll--
     }
   }
   const dispatch = async (label) => {
@@ -106,6 +112,11 @@ const implBase = (calls, key) => {
   assert.ok(m, `impl prompt for '${key}' does not state a branch base`)
   return m[1]
 }
+
+// How many impl agents a lane actually spent. A lane held back by its predecessor must spend
+// ZERO — the stop-the-walk semantics are observable as agent spend, not as a returned base.
+const implRan = (calls, key) => byPrefix(calls, `impl:${key}`).length
+const laneResult = (result, key) => (result.results || []).find((r) => r.lane === key)
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -280,6 +291,14 @@ test('the additions do not weaken the injection-hardening of the write-capable w
 // The central invariant: a reviewer must sign off before a lane is marked done AND UNBLOCKS ITS
 // DEPENDENTS. In sequential mode "unblocks its dependents" IS the base advance — the next lane
 // branches off it. So a gated lane must never become the base the next lane builds on.
+//
+// L3-F5 STRENGTHENED THESE: not becoming the base is necessary but NOT sufficient. Falling the
+// dependent back to an older base still IMPLEMENTS it — against a tree that does not contain the
+// predecessor's code — so it re-implements or conflicts with the change it was supposed to build
+// on. A held-back predecessor must instead STOP the sequential walk (the posture stacked-merge-walk
+// already sets: "a PR that can't land stops the walk; the landed prefix is reported"). The
+// assertions below therefore check AGENT SPEND (zero impl agents for the dependents) rather than
+// the weaker "the dependent got an older base".
 
 const seqLanes = () => [
   lane({ key: 'a', branch: 'feat/a', issues: [5] }),
@@ -298,7 +317,7 @@ test('N5: a REQUEST_CHANGES lane never becomes the base the NEXT lane stacks on'
     args: { mode: 'sequential', lanes },
     review: () => 'REQUEST_CHANGES — the auth check is bypassable at line 42.',
   })
-  assert.equal(implBase(calls, 'b'), 'main', 'lane b must NOT stack onto the un-signed-off lane a')
+  assert.equal(implRan(calls, 'b'), 0, 'lane b must NOT stack onto the un-signed-off lane a — and must not be built on a stale base either')
   assert.ok(result.gated.some((g) => g.lane === 'a'), 'lane a is still gated (bucketing unchanged)')
 })
 
@@ -307,18 +326,23 @@ test('N5: a DOCS_DRIFT lane never becomes the base the NEXT lane stacks on', asy
     args: { mode: 'sequential', lanes: seqLanes() },
     doc: (key) => (key === 'a' ? { verdict: 'DOCS_DRIFT', note: 'README stale' } : { verdict: 'DOCS_OK', note: '' }),
   })
-  assert.equal(implBase(calls, 'b'), 'main', 'lane b must NOT stack onto the doc-drifted lane a')
+  assert.equal(implRan(calls, 'b'), 0, 'lane b must NOT stack onto the doc-drifted lane a, nor be built on a stale base')
   assert.ok(result.gated.some((g) => g.lane === 'a'), 'lane a is still gated')
 })
 
-test('N5 preserves: a BLOCKED lane does not break the chain (base simply does not advance)', async () => {
+test('N5/L3-F5: a BLOCKED lane STOPS the sequential walk (it is not silently skipped over)', async () => {
   const lanes = [...seqLanes(), lane({ key: 'c', branch: 'feat/c', issues: [7] })]
-  const { calls } = await runScript({
+  const { calls, result } = await runScript({
     args: { mode: 'sequential', lanes },
     impl: (key, l) => (key === 'a' ? { key, issues: l.issues, status: 'BLOCKED', blocker: 'nope' } : implOpened(key, l.issues)),
   })
-  assert.equal(implBase(calls, 'b'), 'main', 'the BLOCKED lane does not advance the base')
-  assert.equal(implBase(calls, 'c'), 'feat/b', 'the chain continues off the next VERIFIED lane, unbroken')
+  assert.equal(implRan(calls, 'a'), 1, 'the first lane still ran')
+  assert.equal(implRan(calls, 'b'), 0, 'the BLOCKED lane holds its dependent — b is not implemented against a stale base')
+  assert.equal(implRan(calls, 'c'), 0, 'and everything after it too — the walk stopped')
+  for (const k of ['b', 'c']) {
+    assert.equal(laneResult(result, k).impl.status, 'BLOCKED_ON_PREDECESSOR', `${k} is returned with the distinct held status`)
+  }
+  assert.equal(result.total, 3, 'every declared lane is still accounted for')
 })
 
 test('N5 preserves: PR_EXISTS (idempotent skip) still advances the base', async () => {
@@ -329,18 +353,126 @@ test('N5 preserves: PR_EXISTS (idempotent skip) still advances the base', async 
   assert.equal(implBase(calls, 'b'), 'feat/a', 'an already-shipped lane is a valid stack base')
 })
 
-test('N5: a REQUEST_CHANGES lane mid-stack does not poison the lanes after it', async () => {
+test('N5/L3-F5: a REQUEST_CHANGES lane mid-stack stops the walk AFTER the verified prefix', async () => {
   const lanes = [
     lane({ key: 'a', branch: 'feat/a', issues: [5] }),
     lane({ key: 'b', branch: 'feat/b', issues: [6], invariant: true }),
     lane({ key: 'c', branch: 'feat/c', issues: [7] }),
   ]
-  const { calls } = await runScript({
+  const { calls, result } = await runScript({
     args: { mode: 'sequential', lanes },
     review: () => 'REQUEST_CHANGES — nope.',
   })
   assert.equal(implBase(calls, 'b'), 'feat/a', 'b stacks on the verified a')
-  assert.equal(implBase(calls, 'c'), 'feat/a', 'c falls back to the last VERIFIED base, skipping gated b')
+  assert.equal(implRan(calls, 'c'), 0, 'c is NOT re-based onto the last verified lane — gated b is its predecessor, so c is held')
+  assert.ok(result.auto_execute.some((g) => g.lane === 'a'), 'the completed prefix (a) is still reported as cleared')
+  assert.ok(result.gated.some((g) => g.lane === 'b'), 'the held-back lane itself is gated')
+  assert.equal(laneResult(result, 'c').blocked_by, 'b', 'c names the predecessor that held it')
+})
+
+// ===================== L3-F5: a held-back lane BLOCKS its dependents from running =====================
+// The card's semantics are "sign off before a node is marked done AND UNBLOCKS ITS DEPENDENTS".
+// Holding the base is only half of that: implementing the dependent against an OLDER base builds
+// it on a tree without the predecessor's code. Matching stacked-merge-walk, the walk STOPS and
+// the completed prefix is reported.
+
+test('L3-F5: a held-back lane spends NO agents at all on its dependents (not even the issue relays)', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], invariant: true }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6] }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+  ]
+  const { calls } = await runScript({ args: { mode: 'sequential', lanes }, review: () => 'REQUEST_CHANGES — no.' })
+  for (const k of ['b', 'c']) assert.equal(implRan(calls, k), 0, `no impl agent spawned for held lane ${k}`)
+  assert.equal(byPrefix(calls, 'fetch:#6').length, 0, 'no issue relay spent on a held lane')
+  assert.equal(byPrefix(calls, 'fetch:#7').length, 0, 'no issue relay spent on a held lane')
+  assert.equal(byPrefix(calls, 'doccheck:b').length, 0, 'no critic spent on a held lane')
+  assert.equal(byPrefix(calls, 'adversarial:b').length, 0, 'no critic spent on a held lane')
+})
+
+test('L3-F5: held lanes are returned with BLOCKED_ON_PREDECESSOR, a reason, and an additive bucket', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5] }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6] }),
+  ]
+  const { result } = await runScript({
+    args: { mode: 'sequential', lanes },
+    doc: (key) => (key === 'a' ? { verdict: 'DOCS_DRIFT', note: 'README stale' } : { verdict: 'DOCS_OK', note: '' }),
+  })
+  assert.ok(Array.isArray(result.blocked_on_predecessor), 'an additive blocked_on_predecessor bucket is returned')
+  assert.deepEqual(result.blocked_on_predecessor.map((s) => s.lane), ['b'], 'the held lane is bucketed')
+  const b = result.blocked_on_predecessor[0]
+  assert.equal(b.status, 'BLOCKED_ON_PREDECESSOR', 'the summary carries the distinct status')
+  assert.equal(b.blocked_by, 'a', 'the summary names the predecessor')
+  const r = laneResult(result, 'b')
+  assert.ok(/DOCS_DRIFT/i.test(r.reason || ''), `the reason states WHY the predecessor was held, got: ${r.reason}`)
+  assert.ok(/a/.test(r.impl.blocker || ''), 'the synthesized impl result carries a blocker string')
+  // The pre-existing buckets keep their meaning: a held lane is not silently counted as cleared.
+  assert.ok(!result.auto_execute.some((s) => s.lane === 'b'), 'a held lane is never auto_execute')
+  assert.equal(result.prs_opened, 1, 'only the prefix opened a PR')
+})
+
+test('L3-F5: the completed prefix is still fully reported (results stay in declared order)', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5] }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6] }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+    lane({ key: 'd', branch: 'feat/d', issues: [8] }),
+  ]
+  const { calls, result } = await runScript({
+    args: { mode: 'sequential', lanes },
+    adversarial: (key) => (key === 'c' ? { verdict: 'FAIL', findings: [], commands_run: 'x' } : { verdict: 'PASS', findings: [], commands_run: '' }),
+  })
+  assert.deepEqual(result.results.map((r) => r.lane), ['a', 'b', 'c', 'd'], 'declared order preserved')
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'the prefix really stacked')
+  assert.equal(implBase(calls, 'c'), 'feat/b', 'the prefix really stacked')
+  assert.equal(implRan(calls, 'd'), 0, 'only the lane after the hold is dropped')
+  assert.deepEqual(result.auto_execute.map((s) => s.lane), ['a', 'b'], 'the verified prefix is reported as cleared')
+  assert.deepEqual(result.gated.map((s) => s.lane), ['c'], 'the held-back lane is the one gated')
+  assert.deepEqual(result.blocked_on_predecessor.map((s) => s.lane), ['d'], 'its dependents are held, not gated')
+})
+
+test('L3-F5: parallel mode is UNAFFECTED — a gated parallel lane blocks nothing', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5] }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6] }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+  ]
+  const { calls, result } = await runScript({
+    args: { lanes },   // global default = parallel
+    doc: (key) => (key === 'a' ? { verdict: 'DOCS_DRIFT', note: 'stale' } : { verdict: 'DOCS_OK', note: '' }),
+  })
+  for (const k of ['a', 'b', 'c']) assert.equal(implRan(calls, k), 1, `parallel lane ${k} still runs`)
+  assert.equal(result.prs_opened, 3, 'parallel lanes are file-disjoint and have no dependents — none is held')
+  assert.equal(result.blocked_on_predecessor.length, 0, 'nothing is held in parallel mode')
+})
+
+test('L3-F5: in a MIXED run the hold applies only to the sequential half', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'sequential', invariant: true }),
+    lane({ key: 'p', branch: 'feat/p', issues: [6], mode: 'parallel' }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7], mode: 'sequential' }),
+  ]
+  const { calls, result } = await runScript({ args: { mode: 'parallel', lanes }, review: () => 'REQUEST_CHANGES — no.' })
+  assert.equal(implRan(calls, 'p'), 1, 'the parallel lane still runs — it never stacked on anything')
+  assert.equal(implBase(calls, 'p'), 'main', 'and still off the ORIGINAL base')
+  assert.equal(implRan(calls, 'c'), 0, 'the sequential dependent is held by the gated sequential lane a')
+  assert.deepEqual(result.blocked_on_predecessor.map((s) => s.lane), ['c'], 'only the sequential dependent is held')
+})
+
+test('L3-F5: a stacked lane is TOLD which verified predecessor its base contains', async () => {
+  const { calls } = await runScript({ args: { mode: 'sequential', lanes: seqLanes() } })
+  const first = byPrefix(calls, 'impl:a')[0].prompt
+  const second = byPrefix(calls, 'impl:b')[0].prompt
+  assert.ok(!/STACKS on/i.test(first), 'the first lane in the stack is not told it stacks on anything')
+  assert.ok(/STACKS on the verified lane `a`/.test(second), `the stacked lane names its predecessor, got: ${second.slice(second.indexOf('BRANCH:'), second.indexOf('BRANCH:') + 260)}`)
+})
+
+test('L3-F5: a non-main BASE0 does not fake a predecessor for the first lane', async () => {
+  const { calls } = await runScript({ args: { mode: 'sequential', base: 'develop', lanes: seqLanes() } })
+  const first = byPrefix(calls, 'impl:a')[0].prompt
+  assert.equal(implBase(calls, 'a'), 'develop', 'the first lane branches off the declared base')
+  assert.ok(!/STACKS on/i.test(first), 'base !== main must not be mistaken for "stacks on the prior lane"')
 })
 
 // ===================== N6: adversarial defect-class critic =====================
@@ -432,7 +564,7 @@ test('N6: an adversarial FAIL caps confidence, forces gated, AND blocks the base
   assert.ok(a, 'a FAIL lane is gated')
   assert.ok(a.confidence < result.confidenceThreshold, `FAIL caps confidence below T (got ${a.confidence})`)
   assert.ok(!result.auto_execute.some((g) => g.lane === 'a'), 'a FAIL lane is never auto_execute')
-  assert.equal(implBase(calls, 'b'), 'main', 'a FAIL lane never becomes the stack base')
+  assert.equal(implRan(calls, 'b'), 0, 'a FAIL lane never becomes the stack base — and its dependent is held, not rebuilt on a stale base')
 })
 
 test("N6: adversarialReview:'off' spawns ZERO adversarial agents", async () => {
@@ -587,7 +719,7 @@ test("N8: N5's base gate still applies to a per-lane declared stack", async () =
   assert.equal(implBase(ok.calls, 'c'), 'feat/a', 'control: a verified declared-sequential lane IS the base')
   // GATED: the same stack, with lane a's security review requesting changes.
   const rc = await runScript({ args: { mode: 'parallel', lanes: lanes() }, review: () => 'REQUEST_CHANGES — no.' })
-  assert.equal(implBase(rc.calls, 'c'), 'main', 'c does not stack onto the un-signed-off sequential lane a')
+  assert.equal(implRan(rc.calls, 'c'), 0, 'c does not stack onto the un-signed-off sequential lane a, nor run against a stale base')
   assert.equal(implBase(rc.calls, 'b'), 'main', 'the parallel lane is off the original base regardless')
 })
 
@@ -611,6 +743,148 @@ test('N8: the parallel half of a mixed run is still wave-bounded', async () => {
   const { result, calls } = await runScript({ args: { lanes } })
   assert.ok(calls.peakImpl <= 4, `mixed runs still respect the wave cap, saw ${calls.peakImpl}`)
   assert.equal(result.prs_opened, 10, 'all ten lanes run')
+})
+
+// ===================== L3-F1: the wave cap bounds LANES; a separate cap bounds AGENTS =====================
+// runWaves caps concurrent LANES, not agents: a lane fans its issue relays out with
+// parallel(issueNums.map(...)), so a wave of 4 lanes x 5 issues is ~20 concurrent relay agents —
+// well past the ~14 StructuredOutput cliff the header claims to stay under. args.agentCap is what
+// actually makes the agent-level claim true, so it is pinned here (peakImpl alone cannot see it).
+
+const manyIssueLanes = (nLanes, nIssues) => Array.from({ length: nLanes }, (_, i) => lane({
+  key: `l${i}`, branch: `feat/l${i}`, issues: Array.from({ length: nIssues }, (_, j) => 1000 + i * 100 + j),
+}))
+
+test('L3-F1: the LANE cap alone does not bound agents — a wave of multi-issue lanes exceeds batchSize', async () => {
+  const { calls } = await runScript({ args: { lanes: manyIssueLanes(4, 5) } })
+  assert.ok(calls.peakImpl <= 4, `lanes are still capped at 4, saw ${calls.peakImpl}`)
+  assert.ok(calls.peakAll > 4, `the per-lane relay fan-out provably multiplies past the lane cap, saw peak ${calls.peakAll}`)
+})
+
+test('L3-F1: total in-flight AGENTS stay under the ~14 StructuredOutput cliff by default', async () => {
+  const { result, calls } = await runScript({ args: { lanes: manyIssueLanes(4, 5) } })
+  assert.ok(calls.peakAll <= 12, `peak concurrent agents must respect the default agentCap of 12, saw ${calls.peakAll}`)
+  assert.ok(calls.peakAll < 14, 'and therefore stay under the documented ~14 cliff')
+  assert.equal(result.prs_opened, 4, 'the cap throttles, it must never DROP a lane')
+  assert.equal(byPrefix(calls, 'fetch:#').length, 20, 'every issue relay still ran (20 = 4 lanes x 5 issues)')
+})
+
+test('L3-F1: args.agentCap tightens the agent-level bound', async () => {
+  const { result, calls } = await runScript({ args: { lanes: manyIssueLanes(4, 5), agentCap: 3 } })
+  assert.ok(calls.peakAll <= 3, `agentCap:3 must cap total in-flight agents at 3, saw ${calls.peakAll}`)
+  assert.equal(result.prs_opened, 4, 'a tighter cap still runs every lane')
+  assert.equal(byPrefix(calls, 'fetch:#').length, 20, 'and every relay')
+})
+
+test('L3-F1: a nonsense agentCap falls back to the default rather than unbounding', async () => {
+  for (const bad of [0, -3, 'twelve', null, 2.5]) {
+    const { result, calls } = await runScript({ args: { lanes: manyIssueLanes(4, 5), agentCap: bad } })
+    assert.ok(calls.peakAll <= 12, `agentCap ${JSON.stringify(bad)} must fall back to 12, saw ${calls.peakAll}`)
+    assert.equal(result.prs_opened, 4, `agentCap ${JSON.stringify(bad)} still runs every lane`)
+  }
+})
+
+test('L3-F1: sequential mode also honours the agent cap (its per-lane relays still fan out)', async () => {
+  const { result, calls } = await runScript({ args: { mode: 'sequential', lanes: manyIssueLanes(2, 9), agentCap: 4 } })
+  assert.equal(calls.peakImpl, 1, 'still strictly one lane at a time')
+  assert.ok(calls.peakAll <= 4, `a 9-issue lane's relays are still capped, saw ${calls.peakAll}`)
+  assert.equal(result.prs_opened, 2, 'both lanes ran')
+})
+
+// ===================== L3-F3: defect-class keys are unique and cleanly truncated =====================
+// ADVERSARIAL_SCHEMA documents findings[].class as "the key of the defect class this belongs to",
+// so two classes must never collapse onto one key — the caller could not tell which taxonomy fired.
+
+const advPrompt = (calls) => byPrefix(calls, 'adversarial:')[0].prompt
+
+test('L3-F3: two classes that slugify identically get DISTINCT keys', async () => {
+  const { calls } = await runScript({
+    args: { lanes: [lane()], defectClasses: ['Key normalization!', 'key   normalization?', 'KEY-NORMALIZATION'] },
+  })
+  const p = advPrompt(calls)
+  assert.ok(p.includes('[key-normalization]'), 'the first class keeps the natural key')
+  assert.ok(p.includes('[key-normalization-2]'), 'the colliding second class is deterministically suffixed')
+  assert.ok(p.includes('[key-normalization-3]'), 'and the third')
+  const keys = [...p.matchAll(/^\s+\d+\. \[([^\]]+)\]/gm)].map((m) => m[1])
+  assert.equal(new Set(keys).size, keys.length, `every rendered class key is unique, got ${JSON.stringify(keys)}`)
+})
+
+test('L3-F3: the object form also de-duplicates an explicitly colliding key', async () => {
+  const { calls } = await runScript({
+    args: {
+      lanes: [lane()],
+      defectClasses: [
+        { key: 'race', title: 'Race conditions', focus: 'a' },
+        { key: 'race', title: 'Racy caches', focus: 'b' },
+      ],
+    },
+  })
+  const p = advPrompt(calls)
+  assert.ok(p.includes('[race]') && p.includes('[race-2]'), 'an explicit duplicate key is suffixed, not silently merged')
+  assert.ok(p.includes('Race conditions') && p.includes('Racy caches'), 'both titles still reach the critic')
+})
+
+test('L3-F3: the 24-char cap is applied BEFORE trimming, so no key ends in a dash', async () => {
+  const { calls } = await runScript({
+    args: { lanes: [lane()], defectClasses: ['abcdefghij klmnopqrstuv wxyz'] },
+  })
+  const p = advPrompt(calls)
+  const keys = [...p.matchAll(/^\s+\d+\. \[([^\]]+)\]/gm)].map((m) => m[1])
+  assert.equal(keys.length, 1, 'one caller class')
+  assert.ok(!/-$/.test(keys[0]), `a truncated key must not end in a dash, got '${keys[0]}'`)
+  assert.ok(keys[0].length <= 24, `key stays within the 24-char cap, got '${keys[0]}'`)
+  assert.equal(keys[0], 'abcdefghij-klmnopqrstuv', 'trimmed after slicing')
+})
+
+test('L3-F3: an unslugifiable class still gets a stable positional key', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()], defectClasses: ['!!!', '???'] } })
+  const keys = [...advPrompt(calls).matchAll(/^\s+\d+\. \[([^\]]+)\]/gm)].map((m) => m[1])
+  assert.deepEqual(keys, ['class-0', 'class-1'], 'positional fallbacks are distinct')
+})
+
+test('L3-F3: the shipped defaults are unaffected (their keys are already explicit and unique)', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const keys = [...advPrompt(calls).matchAll(/^\s+\d+\. \[([^\]]+)\]/gm)].map((m) => m[1])
+  assert.ok(keys.includes('silent-override') && keys.includes('key-normalization'), 'default keys are unchanged')
+  assert.equal(new Set(keys).size, keys.length, 'and unique')
+  for (const k of keys) assert.ok(!/-$/.test(k), `default key '${k}' has no trailing dash`)
+})
+
+// ===================== L3-F4: adversarialReview is normalized and never silently escalates =====================
+// The whitelist was exact-match + case-sensitive with a fallback to the MOST EXPENSIVE setting, so
+// 'Off' / 'OFF' / 'none' silently turned the critic fully ON — extra agents AND a stronger gate.
+
+test("L3-F4: 'off' is recognized case-insensitively and with surrounding whitespace", async () => {
+  for (const v of ['off', 'Off', 'OFF', '  off  ', 'none', 'NONE', ' None ']) {
+    const { result, calls } = await runScript({ args: { lanes: seqLanes(), adversarialReview: v } })
+    assert.equal(byPrefix(calls, 'adversarial:').length, 0, `adversarialReview:${JSON.stringify(v)} must spawn ZERO critics`)
+    assert.equal(result.prs_opened, 2, `adversarialReview:${JSON.stringify(v)} still runs the lanes`)
+  }
+})
+
+test("L3-F4: 'invariant' and 'opened' are recognized case-insensitively too", async () => {
+  const lanes = [lane({ key: 'a', branch: 'feat/a', issues: [5], invariant: true }), lane({ key: 'b', branch: 'feat/b', issues: [6] })]
+  for (const v of ['Invariant', ' INVARIANT ']) {
+    const { calls } = await runScript({ args: { lanes, adversarialReview: v } })
+    assert.equal(byPrefix(calls, 'adversarial:a').length, 1, `${v}: the invariant lane is critiqued`)
+    assert.equal(byPrefix(calls, 'adversarial:b').length, 0, `${v}: the non-invariant lane is not`)
+  }
+  const { calls } = await runScript({ args: { lanes, adversarialReview: 'OPENED' } })
+  assert.equal(byPrefix(calls, 'adversarial:').length, 2, 'OPENED critiques every opened lane')
+})
+
+test('L3-F4: an UNRECOGNIZED value falls back loudly — it is logged, never silent', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()], adversarialReview: 'disabled?' } })
+  const warn = calls.logs.find((m) => /adversarialReview/.test(m))
+  assert.ok(warn, `an unrecognized adversarialReview must log a fallback line, logs: ${JSON.stringify(calls.logs)}`)
+  assert.ok(warn.includes('disabled?'), 'the log line quotes the value that was not understood')
+  assert.equal(byPrefix(calls, 'adversarial:').length, 1, 'and the documented default still applies')
+})
+
+test('L3-F4: the default (unset) path logs no warning', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  assert.ok(!calls.logs.some((m) => /adversarialReview/.test(m)), 'not passing the arg is not a fallback worth warning about')
+  assert.equal(byPrefix(calls, 'adversarial:').length, 1, 'default is still opened')
 })
 
 // ---- runner ----
