@@ -161,16 +161,30 @@ test('factory.yml: untrusted GitHub context reaches run: blocks only via env', a
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
 })
 
-test('README pins no hardcoded test total (nothing can verify one from inside the suite)', async () => {
-  const md = await read('README.md')
-  // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim
-  // no check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The
-  // contract is "the count only goes UP", which `npm test` prints; README must not restate a number.
-  const hardcoded = md.match(/\*\*\s*\d[\d,]*\s+passing\s*\*\*/i)
-  assert.ok(!hardcoded, `README hardcodes a test total (${hardcoded && hardcoded[0]}) — run \`npm test\` for the live number instead`)
+// A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim no
+// check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The contract
+// is "the count only goes UP", which `npm test` prints; no doc may restate a number.
+//
+// EVERY doc that describes the gate is checked, not just README. #69 unpinned README but left
+// CLAUDE.md telling readers to confirm the count against `e.g. "638 passing"` — a pin pointing at a
+// pin that no longer existed. It survived the very commit that removed its counterpart precisely
+// because this file only ever opened README.md. One doc guarded is not the invariant.
+//
+// The wrapper is not part of the invariant either: the CLAUDE.md pin was QUOTED, not bolded, so the
+// original bold-only pattern read straight past it. Match the number however it is dressed up.
+const assertPinsNoTotal = async (doc) => {
+  const md = await read(doc)
+  const hardcoded = md.match(/\d[\d,]*\s+(?:passing\b|tests?\s+pass)/i)
+  assert.ok(!hardcoded, `${doc} hardcodes a test total (${hardcoded && hardcoded[0]}) — run \`npm test\` for the live number instead`)
   const tally = md.match(/\(\s*\d+(?:\s*\+\s*\d+){5,}\s*\)/)
-  assert.ok(!tally, `README hardcodes a per-suite tally (${tally && tally[0]}) — twenty hand-kept numbers is a drift generator`)
-})
+  assert.ok(!tally, `${doc} hardcodes a per-suite tally (${tally && tally[0]}) — twenty hand-kept numbers is a drift generator`)
+}
+
+test('README pins no hardcoded test total (nothing can verify one from inside the suite)', () =>
+  assertPinsNoTotal('README.md'))
+
+test('CLAUDE.md pins no hardcoded test total either (the pin that outlived #69)', () =>
+  assertPinsNoTotal('CLAUDE.md'))
 
 test('every workflow has a suite, and every suite is in the package.json test chain', async () => {
   // CLAUDE.md says plugin-integrity "fails the build if you break" the rule that package.json's
