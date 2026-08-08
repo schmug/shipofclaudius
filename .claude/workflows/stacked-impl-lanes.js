@@ -1,7 +1,10 @@
 // Reusable implementation fan-out workflow with two modes.
 // Takes a list of "lanes" (each = a coherent group of issues -> one PR) and
 // implements each to a GREEN, review-only PR. Security-critical lanes get an
-// adversarial security-hardening-reviewer pass.
+// adversarial security-hardening-reviewer pass; every opened lane additionally
+// gets a read-only doc-freshness critic and a read-only adversarial defect-class
+// critic (args.defectClasses / args.adversarialReview). A lane any critic GATES
+// is barred from becoming the branch base its dependents stack onto.
 //
 //   mode "parallel"  (default): lanes are FILE-DISJOINT -> run concurrently, each
 //                    branches off main. Use for config/docs/hygiene batches.
@@ -47,7 +50,7 @@ export const meta = {
   description: 'Implement issue-lanes to review-only PRs (parallel if disjoint, sequential+stacked if hub-coupled); security review on invariant lanes',
   phases: [
     { title: 'Implement', detail: 'a read-only preflight agent skips lanes whose branch already has an open PR (state-derived idempotency; args.fresh bypasses); per remaining lane: read-only relays fetch the issue text, then a worktree-isolated agent implements from nonce-fenced data -> green local tests -> open a DRAFT PR' },
-    { title: 'Review', detail: 'security-hardening-reviewer on each invariant-touching lane + a read-only doc-freshness critic per opened lane; confidence sorts each reversible draft PR into auto_execute vs gated (the workflow never merges)' },
+    { title: 'Review', detail: 'security-hardening-reviewer on each invariant-touching lane + a read-only doc-freshness critic and a read-only adversarial defect-class critic (one agent holding the whole taxonomy, must show verbatim command output) per opened lane; confidence sorts each reversible draft PR into auto_execute vs gated, and a gated lane never becomes the base its dependents stack onto (the workflow never merges)' },
   ],
 }
 
@@ -60,9 +63,16 @@ if (!Array.isArray(LANES) || LANES.length === 0) {
   throw new Error('stacked-impl-lanes: args.lanes must be a non-empty array of {key,branch,issues,invariant,brief}.')
 }
 
-// Read-only agentType for the issue-text RELAY agents only (NOT the impl agent, which
-// must keep write tools). Default built-in `Explore`; override with args.readonlyAgent.
+// Read-only agentType for the issue-text RELAY agents and the read-only Review-phase critics
+// only (NOT the impl agent, which must keep write tools). Default built-in `Explore`;
+// override with args.readonlyAgent.
 const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
+
+// Which opened lanes get the adversarial defect-class critic (below).
+//   'opened'    (default) — every lane that opened a PR
+//   'invariant'           — only lanes flagged invariant (cheaper; the security reviewer's scope)
+//   'off'                 — none
+const ADVERSARIAL_MODE = (A.adversarialReview === 'off' || A.adversarialReview === 'invariant') ? A.adversarialReview : 'opened'
 
 // ── Spine helpers (inlined; Workflow scripts cannot `import`). Stamped with
 // SPINE_VERSION so the hand-synced copies in ~/.claude/workflows/ can be diffed for drift. ──
@@ -81,8 +91,10 @@ const T = (typeof A.confidenceThreshold === 'number' && A.confidenceThreshold >=
 
 // Deterministic per-lane confidence from the signals already gathered (no extra skeptic agents:
 // the security-hardening-reviewer is the adversarial verify on invariant lanes; the doc critic
-// covers doc drift). PR_OPENED is the base; a REQUEST_CHANGES review or DOCS_DRIFT caps it low.
-function laneConfidence(impl, review, doc) {
+// covers doc drift; the defect-class critic covers the generic engineering defects on EVERY
+// opened lane). PR_OPENED is the base; a REQUEST_CHANGES review, a DOCS_DRIFT, or an
+// adversarial FAIL caps it low — below any sane threshold, so the lane cannot self-clear.
+function laneConfidence(impl, review, doc, adv) {
   if (!impl || impl.status !== 'PR_OPENED') return 0
   let c = 0.7
   if (typeof review === 'string' && review) {
@@ -90,6 +102,7 @@ function laneConfidence(impl, review, doc) {
     else if (/^\s*APPROVE/i.test(review)) c = Math.min(1, c + 0.2)
   }
   if (doc && doc.verdict === 'DOCS_DRIFT') c = Math.min(c, 0.4)
+  if (adv && adv.verdict === 'FAIL') c = Math.min(c, 0.2)
   return Math.max(0, Math.min(1, c))
 }
 
@@ -190,6 +203,81 @@ const DOCCHECK_PROMPT = (lane, impl, base) =>
   `2. Decide: did this change USER-VISIBLE behavior (a flag, API, CLI surface, config key, output format, or a documented invariant)? If so, were the touched docs (README, docs/**, --help text, doc comments) updated IN THIS PR to match?\n` +
   `Return { verdict, note }: DOCS_OK if docs match or none are needed; DOCS_DRIFT if behavior changed but the docs are now stale (name them in note); NA if there is no behavior change.`
 
+// ── Adversarial defect-class critic (read-only, per opened lane). ────────────────────────
+// The security reviewer only runs on invariant lanes and the doc critic only looks at doc
+// drift, so an ordinary correctness defect had no gate at all. This critic hunts a fixed
+// taxonomy of defect classes over the lane's real diff and must SHOW ITS WORK: `commands_run`
+// requires verbatim command output, so a critic that merely skimmed the diff is visible.
+//
+// Defaults are deliberately GENERIC engineering vocabulary — this file ships publicly, so it
+// must not bake in any caller's personal bug history. Pass args.defectClasses to supply your
+// own taxonomy (strings or {key,title,focus}); caller classes REPLACE these defaults.
+const DEFAULT_DEFECT_CLASSES = [
+  { key: 'silent-override', title: 'Silent override and shadowing collisions', focus: 'Two things claiming the same name or slot where the last writer silently wins: a duplicate key in an object/map/config merge, a later definition shadowing an earlier one, an env var or flag overriding a file setting with no warning, an inner binding shadowing an outer one, a re-registered handler replacing an existing one. Does anything in this diff make a value quietly disappear instead of erroring or warning?' },
+  { key: 'key-normalization', title: 'Key normalization and dedup', focus: 'Two logically identical records treated as distinct, or two distinct ones collapsed, because the key was not normalized: case, surrounding whitespace, a trailing slash, Unicode form, leading zeros, missing-vs-empty-vs-null, number-vs-string, or a composite key built by string concatenation that can collide. Does every lookup, dedup, and set-membership check in this diff key on the same normalized value?' },
+  { key: 'flag-misuse', title: 'Misused CLI and API flags that fail only at runtime', focus: 'Invocations that read fine but are wrong when executed: a flag that does not exist on that command or version, a flag on the wrong subcommand, a positional passed where a named option is required, an exit code swallowed by a pipe or a shell construct, or an option whose real semantics differ from what the calling code assumes. Check the command help text or its source rather than trusting recall.' },
+  { key: 'stale-leftovers', title: 'Stale tests, fixtures, and dead config left after a removal', focus: 'What this change deleted or renamed but did not clean up: tests and fixtures that still pass only because they assert the old path, config keys or env vars or feature flags nothing reads anymore, unreachable branches, exports with no importer, comments and docs describing the removed behavior, and any test that would still pass if the change were reverted entirely.' },
+  { key: 'unenforced-claims', title: 'Claims that no check actually enforces', focus: 'Assertions in the PR body, README, comments, or commit message that a property holds - validated, gated, covered by tests, cannot happen - with no code path, test, or CI gate that would actually fail if the property were violated. For each such claim, name the check that enforces it or record it as a finding.' },
+]
+
+// Normalized exactly the way pr-review-fanout normalizes args.dimensions (same convention,
+// so a caller who knows one knows the other): strings become {key,title,focus} with the
+// string as both title and focus; objects keep their title/focus and slugify a stable key.
+const DEFECT_CLASSES = (() => {
+  const raw = Array.isArray(A.defectClasses) && A.defectClasses.length ? A.defectClasses : DEFAULT_DEFECT_CLASSES
+  return raw.map((d, i) => {
+    if (typeof d === 'string') {
+      const key = d.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || `class-${i}`
+      return { key, title: d, focus: d }
+    }
+    const title = d.title || d.key || `defect class ${i}`
+    const key = (d.key || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || `class-${i}`
+    return { key, title, focus: d.focus || title }
+  })
+})()
+
+const ADVERSARIAL_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['verdict'],
+  properties: {
+    verdict: {
+      type: 'string', enum: ['PASS', 'FAIL', 'NA'],
+      description: 'FAIL=at least one defect class below is PRESENT in this diff (list each in findings); PASS=you checked EVERY class against the actual diff bytes and found none; NA=nothing in the diff is in scope for any class. Do NOT return PASS for a class you did not actually check.',
+    },
+    findings: {
+      type: 'array',
+      description: 'One entry per concrete defect found. Empty for PASS/NA. Only defects you can point at in the diff — no speculation.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['class', 'where', 'defect'],
+        properties: {
+          class: { type: 'string', description: 'The key of the defect class this belongs to.' },
+          where: { type: 'string', description: 'file:line inside this diff.' },
+          defect: { type: 'string', description: 'The concrete defect: which input or state produces which wrong behavior.' },
+          fix: { type: 'string', description: 'The smallest change that removes it.' },
+        },
+      },
+    },
+    commands_run: {
+      type: 'string',
+      description: 'The exact commands you ran and their VERBATIM output, copied byte-for-byte and never paraphrased or summarized — at minimum the git diff you read, plus every grep/test/help command you used to confirm or rule out a class. A critic that only read the diff and ran nothing must show exactly that here.',
+    },
+  },
+}
+
+const ADVERSARIAL_PROMPT = (lane, impl, base, classes) =>
+  `READ-ONLY ADVERSARIAL defect-class critic for the just-opened PR on branch \`${impl.branch || lane.branch}\` ` +
+  `(base \`${base}\`). Do NOT edit/merge/push, poll CI, call advisor, or use WebFetch/WebSearch.\n` +
+  `Implementation summary: ${impl.summary || '(none)'} | Files: ${(impl.files_changed || []).join(', ') || '(unknown)'}\n` +
+  `Steps:\n` +
+  `1. \`git fetch origin && git diff origin/${base}...origin/${impl.branch || lane.branch} --stat\`, then read the full diff.\n` +
+  `2. Hunt EVERY defect class below against the ACTUAL diff bytes. You are adversarial: assume the change is wrong ` +
+  `until each class has been checked. Do NOT accept the implementation summary's or the PR body's claims — verify them.\n` +
+  classes.map((c, i) => `   ${i + 1}. [${c.key}] ${c.title} — ${c.focus}`).join('\n') + `\n` +
+  `3. For each defect you find, run a command that DEMONSTRATES it (grep the collision, run the test, read the flag's ` +
+  `--help). Record every command and its VERBATIM output in commands_run — that field is how a reviewer tells a real ` +
+  `check apart from a skim.\n` +
+  `Return { verdict, findings, commands_run }. A FAIL caps this lane's confidence, forces it to human review, and ` +
+  `BLOCKS it from becoming the base that dependent lanes stack onto — so report only defects you can point at in the diff.`
+
 const IMPL_PROMPT = (lane, base, issuesBlock) => `You are implementing GitHub issue(s) ${lane.issues.map(n => '#' + n).join(', ')} to a GREEN, REVIEW-ONLY pull request. You are in an ISOLATED git worktree.
 
 LANE: ${lane.key}
@@ -287,13 +375,23 @@ async function runLane(lane, base) {
     })
   }
 
+  // Adversarial defect-class critic (read-only, ONE agent holding ALL the classes — never one
+  // agent per class; this workflow already spawns a relay per issue + impl + the doc critic).
+  let adv = null
+  if (impl && impl.status === 'PR_OPENED' && ADVERSARIAL_MODE !== 'off' && (ADVERSARIAL_MODE === 'opened' || lane.invariant)) {
+    adv = await agent(ADVERSARIAL_PROMPT(lane, impl, base, DEFECT_CLASSES), {
+      label: `adversarial:${lane.key}`, phase: 'Review', agentType: READONLY_AGENT, schema: ADVERSARIAL_SCHEMA,
+    })
+  }
+
   // Confidence-gated, REVERSIBLE-only autonomy: opening the draft PR (reversible) already
   // happened; confidence sorts it into auto_execute (cleared for one-pass human merge) vs gated
   // (needs attention). The workflow NEVER marks ready / merges (irreversible).
-  const confidence = laneConfidence(impl, review, doc)
+  const confidence = laneConfidence(impl, review, doc, adv)
   const docDrift = !!(doc && doc.verdict === 'DOCS_DRIFT')
-  const autonomy = (impl && impl.status === 'PR_OPENED' && confidence >= T && !docDrift) ? 'auto_execute' : 'gated'
-  return { lane: lane.key, issues: lane.issues, impl, review, doc, confidence, autonomy }
+  const advFail = !!(adv && adv.verdict === 'FAIL')
+  const autonomy = (impl && impl.status === 'PR_OPENED' && confidence >= T && !docDrift && !advFail) ? 'auto_execute' : 'gated'
+  return { lane: lane.key, issues: lane.issues, impl, review, doc, adv, confidence, autonomy }
 }
 
 // ── The stacked-base gate (the verification invariant). ──────────────────────────────────
@@ -329,7 +427,7 @@ if (MODE === 'parallel') {
     const advances = laneAdvancesBase(r)
     if (advances) base = lane.branch
     results.push(r)
-    log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''}${advances ? '' : ' ⛔not-a-base (gated/blocked — dependents do NOT stack on it)'} | next base=${base}`)
+    log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''}${r.adv && r.adv.verdict === 'FAIL' ? ' ⚠️defects' : ''}${advances ? '' : ' ⛔not-a-base (gated/blocked — dependents do NOT stack on it)'} | next base=${base}`)
   }
 }
 
@@ -347,6 +445,8 @@ const summarize = (r) => ({
   confidence: r.confidence,
   reversible: true,
   doc: r.doc ? r.doc.verdict : null,
+  adversarial: r.adv ? r.adv.verdict : null,
+  adversarial_findings: (r.adv && Array.isArray(r.adv.findings)) ? r.adv.findings : [],
   review: typeof r.review === 'string'
     ? (/^\s*REQUEST_CHANGES/i.test(r.review) ? 'REQUEST_CHANGES' : (/^\s*APPROVE/i.test(r.review) ? 'APPROVE' : 'NOTED'))
     : null,

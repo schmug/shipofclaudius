@@ -40,7 +40,7 @@ function implOpened(key, issues) {
   return { key, issues, status: 'PR_OPENED', pr_url: `https://x/pr/${key}`, branch: `feat/${key}`, base: 'main', summary: 's', files_changed: ['a.js'] }
 }
 
-async function runScript({ args, fetch, impl, review, preflight, doc } = {}) {
+async function runScript({ args, fetch, impl, review, preflight, doc, adversarial } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [] }
   const agent = async (prompt, opts = {}) => {
@@ -61,6 +61,10 @@ async function runScript({ args, fetch, impl, review, preflight, doc } = {}) {
     if (label.startsWith('doccheck:')) {
       const key = label.slice('doccheck:'.length)
       return doc ? doc(key) : { verdict: 'DOCS_OK', note: '' }
+    }
+    if (label.startsWith('adversarial:')) {
+      const key = label.slice('adversarial:'.length)
+      return adversarial ? adversarial(key) : { verdict: 'PASS', findings: [], commands_run: 'git diff … (verbatim)' }
     }
     if (label.startsWith('review:')) return review ? review(label) : 'APPROVE — nothing real found.'
     throw new Error('unexpected agent label: ' + label)
@@ -321,6 +325,140 @@ test('N5: a REQUEST_CHANGES lane mid-stack does not poison the lanes after it', 
   })
   assert.equal(implBase(calls, 'b'), 'feat/a', 'b stacks on the verified a')
   assert.equal(implBase(calls, 'c'), 'feat/a', 'c falls back to the last VERIFIED base, skipping gated b')
+})
+
+// ===================== N6: adversarial defect-class critic =====================
+// One READ-ONLY critic per opened lane, holding ALL the defect classes (never one agent per
+// class — this workflow already spawns a relay per issue + impl + up to two critics per lane).
+
+// The default taxonomy is read OUT OF THE SOURCE rather than duplicated here, so the test
+// cannot drift from the shipped defaults and every default is proven to reach the one prompt.
+async function defaultClassTitles() {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const start = src.indexOf('const DEFAULT_DEFECT_CLASSES = [')
+  assert.ok(start > -1, 'a DEFAULT_DEFECT_CLASSES constant is declared')
+  const block = src.slice(start, src.indexOf('\n]', start))
+  const titles = [...block.matchAll(/title: '([^']+)'/g)].map((m) => m[1])
+  assert.ok(titles.length >= 4, `expected several default defect classes, parsed ${titles.length}`)
+  return titles
+}
+
+test('N6: exactly ONE adversarial critic per OPENED lane (never one agent per defect class)', async () => {
+  const { calls } = await runScript({ args: { lanes: seqLanes() } })
+  assert.equal(byPrefix(calls, 'adversarial:').length, 2, 'one critic per opened lane')
+  assert.equal(byPrefix(calls, 'adversarial:a').length, 1, 'lane a gets exactly one, holding every class')
+  assert.equal(byPrefix(calls, 'adversarial:b').length, 1, 'lane b gets exactly one')
+})
+
+test('N6: the adversarial critic is read-only, on the EXISTING Review phase, distinctly labeled', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const a = byPrefix(calls, 'adversarial:')[0]
+  assert.ok(a, 'the adversarial critic ran')
+  assert.equal(a.opts.phase, 'Review', 'mounted on the existing Review phase (no new meta.phases title)')
+  assert.equal(a.opts.agentType, 'Explore', 'critic is read-only by default')
+  const implLabel = byPrefix(calls, 'impl:')[0].opts.label
+  assert.notEqual(a.opts.label, implLabel, 'the critic label is distinct from the impl agent label')
+  // Mirrors the DOCCHECK critic byte-for-byte, including its `impl.branch || lane.branch`
+  // precedence (the impl agent reports `feat/lane-a`; the lane declared `feat/a`).
+  assert.ok(/git fetch origin && git diff origin\/main\.\.\.origin\/feat\/lane-a/.test(a.prompt), 'reads the lane diff like the DOCCHECK critic')
+  assert.ok(/do NOT edit|read-only/i.test(a.prompt), 'the critic is instructed read-only')
+})
+
+test('N6: args.readonlyAgent overrides the adversarial critic agentType (not the impl agent)', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()], readonlyAgent: 'gh-ro' } })
+  assert.equal(byPrefix(calls, 'adversarial:')[0].opts.agentType, 'gh-ro', 'critic honors the override')
+  assert.notEqual(byPrefix(calls, 'impl:')[0].opts.agentType, 'gh-ro', 'impl agent stays write-capable')
+})
+
+test('N6: every default defect-class title reaches that ONE prompt', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const p = byPrefix(calls, 'adversarial:')[0].prompt
+  for (const t of await defaultClassTitles()) assert.ok(p.includes(t), `default class '${t}' missing from the critic prompt`)
+})
+
+test('N6: the defaults are GENERIC engineering vocabulary (no personal bug history baked into a public repo)', async () => {
+  const titles = (await defaultClassTitles()).join(' | ').toLowerCase()
+  for (const leak of ['cory', 'schmug', 'dmarc', 'phishpilot', 'donthype', 'benchburner', 'spotify', 'cloudflare']) {
+    assert.ok(!titles.includes(leak), `default taxonomy leaks a caller-specific term: '${leak}'`)
+  }
+})
+
+test('N6: args.defectClasses overrides the defaults and accepts BOTH strings and {key,title,focus}', async () => {
+  const { calls } = await runScript({
+    args: { lanes: [lane()], defectClasses: ['Race conditions', { key: 'tz', title: 'Timezone math', focus: 'DST boundaries and UTC offsets' }] },
+  })
+  const advs = byPrefix(calls, 'adversarial:')
+  assert.equal(advs.length, 1, 'still ONE agent holding all the caller classes')
+  const p = advs[0].prompt
+  assert.ok(p.includes('Race conditions'), 'the string form becomes a class')
+  assert.ok(p.includes('Timezone math') && p.includes('DST boundaries and UTC offsets'), 'the object form keeps title + focus')
+  for (const t of await defaultClassTitles()) assert.ok(!p.includes(t), 'caller classes REPLACE the defaults, not append to them')
+})
+
+test('N6: commands_run demands VERBATIM output, so a critic that only read the diff is visible', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const a = byPrefix(calls, 'adversarial:')[0]
+  const cr = a.opts.schema.properties.commands_run
+  assert.ok(cr, 'the schema carries commands_run')
+  assert.ok(/verbatim/i.test(cr.description || ''), 'commands_run requires VERBATIM command output')
+  assert.deepEqual(a.opts.schema.properties.verdict.enum, ['PASS', 'FAIL', 'NA'], 'verdict enum is PASS/FAIL/NA')
+  assert.ok(a.opts.schema.properties.findings, 'the schema carries findings[]')
+})
+
+test('N6: an adversarial FAIL caps confidence, forces gated, AND blocks the base advance', async () => {
+  const { calls, result } = await runScript({
+    args: { mode: 'sequential', lanes: seqLanes() },
+    adversarial: (key) => (key === 'a'
+      ? { verdict: 'FAIL', findings: [{ class: 'silent-override', where: 'a.js:10', defect: 'dup key', fix: 'rename' }], commands_run: 'grep -n ...' }
+      : { verdict: 'PASS', findings: [], commands_run: '' }),
+  })
+  const a = result.gated.find((g) => g.lane === 'a')
+  assert.ok(a, 'a FAIL lane is gated')
+  assert.ok(a.confidence < result.confidenceThreshold, `FAIL caps confidence below T (got ${a.confidence})`)
+  assert.ok(!result.auto_execute.some((g) => g.lane === 'a'), 'a FAIL lane is never auto_execute')
+  assert.equal(implBase(calls, 'b'), 'main', 'a FAIL lane never becomes the stack base')
+})
+
+test("N6: adversarialReview:'off' spawns ZERO adversarial agents", async () => {
+  const { result, calls } = await runScript({ args: { lanes: seqLanes(), adversarialReview: 'off' } })
+  assert.equal(byPrefix(calls, 'adversarial:').length, 0, 'no critic when disabled')
+  assert.equal(result.prs_opened, 2, 'the lanes still run')
+})
+
+test("N6: adversarialReview:'invariant' critiques only invariant lanes", async () => {
+  const lanes = [lane({ key: 'a', branch: 'feat/a', issues: [5], invariant: true }), lane({ key: 'b', branch: 'feat/b', issues: [6] })]
+  const { calls } = await runScript({ args: { lanes, adversarialReview: 'invariant' } })
+  assert.equal(byPrefix(calls, 'adversarial:a').length, 1, 'the invariant lane is critiqued')
+  assert.equal(byPrefix(calls, 'adversarial:b').length, 0, 'the non-invariant lane is not')
+})
+
+test('N6: a BLOCKED lane gets no adversarial critic (nothing was opened to critique)', async () => {
+  const { calls } = await runScript({
+    args: { lanes: [lane()] },
+    impl: (key, l) => ({ key, issues: l.issues, status: 'BLOCKED', blocker: 'nope' }),
+  })
+  assert.equal(byPrefix(calls, 'adversarial:').length, 0, 'no critic spent on a lane with no PR')
+})
+
+test('N6: the adversarial verdict is surfaced additively in the summaries', async () => {
+  const { result } = await runScript({
+    args: { lanes: [lane()] },
+    adversarial: () => ({ verdict: 'FAIL', findings: [], commands_run: 'x' }),
+  })
+  assert.equal(result.gated[0].adversarial, 'FAIL', 'the verdict is reported per lane')
+  for (const k of ['mode', 'results', 'prs_opened', 'total', 'auto_execute', 'gated', 'skipped_existing']) {
+    assert.ok(k in result, `existing key '${k}' still present`)
+  }
+})
+
+test('N6: meta.phases still declares exactly the two phases the body calls', async () => {
+  const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
+  const titles = [...src.matchAll(/\{ title: '([^']+)', detail:/g)].map((m) => m[1])
+  assert.deepEqual(titles, ['Implement', 'Review'], 'no new meta.phases title was added')
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  for (const a of calls.agents) {
+    assert.ok(['Implement', 'Review'].includes(a.opts.phase), `agent '${a.opts.label}' uses an undeclared phase '${a.opts.phase}'`)
+  }
 })
 
 // ---- runner ----
