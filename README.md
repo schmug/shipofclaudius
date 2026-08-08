@@ -209,7 +209,7 @@ node tests/factory-land-sim.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
-Requires Node ≥ 18 (developed on Node 22). Current status: **638 passing** (12 + 65 + 49 + 31 + 28 + 34 + 19 + 37 + 18 + 62 + 26 + 24 + 20 + 23 + 23 + 26 + 59 + 44 + 33 + 5), 0 failing.
+Requires Node ≥ 18 (developed on Node 22). `npm test` prints the live total and must end `0 failing`; the standing contract is that the count only ever goes **up**. It is deliberately not restated here — a suite cannot run the suites, so a hardcoded total is a claim no check can enforce, and this one had drifted by 18 across four terms before anyone noticed. `tests/plugin-integrity.test.mjs` now fails the build if a total is pinned back into this file.
 
 `tests/factory-gate.test.mjs` is the odd one out: the merge gate is pure, model-free code, so there is nothing to simulate — those are ordinary unit tests, and for every condition there is a case proving that missing, ambiguous, or unknown input **fails closed**. The two factory sims additionally import the **real** gate and assert across the boundary: `factory-issue-fix`'s `evidence` block is fed to the real `checkFixtureEvidence`, and `factory-land`'s in-code condition list is compared against the package's `CONDITION_ORDER` — so the gate and its callers cannot drift apart silently.
 

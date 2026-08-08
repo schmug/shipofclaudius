@@ -161,6 +161,41 @@ test('factory.yml: untrusted GitHub context reaches run: blocks only via env', a
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
 })
 
+test('README pins no hardcoded test total (nothing can verify one from inside the suite)', async () => {
+  const md = await read('README.md')
+  // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim
+  // no check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The
+  // contract is "the count only goes UP", which `npm test` prints; README must not restate a number.
+  const hardcoded = md.match(/\*\*\s*\d[\d,]*\s+passing\s*\*\*/i)
+  assert.ok(!hardcoded, `README hardcodes a test total (${hardcoded && hardcoded[0]}) — run \`npm test\` for the live number instead`)
+  const tally = md.match(/\(\s*\d+(?:\s*\+\s*\d+){5,}\s*\)/)
+  assert.ok(!tally, `README hardcodes a per-suite tally (${tally && tally[0]}) — twenty hand-kept numbers is a drift generator`)
+})
+
+test('every workflow has a suite, and every suite is in the package.json test chain', async () => {
+  // CLAUDE.md says plugin-integrity "fails the build if you break" the rule that package.json's
+  // test script lists each suite explicitly. It did not — nothing here ever opened package.json,
+  // so a new workflow could ship with no sim and a suite could exist but never run in CI. Both
+  // halves are now actually enforced, so the claim is true.
+  const files = await readdir(new URL('tests/', ROOT))
+  const suites = files.filter((f) => f.endsWith('.test.mjs')).sort()
+  const chain = JSON.parse(await read('package.json')).scripts.test
+  for (const f of suites) {
+    assert.ok(chain.includes(`node tests/${f}`), `package.json test chain is missing tests/${f} — CI would never run it`)
+  }
+  // Filename conventions vary (`<name>-sim.test.mjs`, `<name>.test.mjs`, and `dss-sim.test.mjs`
+  // for deep-security-scan), so the invariant is not the suite's NAME — it is that some suite
+  // actually targets the workflow's path. That is what "it would ship untested" really means.
+  const wfDir = new URL('.claude/workflows/', ROOT)
+  const sources = await Promise.all(suites.map((f) => read(`tests/${f}`)))
+  for (const wf of (await readdir(wfDir)).filter((f) => f.endsWith('.js'))) {
+    assert.ok(
+      sources.some((src) => src.includes(`.claude/workflows/${wf}`)),
+      `no suite in tests/ targets .claude/workflows/${wf} — it would ship untested`
+    )
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
