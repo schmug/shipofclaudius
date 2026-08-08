@@ -7,8 +7,13 @@
 //                    branches off main. Use for config/docs/hygiene batches.
 //   mode "sequential": lanes share hub files -> run in order, each branches off
 //                    the PRIOR lane's branch so diffs stay clean (stacked PRs).
-//                    The stack base only advances on a PR_OPENED, so one BLOCKED
-//                    lane doesn't break the chain.
+//                    The stack base only advances past a lane that VERIFIED
+//                    (see laneAdvancesBase), so a lane whose security review said
+//                    REQUEST_CHANGES — or whose doc critic said DOCS_DRIFT — never
+//                    becomes the foundation its dependents are built and reviewed
+//                    against. A gated/BLOCKED lane leaves the base where it is, so
+//                    the next lane falls back to the last verified base and the
+//                    chain is never broken.
 //
 // Run:  Workflow({ scriptPath: "~/.claude/workflows/stacked-impl-lanes.js",
 //                  args: { mode: "sequential", base: "main", lanes: [...] } })
@@ -291,17 +296,40 @@ async function runLane(lane, base) {
   return { lane: lane.key, issues: lane.issues, impl, review, doc, confidence, autonomy }
 }
 
+// ── The stacked-base gate (the verification invariant). ──────────────────────────────────
+// In sequential mode "this lane is done" and "this lane UNBLOCKS ITS DEPENDENTS" are the same
+// decision: the next lane branches off it, inherits its commits, and its PR diff is computed
+// against it. So the base must advance ONLY past a lane whose verification actually signed off
+// — otherwise a lane the security-hardening-reviewer returned REQUEST_CHANGES on silently
+// becomes the foundation the rest of the stack is built and reviewed against.
+//
+// The predicate is deliberately expressed over `autonomy`, not over `impl.status`, because
+// `autonomy` is the single place every verification signal is already folded together
+// (impl status + security review + doc-freshness critic + confidence >= T). Anything that
+// gates a lane therefore gates the base advance too, with no second list to keep in sync.
+//
+//   auto_execute      -> PR_OPENED and every critic signed off        -> ADVANCE
+//   skipped_existing  -> PR_EXISTS, a prior run already shipped it    -> ADVANCE (idempotent)
+//   gated             -> REQUEST_CHANGES / DOCS_DRIFT / low confidence -> HOLD
+//                        ...and also BLOCKED / FAILED, which is the pre-existing, deliberate
+//                        behaviour: the base simply does NOT advance, so the next lane falls
+//                        back to the last VERIFIED base and the chain is never broken.
+function laneAdvancesBase(r) {
+  return !!(r && (r.autonomy === 'auto_execute' || r.autonomy === 'skipped_existing'))
+}
+
 let results
 if (MODE === 'parallel') {
   results = (await parallel(LANES.map((lane) => () => runLane(lane, BASE0)))).filter(Boolean)
 } else {
   results = []
-  let base = BASE0 // advances when the branch exists (newly opened OR already-open) so an
-  for (const lane of LANES) { // idempotent skip / BLOCKED lane doesn't break the stack
-    const r = await runLane(lane, base)
-    if (r.impl && (r.impl.status === 'PR_OPENED' || r.impl.status === 'PR_EXISTS')) base = lane.branch
+  let base = BASE0 // advances ONLY past a lane that VERIFIED (laneAdvancesBase); a gated,
+  for (const lane of LANES) { // BLOCKED or FAILED lane leaves the base where it is, so the
+    const r = await runLane(lane, base) // next lane falls back to the last verified base
+    const advances = laneAdvancesBase(r)
+    if (advances) base = lane.branch
     results.push(r)
-    log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''} | next base=${base}`)
+    log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''}${advances ? '' : ' ⛔not-a-base (gated/blocked — dependents do NOT stack on it)'} | next base=${base}`)
   }
 }
 

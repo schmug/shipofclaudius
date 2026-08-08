@@ -76,6 +76,17 @@ async function runScript({ args, fetch, impl, review, preflight, doc } = {}) {
 const byPrefix = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || '').startsWith(prefix))
 const lane = (over = {}) => ({ key: 'lane-a', branch: 'feat/a', issues: [5], invariant: false, brief: 'do A', ...over })
 
+// The base a lane was actually told to branch off, read out of the REAL impl prompt text
+// ("BRANCH: create `feat/b` off `origin/main`") — not out of the return value. The whole
+// point of the stacked-base gate is what the NEXT lane's agent is instructed to build on.
+const implBase = (calls, key) => {
+  const a = byPrefix(calls, `impl:${key}`)[0]
+  assert.ok(a, `no impl agent ran for lane '${key}'`)
+  const m = a.prompt.match(/off `origin\/([^`]+)`/)
+  assert.ok(m, `impl prompt for '${key}' does not state a branch base`)
+  return m[1]
+}
+
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
@@ -243,6 +254,73 @@ test('the additions do not weaken the injection-hardening of the write-capable w
   assert.ok(!/gh issue view/.test(im.prompt), 'impl still does not live-fetch the issue body')
   assert.notEqual(im.opts.agentType, 'Explore', 'impl stays write-capable')
   assert.equal(im.opts.isolation, 'worktree', 'impl stays worktree-isolated')
+})
+
+// ===================== N5: verification gates the STACK BASE, not just the bucket =====================
+// The central invariant: a reviewer must sign off before a lane is marked done AND UNBLOCKS ITS
+// DEPENDENTS. In sequential mode "unblocks its dependents" IS the base advance — the next lane
+// branches off it. So a gated lane must never become the base the next lane builds on.
+
+const seqLanes = () => [
+  lane({ key: 'a', branch: 'feat/a', issues: [5] }),
+  lane({ key: 'b', branch: 'feat/b', issues: [6] }),
+]
+
+test('sequential CONTROL: a clean verified lane still becomes the base for the next lane', async () => {
+  const { calls } = await runScript({ args: { mode: 'sequential', lanes: seqLanes() } })
+  assert.equal(implBase(calls, 'a'), 'main', 'the first lane branches off the original base')
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'a verified lane DOES advance the stack base')
+})
+
+test('N5: a REQUEST_CHANGES lane never becomes the base the NEXT lane stacks on', async () => {
+  const lanes = [lane({ key: 'a', branch: 'feat/a', issues: [5], invariant: true }), lane({ key: 'b', branch: 'feat/b', issues: [6] })]
+  const { calls, result } = await runScript({
+    args: { mode: 'sequential', lanes },
+    review: () => 'REQUEST_CHANGES — the auth check is bypassable at line 42.',
+  })
+  assert.equal(implBase(calls, 'b'), 'main', 'lane b must NOT stack onto the un-signed-off lane a')
+  assert.ok(result.gated.some((g) => g.lane === 'a'), 'lane a is still gated (bucketing unchanged)')
+})
+
+test('N5: a DOCS_DRIFT lane never becomes the base the NEXT lane stacks on', async () => {
+  const { calls, result } = await runScript({
+    args: { mode: 'sequential', lanes: seqLanes() },
+    doc: (key) => (key === 'a' ? { verdict: 'DOCS_DRIFT', note: 'README stale' } : { verdict: 'DOCS_OK', note: '' }),
+  })
+  assert.equal(implBase(calls, 'b'), 'main', 'lane b must NOT stack onto the doc-drifted lane a')
+  assert.ok(result.gated.some((g) => g.lane === 'a'), 'lane a is still gated')
+})
+
+test('N5 preserves: a BLOCKED lane does not break the chain (base simply does not advance)', async () => {
+  const lanes = [...seqLanes(), lane({ key: 'c', branch: 'feat/c', issues: [7] })]
+  const { calls } = await runScript({
+    args: { mode: 'sequential', lanes },
+    impl: (key, l) => (key === 'a' ? { key, issues: l.issues, status: 'BLOCKED', blocker: 'nope' } : implOpened(key, l.issues)),
+  })
+  assert.equal(implBase(calls, 'b'), 'main', 'the BLOCKED lane does not advance the base')
+  assert.equal(implBase(calls, 'c'), 'feat/b', 'the chain continues off the next VERIFIED lane, unbroken')
+})
+
+test('N5 preserves: PR_EXISTS (idempotent skip) still advances the base', async () => {
+  const { calls } = await runScript({
+    args: { mode: 'sequential', lanes: seqLanes() },
+    preflight: { existing: [{ branch: 'feat/a', pr_url: 'https://x/pr/old-a' }] },
+  })
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'an already-shipped lane is a valid stack base')
+})
+
+test('N5: a REQUEST_CHANGES lane mid-stack does not poison the lanes after it', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5] }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], invariant: true }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+  ]
+  const { calls } = await runScript({
+    args: { mode: 'sequential', lanes },
+    review: () => 'REQUEST_CHANGES — nope.',
+  })
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'b stacks on the verified a')
+  assert.equal(implBase(calls, 'c'), 'feat/a', 'c falls back to the last VERIFIED base, skipping gated b')
 })
 
 // ---- runner ----
