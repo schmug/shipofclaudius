@@ -42,12 +42,28 @@ function implOpened(key, issues) {
 
 async function runScript({ args, fetch, impl, review, preflight, doc, adversarial } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [] }
+  const calls = { phases: [], logs: [], agents: [], inflightImpl: 0, peakImpl: 0 }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const label = opts.label || ''
-    await new Promise((r) => setTimeout(r, 1))
+    // Peak-concurrency instrumentation. The ~14-concurrent StructuredOutput cliff loses
+    // results SILENTLY (it does not queue), so the wave cap has to be asserted on real
+    // in-flight overlap — a return-value check would pass even with an unbounded fan-out.
+    // impl agents are held longer than relays so a wave's lanes provably overlap.
+    const isImpl = label.startsWith('impl:')
+    if (isImpl) {
+      calls.inflightImpl++
+      calls.peakImpl = Math.max(calls.peakImpl, calls.inflightImpl)
+    }
+    try {
+      await new Promise((r) => setTimeout(r, isImpl ? 5 : 1))
+      return await dispatch(label)
+    } finally {
+      if (isImpl) calls.inflightImpl--
+    }
+  }
+  const dispatch = async (label) => {
     if (label.startsWith('preflight')) return preflight ?? { existing: [] }
     if (label.startsWith('fetch:#')) {
       const n = Number(label.slice('fetch:#'.length))
@@ -459,6 +475,53 @@ test('N6: meta.phases still declares exactly the two phases the body calls', asy
   for (const a of calls.agents) {
     assert.ok(['Implement', 'Review'].includes(a.opts.phase), `agent '${a.opts.label}' uses an undeclared phase '${a.opts.phase}'`)
   }
+})
+
+// ===================== N7: the fan-out is BOUNDED =====================
+// Every other fan-out in this repo waves against the documented ~14-concurrent
+// StructuredOutput cliff, where a real 35-issue fan-out lost ~22 results. That cliff loses
+// results SILENTLY — it does not queue — so an uncapped lane fan-out drops PRs with no error.
+// The default here is 4, not 8: each lane already spawns one relay per issue + impl + two
+// critics, so 4 lanes x 3 issues is already ~16 concurrent agents at the relay step.
+
+const manyLanes = (n) => Array.from({ length: n }, (_, i) => lane({ key: `l${i}`, branch: `feat/l${i}`, issues: [100 + i] }))
+const waveLogs = (calls) => calls.logs.filter((m) => /^Wave \d+\/\d+/.test(m))
+
+test('N7: 9 parallel lanes at the default never exceed 4 concurrent impl agents', async () => {
+  const { result, calls } = await runScript({ args: { lanes: manyLanes(9) } })
+  assert.ok(calls.peakImpl <= 4, `peak concurrent impl agents must stay <= 4, saw ${calls.peakImpl}`)
+  assert.ok(calls.peakImpl > 1, `the fan-out must still be parallel, saw peak ${calls.peakImpl}`)
+  assert.equal(result.prs_opened, 9, 'all 9 lanes still produce a PR — the cap must not DROP lanes')
+  assert.equal(result.results.length, 9, 'every lane is accounted for in results')
+})
+
+test('N7: the bounded fan-out logs per-wave progress (never a silent fan-out)', async () => {
+  const { calls } = await runScript({ args: { lanes: manyLanes(9) } })
+  const waves = waveLogs(calls)
+  assert.equal(waves.length, 3, `9 lanes at batch 4 is 3 waves, saw ${waves.length}: ${JSON.stringify(waves)}`)
+  assert.ok(/^Wave 1\/3/.test(waves[0]) && /^Wave 3\/3/.test(waves[2]), 'waves are numbered out of the total')
+})
+
+test('N7: args.batchSize overrides the default cap', async () => {
+  const { result, calls } = await runScript({ args: { lanes: manyLanes(9), batchSize: 2 } })
+  assert.ok(calls.peakImpl <= 2, `batchSize:2 must cap peak concurrency at 2, saw ${calls.peakImpl}`)
+  assert.equal(waveLogs(calls).length, 5, '9 lanes at batch 2 is 5 waves')
+  assert.equal(result.prs_opened, 9, 'a smaller wave still runs every lane')
+})
+
+test('N7: a nonsense batchSize falls back to the default rather than serializing or unbounding', async () => {
+  for (const bad of [0, -3, 'eight', null, 2.5]) {
+    const { result, calls } = await runScript({ args: { lanes: manyLanes(9), batchSize: bad } })
+    assert.ok(calls.peakImpl <= 4, `batchSize ${JSON.stringify(bad)} must fall back to 4, saw ${calls.peakImpl}`)
+    assert.equal(result.prs_opened, 9, `batchSize ${JSON.stringify(bad)} still runs every lane`)
+  }
+})
+
+test('N7: sequential mode is unaffected — strictly one lane at a time, no waves', async () => {
+  const { result, calls } = await runScript({ args: { mode: 'sequential', lanes: manyLanes(9) } })
+  assert.equal(calls.peakImpl, 1, 'sequential mode runs exactly one impl agent at a time')
+  assert.equal(waveLogs(calls).length, 0, 'sequential mode does not wave')
+  assert.equal(result.prs_opened, 9, 'all lanes still run')
 })
 
 // ---- runner ----

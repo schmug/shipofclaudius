@@ -7,7 +7,9 @@
 // is barred from becoming the branch base its dependents stack onto.
 //
 //   mode "parallel"  (default): lanes are FILE-DISJOINT -> run concurrently, each
-//                    branches off main. Use for config/docs/hygiene batches.
+//                    branches off main. Use for config/docs/hygiene batches. The
+//                    fan-out is BOUNDED into waves of args.batchSize (default 4)
+//                    so it stays under the silent StructuredOutput concurrency cliff.
 //   mode "sequential": lanes share hub files -> run in order, each branches off
 //                    the PRIOR lane's branch so diffs stay clean (stacked PRs).
 //                    The stack base only advances past a lane that VERIFIED
@@ -73,6 +75,33 @@ const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.t
 //   'invariant'           — only lanes flagged invariant (cheaper; the security reviewer's scope)
 //   'off'                 — none
 const ADVERSARIAL_MODE = (A.adversarialReview === 'off' || A.adversarialReview === 'invariant') ? A.adversarialReview : 'opened'
+
+// Fan-out wave size for `parallel` lanes. Keep it well under the ~14-concurrent
+// StructuredOutput cliff: a real 35-issue fan-out lost ~22 results once it pushed past ~14
+// concurrent, and that cliff loses results SILENTLY — it does not queue. The default here is
+// 4, NOT the 8 the sibling fan-outs use, because a lane is far heavier than one triage item:
+// each lane spawns one relay PER ISSUE, then the impl agent, then up to two Review critics.
+// 4 lanes x 3 issues is already ~16 concurrent agents at the relay step. Tunable via
+// args.batchSize. Sequential lanes are unaffected — they are strictly one at a time.
+const BATCH = (Number.isInteger(A.batchSize) && A.batchSize > 0) ? A.batchSize : 4
+
+// runWaves: process `items` through `fn` in sequential waves of <= batchSize. Each wave is
+// awaited fully before the next starts, so peak in-flight agents never exceed batchSize even
+// for a large lane set. `fn(item, index)` may itself chain agents (relays -> impl -> critics);
+// those run one-at-a-time within the item, so a chain does not multiply the wave's peak.
+// Per-wave progress is logged (no silent fan-out).
+async function runWaves(items, fn, batchSize = 4) {
+  const size = (Number.isInteger(batchSize) && batchSize > 0) ? batchSize : 4
+  const waves = Math.ceil(items.length / size)
+  const out = []
+  for (let w = 0; w < waves; w++) {
+    const slice = items.slice(w * size, w * size + size)
+    const res = await parallel(slice.map((it, j) => () => fn(it, w * size + j)))
+    out.push(...res)
+    log(`Wave ${w + 1}/${waves} done — ${out.filter(Boolean).length}/${items.length} lane(s) run so far.`)
+  }
+  return out
+}
 
 // ── Spine helpers (inlined; Workflow scripts cannot `import`). Stamped with
 // SPINE_VERSION so the hand-synced copies in ~/.claude/workflows/ can be diffed for drift. ──
@@ -418,7 +447,9 @@ function laneAdvancesBase(r) {
 
 let results
 if (MODE === 'parallel') {
-  results = (await parallel(LANES.map((lane) => () => runLane(lane, BASE0)))).filter(Boolean)
+  // Bounded fan-out: waves of <= BATCH lanes, so peak concurrency stays under the silent
+  // StructuredOutput cliff. Every lane still runs — waving throttles, it never drops.
+  results = (await runWaves(LANES, (lane) => runLane(lane, BASE0), BATCH)).filter(Boolean)
 } else {
   results = []
   let base = BASE0 // advances ONLY past a lane that VERIFIED (laneAdvancesBase); a gated,
