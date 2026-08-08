@@ -466,9 +466,16 @@ for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
 // GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief})
 // so triage -> research -> impl chains cleanly through the orchestrator (with a review
 // gate at each hop). brief = the implementable spec produced by the research.
+//
+// This fan-out emits ONE lane per issue (never batches same-`group` issues into one
+// lane), so `group` alone is NOT a unique key: two GREEN issues in the same group
+// (e.g. both "ci") would otherwise collide on `key`, and stacked-impl-lanes dispatches
+// `label: 'impl:' + lane.key` — a collision makes two distinct lanes indistinguishable
+// in the progress tree and any label-keyed lookup (issue #72). Suffix with the issue
+// number so `key` stays unique regardless of grouping.
 const green = clean.filter((r) => r.verdict === 'GREEN')
 const green_lanes = green.map((r) => ({
-  key: r.group || `issue-${r.number}`,
+  key: `${r.group || 'issue'}-${r.number}`,
   branch: r.branch || `feat/issue-${r.number}`,
   // issues = ONLY what this lane CLOSES. stacked-impl-lanes emits `Closes #n` for every
   // entry here, so depends_on (must-land-first, not closed-by-this-PR) must NOT enter it

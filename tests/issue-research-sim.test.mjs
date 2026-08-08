@@ -177,6 +177,27 @@ test('GREEN-lane handoff + return contract preserved', async () => {
   assert.ok(result.counts && result.counts.GREEN === 1, 'counts reflect the GREEN verdict')
 })
 
+test('two GREEN issues in the same group never produce duplicate lane keys (issue #72)', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci' }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'one lane per GREEN issue')
+  const keys = result.green_lanes.map((l) => l.key)
+  assert.equal(new Set(keys).size, keys.length, 'lane keys are unique even though both issues share group "ci"')
+  for (const lane of result.green_lanes) {
+    assert.ok(lane.key.startsWith('ci-'), 'key still carries the group for readability')
+  }
+})
+
+test('a lane with no group still gets a stable, unique per-issue key', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), group: '' }),
+  })
+  assert.equal(result.green_lanes[0].key, 'issue-12', 'falls back to issue-<number> when group is empty')
+})
+
 test('the triage SEED is still threaded into the research prompt when provided', async () => {
   const seed = { number: 12, rationale: 'triage said X', research_context: 'look into Y', files: ['z.js'] }
   const { calls } = await runScript({ args: { numbers: [12], triaged: [seed] } })
