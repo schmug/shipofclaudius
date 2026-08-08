@@ -36,6 +36,7 @@ These are not style preferences — `tests/plugin-integrity.test.mjs` fails the 
   - **Exception — process skills.** A skill whose frontmatter declares `workflow: none` is a session-long playbook (no Workflow script) and is exempt from the 1:1 mapping; the integrity test still enforces its frontmatter, forbids `scriptPath` in its body, and requires every `references/<file>` it mentions to exist. Currently: `critic-gated-build`.
 - **Wrapper shape.** Each `SKILL.md` frontmatter must have `name: <name>` matching the workflow and a non-empty `description`, and the body must instruct a `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js", ... })` call referencing **its own** bundled script.
 - **`package.json` `test` script lists each suite explicitly.** A new `tests/<name>-sim.test.mjs` must be appended to the `&&`-chain in the `test` script, or CI never runs it.
+- **Every dispatched `agentType` ships.** A non-built-in `agentType:` in any `.claude/workflows/*.js` (a literal, or the fallback default of an `args.*` override) must be declared by a shipped `.claude/agents/*.md` — matched on its frontmatter `name`, not its filename — and that file must be listed in `plugin.json`'s `agents` key. Built-ins (`Explore`, `Plan`, `general-purpose`) are exempt. `.claude/agents/` is the *project* scope; plugins auto-discover only `agents/` at the plugin root, so **without the manifest key an installer loads nothing** and a dispatch silently resolves to whatever the host happens to have. That is exactly how `security-hardening-reviewer` came to be documented as an active mitigation while shipping nowhere.
 - **No pinned plugin version.** Neither `.claude-plugin/plugin.json` nor `.claude-plugin/marketplace.json` may contain a `version` field. The plugin is delivered by git commit SHA so every push to `main` ships; a pinned-but-unbumped version silently freezes all installers. (See [README.md](README.md) "Updates / versioning".)
 
 ## Workflow authoring patterns
@@ -58,6 +59,7 @@ The full per-workflow security model (and the required read-scoped `gh` token fo
 ## Layout
 
 - `.claude/workflows/*.js` — the workflows (the actual product).
+- `.claude/agents/*.md` — subagents the workflows dispatch by `agentType`. Registered via `plugin.json`'s `agents` key (this path is not auto-discovered for plugins).
 - `skills/<name>/SKILL.md` — plugin wrapper skills, one per workflow.
 - `tests/*-sim.test.mjs` — offline simulators (one per workflow) + `plugin-integrity.test.mjs`; `tests/lib/` holds vendored built-ins-only validators. Tests resolve their target via `new URL('../.claude/workflows/<name>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
 - `.claude-plugin/{plugin,marketplace}.json` — plugin packaging manifests.
