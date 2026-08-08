@@ -93,6 +93,19 @@ async function runScript({ args, fetch, verify, land, cleanup } = {}) {
 const byPrefix = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || '').startsWith(prefix))
 const one = (calls, label) => calls.agents.find((a) => a.opts.label === label)
 
+// Resolves the `meta` literal's own source text out of the raw workflow file, by BOTH anchors.
+const META_START = 'const meta = {'   // matches `export const meta = {` too
+const META_END = /^const A\b/m        // the first top-level binding after the meta literal
+function metaSlice(src) {
+  const startIdx = src.indexOf(META_START)
+  const endMatch = META_END.exec(src)
+  const endIdx = endMatch ? endMatch.index : -1
+  assert.ok(startIdx !== -1, `meta slice start anchor unresolved: ${JSON.stringify(META_START)} not found`)
+  assert.ok(endIdx !== -1, `meta slice end anchor unresolved: ${META_END} did not match`)
+  assert.ok(endIdx > startIdx, `meta slice anchors unresolved in order: end (${endIdx}) does not follow start (${startIdx})`)
+  return src.slice(startIdx, endIdx)
+}
+
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
@@ -164,6 +177,71 @@ test('the land prompt forbids --delete-branch, --admin, and pushing to the base'
   assert.ok(/--admin/.test(l) && /do NOT use --admin|NO --admin/i.test(l), 'no --admin merge')
   assert.ok(/do NOT push to/i.test(l), 'no push to the base/main')
   assert.ok(/--force-with-lease/.test(l), 'force-push uses --force-with-lease')
+})
+
+// The LAND actor's step-5 local GATE-VERIFY is a load-bearing claim: meta.description, the
+// `Land` phase detail, and the README workflow row all advertise "gate-verifies, squash-merges".
+// Every neighbouring hard rule above is pinned; this one was not, so deleting the step left the
+// whole suite green. These tests make the claim falsifiable.
+test('the land prompt GATE-VERIFIES locally before merging: test + typecheck, GREEN with exact counts', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1').prompt
+  const gate = l.split('\n').find((line) => /GATE-VERIFY/i.test(line))
+  assert.ok(gate, 'the land prompt has an explicit GATE-VERIFY step')
+  assert.ok(/\btests?\b/i.test(gate), 'the local gate runs the project test command')
+  assert.ok(/typecheck/i.test(gate), 'the local gate runs the project typecheck command')
+  assert.ok(/GREEN/i.test(gate), 'the gate must be confirmed GREEN')
+  assert.ok(/exact counts?/i.test(gate), 'GREEN is reported with exact counts, never a hand-waved "tests pass"')
+  assert.ok(/local/i.test(gate), 'the gate is a LOCAL run')
+  assert.ok(/NOT CI polling|not.*poll/i.test(gate), 'it is a single local run, not a CI poll (the watchdog ban still holds)')
+})
+
+test('the land prompt forbids merging a RED gate, and gate-verify precedes the irreversible squash-merge', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1').prompt
+  const gate = l.split('\n').find((line) => /GATE-VERIFY/i.test(line))
+  assert.ok(gate, 'the land prompt has an explicit GATE-VERIFY step')
+  assert.ok(/never merge a red gate|do NOT merge a red gate/i.test(gate), 'the gate step itself forbids merging a red gate')
+  const gateAt = l.search(/GATE-VERIFY/i)
+  const mergeAt = l.indexOf('gh pr merge')
+  assert.ok(mergeAt !== -1, 'the land prompt issues the squash-merge')
+  assert.ok(gateAt !== -1 && gateAt < mergeAt, 'the local gate-verify comes BEFORE the irreversible squash-merge')
+})
+
+test('LAND_SCHEMA advertises tests_run so the GREEN gate result is reported back', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1')
+  const tr = l.opts.schema.properties.tests_run
+  assert.ok(tr, 'LAND_SCHEMA carries tests_run')
+  assert.equal(tr.type, 'string', 'tests_run is the command(s) + result as a string')
+  assert.ok(/GREEN/i.test(tr.description || ''), 'its description pins the GREEN gate result')
+  assert.ok(/tests_run/.test(l.prompt), 'the land prompt asks the actor to return tests_run')
+})
+
+// The slice below is only meaningful if BOTH anchors actually resolve. `indexOf` returns -1
+// for a missing anchor and `slice(start, -1)` then silently widens to the whole rest of the
+// file, at which point /gate-verif/i matches this file's own header prose and the assertion
+// stops being about `meta` at all. metaSlice() therefore hard-fails on an unresolved anchor,
+// and the test right below it proves that guard is live.
+test('meta advertises the gate-verify that the land prompt actually implements', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const metaSrc = metaSlice(src)
+  assert.ok(metaSrc.length > 0 && metaSrc.length < src.length, 'the meta slice is a strict subset of the file, not the whole rest of it')
+  assert.ok(!/GATE-VERIFY \(local\)/.test(metaSrc), 'the slice ends before the prompt bodies — it is meta only')
+  assert.ok(/gate-verif/i.test(metaSrc), 'meta advertises a gate-verify (description + the Land phase detail)')
+  const { calls } = await runScript({ args: { prs: [1] } })
+  assert.ok(/GATE-VERIFY/i.test(one(calls, 'land:#1').prompt), 'and the land prompt implements what meta advertises')
+})
+
+test('metaSlice HARD-FAILS on an unresolved anchor instead of silently widening to the whole file', () => {
+  const good = 'const meta = {\n  description: "gate-verify",\n}\n\nconst A = (args)\nconst L = "GATE-VERIFY (local)"\n'
+  assert.equal(metaSlice(good), 'const meta = {\n  description: "gate-verify",\n}\n\n', 'both anchors resolved -> just the meta literal')
+  assert.throws(() => metaSlice(good.replace('const A = (args)', 'const ARGS = (args)')), /anchor/i,
+    'a RENAMED end anchor throws — it must not fall through to slice(start, -1) and swallow the rest of the file')
+  assert.throws(() => metaSlice(good.replace('const meta = {', 'const META = {')), /anchor/i,
+    'a renamed start anchor throws too')
+  assert.throws(() => metaSlice('const A = (args)\nconst meta = {\n}\n'), /anchor/i,
+    'an end anchor that PRECEDES the start throws (an empty slice would pass no assertion honestly)')
 })
 
 // ─────────────────────── cleanup: only after the whole stack lands ───────────────
