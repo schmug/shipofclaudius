@@ -1,4 +1,5 @@
 {
   "name": "shipofclaudius",
-  "description": "Curated dynamic workflows (issue/PR triage, research, stacked impl + merge, and security scans) as run-in-place wrapper skills."
+  "description": "Curated dynamic workflows (issue/PR triage, research, stacked impl + merge, and security scans) as run-in-place wrapper skills.",
+  "agents": ["./.claude/agents/security-hardening-reviewer.md"]
 }

@@ -161,15 +161,119 @@ test('factory.yml: untrusted GitHub context reaches run: blocks only via env', a
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
 })
 
-test('README pins no hardcoded test total (nothing can verify one from inside the suite)', async () => {
-  const md = await read('README.md')
-  // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim
-  // no check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The
-  // contract is "the count only goes UP", which `npm test` prints; README must not restate a number.
-  const hardcoded = md.match(/\*\*\s*\d[\d,]*\s+passing\s*\*\*/i)
-  assert.ok(!hardcoded, `README hardcodes a test total (${hardcoded && hardcoded[0]}) — run \`npm test\` for the live number instead`)
+// A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim no
+// check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The contract
+// is "the count only goes UP", which `npm test` prints; no doc may restate a number.
+//
+// EVERY doc that describes the gate is checked, not just README. #69 unpinned README but left
+// CLAUDE.md telling readers to confirm the count against `e.g. "638 passing"` — a pin pointing at a
+// pin that no longer existed. It survived the very commit that removed its counterpart precisely
+// because this file only ever opened README.md. One doc guarded is not the invariant.
+//
+// The wrapper is not part of the invariant either: the CLAUDE.md pin was QUOTED, not bolded, so the
+// original bold-only pattern read straight past it. Match the number however it is dressed up.
+const assertPinsNoTotal = async (doc) => {
+  const md = await read(doc)
+  const hardcoded = md.match(/\d[\d,]*\s+(?:passing\b|tests?\s+pass)/i)
+  assert.ok(!hardcoded, `${doc} hardcodes a test total (${hardcoded && hardcoded[0]}) — run \`npm test\` for the live number instead`)
   const tally = md.match(/\(\s*\d+(?:\s*\+\s*\d+){5,}\s*\)/)
-  assert.ok(!tally, `README hardcodes a per-suite tally (${tally && tally[0]}) — twenty hand-kept numbers is a drift generator`)
+  assert.ok(!tally, `${doc} hardcodes a per-suite tally (${tally && tally[0]}) — twenty hand-kept numbers is a drift generator`)
+}
+
+test('README pins no hardcoded test total (nothing can verify one from inside the suite)', () =>
+  assertPinsNoTotal('README.md'))
+
+test('CLAUDE.md pins no hardcoded test total either (the pin that outlived #69)', () =>
+  assertPinsNoTotal('CLAUDE.md'))
+
+// ---- dispatched agentTypes must actually ship ----
+// A workflow's `agentType:` is resolved by Claude Code against its agent registry. A name no
+// bundled file defines resolves to nothing the repo controls: on a fresh `claude plugin install`
+// the maintainer's personal ~/.claude/agents/ copy is absent, so `security-hardening-reviewer` --
+// which README's Security model cites twice as an active mitigation, and which fix-finding makes
+// its ENTIRE Verify phase -- silently was not there for anyone but the maintainer (#70).
+
+// Runtime-provided types. Not ours to ship, so exempt.
+const BUILTIN_AGENTS = new Set(['Explore', 'Plan', 'general-purpose'])
+
+// Only `//`-leading lines: workflow prose legitimately discusses "the read-only agentType", and
+// these files use no /* */ blocks. Stripping inline trailing comments would corrupt prompt strings.
+const stripLineComments = (src) =>
+  src.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')
+
+// Identity comes from the frontmatter `name`, NOT the filename -- so a file named correctly but
+// declaring a different `name` still registers under the wrong id and must fail here.
+const shippedAgentNames = async () => {
+  let files = []
+  try {
+    files = (await readdir(new URL('.claude/agents/', ROOT))).filter((f) => f.endsWith('.md'))
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e
+    return new Map()
+  }
+  const named = new Map()
+  for (const f of files) {
+    const md = await read(`.claude/agents/${f}`)
+    const m = md.match(/^---\n[\s\S]*?^name:\s*(\S+)\s*$/m)
+    assert.ok(m, `.claude/agents/${f}: no frontmatter \`name:\` -- it registers under no id`)
+    named.set(m[1], f)
+  }
+  return named
+}
+
+// `agentType: 'literal'` or `agentType: IDENT`. For an IDENT the repo's single shape is an
+// args override with a literal ternary fallback, e.g.
+//   const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && ...) ? A.readonlyAgent.trim() : 'Explore'
+// which is the criterion's "reachable via an args.* override" -- an operator who overrides it owns
+// their own agent, so it is the DEFAULT that this repo has to ship.
+const dispatchedAgentTypes = async () => {
+  const out = []
+  for (const name of await workflowNames()) {
+    const raw = await read(`.claude/workflows/${name}.js`)
+    const src = stripLineComments(raw)
+    for (const m of src.matchAll(/agentType:\s*([^,}\s]+)/g)) {
+      const token = m[1]
+      const lit = token.match(/^['"](.+)['"]$/)
+      if (lit) { out.push({ wf: name, agent: lit[1], via: `literal ${token}` }); continue }
+      const decl = src.split('\n').find((l) => new RegExp(`^\\s*const\\s+${token}\\s*=`).test(l))
+      assert.ok(decl, `${name}: agentType \`${token}\` has no const declaration -- cannot resolve what ships`)
+      assert.ok(/\bA\.|\bargs\./.test(decl),
+        `${name}: agentType \`${token}\` is not an args.* override; only a literal or an override with a shipped default is allowed`)
+      // The ternary's `:` is the last colon on the declaration line; the fallback follows it.
+      const fb = decl.slice(decl.lastIndexOf(':') + 1).match(/['"]([^'"]+)['"]/)
+      assert.ok(fb, `${name}: agentType \`${token}\` has no literal default to fall back to`)
+      out.push({ wf: name, agent: fb[1], via: `${token} default` })
+    }
+  }
+  return out
+}
+
+test('every non-built-in agentType dispatched from a workflow is shipped under .claude/agents/', async () => {
+  const shipped = await shippedAgentNames()
+  const dispatched = await dispatchedAgentTypes()
+  assert.ok(dispatched.length > 0, 'sanity: the scan found agentType dispatches at all')
+  for (const { wf, agent, via } of dispatched) {
+    if (BUILTIN_AGENTS.has(agent)) continue
+    assert.ok(shipped.has(agent),
+      `${wf} dispatches agentType "${agent}" (${via}) but no .claude/agents/*.md declares ` +
+      `\`name: ${agent}\` -- on a fresh plugin install it resolves to nothing this repo controls. ` +
+      `Shipped: [${[...shipped.keys()].join(', ') || 'none'}]`)
+  }
+})
+
+test('.claude/agents/ is registered in plugin.json (it is NOT an auto-discovery path)', async () => {
+  // Plugins auto-discover `agents/` at the PLUGIN ROOT only. `.claude/agents/` is the project
+  // scope -- it covers contributors with this repo checked out, but an installer gets nothing
+  // unless plugin.json names the path explicitly. Shipping the file without this key is decoration.
+  const shipped = await shippedAgentNames()
+  if (shipped.size === 0) return
+  const m = await readJSON('.claude-plugin/plugin.json')
+  const declared = [].concat(m.agents || [])
+  for (const file of shipped.values()) {
+    assert.ok(
+      declared.some((p) => p === './.claude/agents/' || p === './.claude/agents' || p.endsWith(`/${file}`)),
+      `.claude/agents/${file} ships but plugin.json's "agents" does not point at it — installers never load it`)
+  }
 })
 
 test('every workflow has a suite, and every suite is in the package.json test chain', async () => {

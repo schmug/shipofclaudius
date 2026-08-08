@@ -24,7 +24,7 @@ The `.claude/workflows/*.js` scripts use **top-level `return` and `await`** beca
 - **`node --check <file>` reports a bogus `SyntaxError: Illegal return statement`** — that does *not* mean the file is broken. Do not rely on it.
 - The **real parser + logic check is `npm test`.** Each `tests/*-sim.test.mjs` reads the workflow source, strips `export ` off `export const meta`, wraps the body in `new AsyncFunction('args','budget','agent','parallel','pipeline','phase','log','workflow', src)`, and runs it with stubbed runtime globals. A genuine syntax error throws at `AsyncFunction` construction; orchestration logic (dedup precedence, fail-open behavior, layer gating, schema satisfiability, prompt-injection fence shapes) is asserted against the stubs at zero token cost.
 
-After editing a workflow, run `npm test` and confirm the count (README tracks the current total, e.g. "638 passing"). The count only goes UP.
+After editing a workflow, run `npm test`; it must end `0 failing`, and the standing contract is that the count only ever goes **UP** — compare against a run on the base commit, not against a number written down somewhere. No total is pinned in README or here, deliberately: a suite cannot run the suites, so a hardcoded count is a claim no check can enforce, and the last one had drifted by 18 across four terms before anyone noticed. `tests/plugin-integrity.test.mjs` fails the build if a total is pinned back into README **or into this file**, in any wrapper (bolded, quoted, or bare).
 
 **`packages/factory-gate` is not a workflow and has no sim.** It is pure, model-free code, so `tests/factory-gate.test.mjs` is an ordinary unit suite. Because it is imported (not `AsyncFunction`-wrapped), `tests/` must stay a sibling of `packages/` as well as of `.claude/workflows/`. The two factory sims import the real gate to assert across the boundary — if you change `CONDITION_ORDER` or the `fixture_evidence` shape, those sims are what catch the caller drift.
 
@@ -36,6 +36,7 @@ These are not style preferences — `tests/plugin-integrity.test.mjs` fails the 
   - **Exception — process skills.** A skill whose frontmatter declares `workflow: none` is a session-long playbook (no Workflow script) and is exempt from the 1:1 mapping; the integrity test still enforces its frontmatter, forbids `scriptPath` in its body, and requires every `references/<file>` it mentions to exist. Currently: `critic-gated-build`.
 - **Wrapper shape.** Each `SKILL.md` frontmatter must have `name: <name>` matching the workflow and a non-empty `description`, and the body must instruct a `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js", ... })` call referencing **its own** bundled script.
 - **`package.json` `test` script lists each suite explicitly.** A new `tests/<name>-sim.test.mjs` must be appended to the `&&`-chain in the `test` script, or CI never runs it.
+- **Every dispatched `agentType` ships.** A non-built-in `agentType:` in any `.claude/workflows/*.js` (a literal, or the fallback default of an `args.*` override) must be declared by a shipped `.claude/agents/*.md` — matched on its frontmatter `name`, not its filename — and that file must be listed in `plugin.json`'s `agents` key. Built-ins (`Explore`, `Plan`, `general-purpose`) are exempt. `.claude/agents/` is the *project* scope; plugins auto-discover only `agents/` at the plugin root, so **without the manifest key an installer loads nothing** and a dispatch silently resolves to whatever the host happens to have. That is exactly how `security-hardening-reviewer` came to be documented as an active mitigation while shipping nowhere.
 - **No pinned plugin version.** Neither `.claude-plugin/plugin.json` nor `.claude-plugin/marketplace.json` may contain a `version` field. The plugin is delivered by git commit SHA so every push to `main` ships; a pinned-but-unbumped version silently freezes all installers. (See [README.md](README.md) "Updates / versioning".)
 
 ## Workflow authoring patterns
@@ -58,6 +59,7 @@ The full per-workflow security model (and the required read-scoped `gh` token fo
 ## Layout
 
 - `.claude/workflows/*.js` — the workflows (the actual product).
+- `.claude/agents/*.md` — subagents the workflows dispatch by `agentType`. Registered via `plugin.json`'s `agents` key (this path is not auto-discovered for plugins).
 - `skills/<name>/SKILL.md` — plugin wrapper skills, one per workflow.
 - `tests/*-sim.test.mjs` — offline simulators (one per workflow) + `plugin-integrity.test.mjs`; `tests/lib/` holds vendored built-ins-only validators. Tests resolve their target via `new URL('../.claude/workflows/<name>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
 - `.claude-plugin/{plugin,marketplace}.json` — plugin packaging manifests.
