@@ -11,7 +11,7 @@ The authoritative description of every workflow, its arguments, and the security
 ## Commands
 
 ```bash
-npm test                          # run all 14 simulator suites + plugin-integrity (the only gate)
+npm test                          # 17 simulator suites + factory-gate + sarif-validator + plugin-integrity (the only gate)
 node tests/dss-sim.test.mjs       # run one suite directly (each is standalone, exits non-zero on failure)
 ```
 
