@@ -167,6 +167,56 @@ test('missing PR number throws (the PR is required)', async () => {
   await assert.rejects(runScript({ args: {} }), /no PR to review/)
 })
 
+// ==================== DIMENSION KEY NORMALIZATION (issue #74) ====================
+// findings[].dimension is the dimension KEY, so two caller-supplied dimensions that
+// slugify onto the same key would leave a finding un-attributable to the lens that
+// produced it. Same guarantees stacked-impl-lanes' DEFECT_CLASSES normalizer makes
+// (#68) — the two are documented as mirrors, so they must not drift.
+
+test('caller dimensions that slugify to the same key get distinct, deterministic keys', async () => {
+  // All three slugify to 'error-handling'.
+  const { result, calls } = await runScript({
+    args: { number: 1, dimensions: ['error handling', 'error-handling', 'Error Handling'] },
+  })
+  assert.deepEqual(
+    result.dimensions,
+    ['error-handling', 'error-handling-2', 'error-handling-3'],
+    'collisions resolved deterministically by position with a -2/-3 suffix'
+  )
+  const labels = byPrefix(calls, 'review:#').map((a) => a.opts.label)
+  assert.equal(new Set(labels).size, 3, 'each colliding dimension gets its own review-agent label')
+  assert.equal(
+    new Set(result.findings.map((f) => f.dimension)).size, 3,
+    'every surfaced finding attributes back to exactly one dimension'
+  )
+})
+
+test('object-form dimensions are de-duped on key too, and keep their own title/focus', async () => {
+  const { result, calls } = await runScript({
+    args: {
+      number: 1,
+      dimensions: [
+        { key: 'perf', title: 'Performance', focus: 'hot paths' },
+        { key: 'PERF', title: 'Perf (allocations)', focus: 'unbounded allocations' },
+      ],
+    },
+  })
+  assert.deepEqual(result.dimensions, ['perf', 'perf-2'], 'object-form keys are de-duped as well')
+  const prompts = byPrefix(calls, 'review:#').map((a) => a.prompt)
+  assert.ok(
+    prompts.some((p) => p.includes('Perf (allocations)') && p.includes('unbounded allocations')),
+    'the shadowed dimension still reviews under its own title/focus'
+  )
+})
+
+test('the 24-char key cap cannot leave a trailing dash', async () => {
+  // 'performance and latency budgets' slugifies to 'performance-and-latency-budgets',
+  // whose 24th character is the separator — capping before trimming emits a trailing dash.
+  const { result } = await runScript({ args: { number: 1, dimensions: ['performance and latency budgets'] } })
+  assert.deepEqual(result.dimensions, ['performance-and-latency'], 'trailing separator trimmed AFTER the cap')
+  for (const k of result.dimensions) assert.ok(!/^-|-$/.test(k), `key '${k}' has no leading/trailing dash`)
+})
+
 // ============================ DEDUP + CONFIDENCE FILTER ============================
 
 test('the same issue flagged by two dimensions dedups to one finding', async () => {
