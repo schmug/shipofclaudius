@@ -6,6 +6,7 @@
 //   node tests/routine-anti-noise.test.mjs
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { DEFAULTS as GATE_DEFAULTS } from '../packages/factory-gate/src/config.mjs'
 
 const SRC_PATH = new URL('../.claude/workflows/routine-anti-noise.js', import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -102,7 +103,7 @@ test('a skip-label on the target → { skip:true, reason } and no dedupe agent r
 })
 
 test('every default skip-label triggers a skip', async () => {
-  for (const label of ['needs-you', 'needs-decision', 'awaiting-human', 'impl-blocked', 'routine-pause', 'wontfix', 'duplicate']) {
+  for (const label of ['needs-you', 'needs-decision', 'awaiting-human', 'impl-blocked', 'pipeline-paused', 'wontfix', 'duplicate']) {
     const { result } = await runScript({
       args: { number: 1 },
       inspect: { kind: 'issue', state: 'OPEN', labels: ['some-other', label], linkedIssues: [] },
@@ -110,6 +111,34 @@ test('every default skip-label triggers a skip', async () => {
     assert.equal(result.skip, true, `${label} triggers skip`)
     assert.ok(result.reason.includes(label), `${label} named in reason`)
   }
+})
+
+// The pipeline pause kill-switch (issue #82): routine-anti-noise and factory-gate must agree
+// on this ONE label name, or a human applying it in good faith silently does nothing on
+// whichever subsystem missed the memo. `routine-pause` used to be this list's name for it and
+// was dropped rather than kept as an alias, because the `routine-pause` label was deliberately
+// never created — an alias nobody can apply is just another dead gate.
+test('the pipeline-paused kill-switch label triggers a skip', async () => {
+  const { result } = await runScript({
+    args: { number: 50 },
+    inspect: { kind: 'issue', state: 'OPEN', labels: ['pipeline-paused'], linkedIssues: [] },
+  })
+  assert.equal(result.skip, true, 'pipeline-paused triggers skip')
+  assert.ok(result.reason.includes('pipeline-paused'), 'pipeline-paused named in reason')
+})
+
+// Cross-boundary guard (house precedent: tests/factory-land-sim.test.mjs pins its
+// EXPECTED_CONDITIONS against the REAL packages/factory-gate CONDITION_ORDER). The gate's
+// blockingLabels is the enforced side (asserted by tests/factory-gate.test.mjs); this pins
+// routine-anti-noise's DEFAULT_SKIP_LABELS to actually contain the same pause label, so the
+// two subsystems' kill-switch name cannot silently diverge again.
+test('the pause kill-switch label name does not diverge from packages/factory-gate\'s blockingLabels', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const block = src.match(/const DEFAULT_SKIP_LABELS = \[([\s\S]*?)\]/)
+  assert.ok(block, 'DEFAULT_SKIP_LABELS is declared')
+  const listed = [...block[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1])
+  assert.ok(GATE_DEFAULTS.blockingLabels.includes('pipeline-paused'), 'the gate\'s own default names pipeline-paused')
+  assert.ok(listed.includes('pipeline-paused'), 'routine-anti-noise\'s default skip labels name pipeline-paused too')
 })
 
 test('a skip-label on a PR\'s LINKED issue also skips (reason cites the linked issue)', async () => {
