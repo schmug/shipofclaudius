@@ -140,6 +140,197 @@ async function runWaves(items, fn, batchSize = 8) {
   return out
 }
 
+// ── File-overlap wave plan (PURE, MODEL-FREE). ───────────────────────────────────────
+// NO MODEL RUNS HERE: no agent(), no prompt, no tokens. The partition is arithmetic over the
+// `files[]` + `depends_on[]` the assessments already carry, so an injected instruction inside
+// an issue body cannot move a set intersection — the same reason packages/factory-gate is
+// deterministic script code instead of a judgement handed to a model.
+//
+// FAIL-CLOSED: an ABSENT or EMPTY files[] is an UNKNOWN footprint. Unknown is never a proof of
+// disjointness, so such an item gets its OWN SERIAL wave (and mode 'sequential') rather than
+// being silently parallelized. An unorderable dependency (a member of a `depends_on` cycle, or
+// anything transitively downstream of one) is treated the same way.
+//
+// NOTE: unrelated to runWaves() above — that batches AGENT CONCURRENCY; this partitions FILE
+// FOOTPRINTS. This block is copied VERBATIM into issue-triage-fanout.js and
+// issue-research-fanout.js (Workflow scripts cannot `import`; inlining shared helpers is this
+// repo's convention — see the "Spine helpers (inlined…)" comment in stacked-impl-lanes.js).
+// Diff the two files to check for drift. Both copies carry all five entry points even though
+// each fan-out calls only some: triage returns waves[]/overlaps[], research derives each green
+// lane's mode via planMode().
+
+// Canonicalize ONE path. Repeated separators collapse, leading/trailing separators drop, "."
+// segments vanish, ".." resolves against the preceding segment (clamping at the root), so
+// "./a.js", ".//a.js", "./src//a.js", "a.js/", "a/../b.js" and "/a.js" all reduce the way a
+// filesystem would. This USED to strip only a leading "./", which left every other spelling of
+// one file looking like two DIFFERENT files — i.e. two genuinely colliding issues were declared
+// "provably disjoint" and co-scheduled. That is the unsafe direction (see planMode below: a
+// wrong 'parallel' races two writers on one file).
+function normPath(p) {
+  const out = []
+  for (const seg of String(p).trim().split('/')) {
+    if (seg === '' || seg === '.') continue   // repeated / leading / trailing separators, and "."
+    if (seg === '..') { out.pop(); continue } // ".." above the root simply clamps there
+    out.push(seg)
+  }
+  return out.join('/')
+}
+
+// The COMPARISON key: canonical path, lowercased. Case-insensitivity is a deliberate choice in
+// the OVER-detecting direction — on a case-insensitive checkout (macOS/APFS, Windows)
+// "README.md" and "readme.md" ARE one file, so a case-SENSITIVE compare would call a real
+// collision disjoint. A false 'sequential' costs only lost parallelism; a false 'parallel' races
+// two writers and corrupts a lane. The key is used ONLY for comparison — every path we REPORT
+// (overlaps[].files, a lane's files[]) keeps its original spelling.
+function fileKey(p) { return normPath(p).toLowerCase() }
+
+// Normalize a raw files[] into a deduped, sorted array of comparable paths, each in its ORIGINAL
+// spelling (canonicalized, never lowercased). Non-strings, blanks, and entries that name no file
+// at all (".", "/", "./") are dropped; two spellings of one path collapse to the first seen.
+function normFiles(files) {
+  if (!Array.isArray(files)) return []
+  const byKey = new Map()
+  for (const f of files) {
+    if (typeof f !== 'string') continue
+    const t = normPath(f)
+    if (!t) continue
+    const k = t.toLowerCase()
+    if (!byKey.has(k)) byKey.set(k, t)
+  }
+  return [...byKey.values()].sort()
+}
+
+// Normalize a result set into plan items {number, files[], deps[], unknown}. An item without an
+// integer `number` is dropped; a repeated number keeps its first occurrence; a self-referential
+// depends_on is dropped (it would otherwise be unsatisfiable).
+function normPlanItems(items) {
+  const seen = new Set()
+  const out = []
+  for (const r of (Array.isArray(items) ? items : [])) {
+    if (!r || !Number.isInteger(r.number) || seen.has(r.number)) continue
+    seen.add(r.number)
+    const files = normFiles(r.files)
+    const deps = (Array.isArray(r.depends_on) ? r.depends_on : []).filter((d) => Number.isInteger(d) && d !== r.number)
+    out.push({ number: r.number, files, deps, unknown: files.length === 0 })
+  }
+  return out
+}
+
+// The files two normalized footprints share (sorted; empty === provably disjoint). Membership is
+// decided on the case-insensitive fileKey, but the entries returned keep `a`'s original spelling.
+function sharedFiles(a, b) {
+  const other = new Set(b.map(fileKey))
+  return a.filter((f) => other.has(fileKey(f)))
+}
+
+// overlaps: every unordered pair whose footprints intersect, naming the shared files. An
+// unknown-footprint item yields no pair (there is nothing to name) — it is handled by the
+// fail-closed serial rule in planWaves/planMode, never by silence here.
+function computeOverlaps(items) {
+  const norm = normPlanItems(items)
+  const out = []
+  for (let i = 0; i < norm.length; i++) {
+    for (let j = i + 1; j < norm.length; j++) {
+      const files = sharedFiles(norm[i].files, norm[j].files)
+      if (!files.length) continue
+      out.push({ a: Math.min(norm[i].number, norm[j].number), b: Math.max(norm[i].number, norm[j].number), files })
+    }
+  }
+  return out.sort((x, y) => (x.a - y.a) || (x.b - y.b))
+}
+
+// planWaves: a layered partition. Every item inside ONE wave is PROVABLY file-disjoint from
+// every other item in that wave, and a dependent never shares a wave with — or precedes —
+// anything it depends on. An item whose position no order can prove (unknown footprint, or a
+// `depends_on` cycle) gets a wave to ITSELF, flagged serial so nothing may join it later.
+// Returns [{ order, parallel: [numbers] }] with a 1-based order.
+function planWaves(items) {
+  const norm = normPlanItems(items)
+  const byNumber = new Map(norm.map((it) => [it.number, it]))
+  // Dependency depth by bounded relaxation (no recursion; a cycle simply stops converging).
+  const depth = new Map(norm.map((it) => [it.number, 0]))
+  for (let pass = 0; pass < norm.length; pass++) {
+    let changed = false
+    for (const it of norm) {
+      let d = 0
+      for (const dep of it.deps) {
+        if (!byNumber.has(dep)) continue
+        d = Math.max(d, depth.get(dep) + 1)
+      }
+      if (d > depth.get(it.number)) { depth.set(it.number, d); changed = true }
+    }
+    if (!changed) break
+  }
+  // ORDERABLE set, computed UP FRONT by peeling (Kahn): an item settles once every in-set dep of
+  // it has settled. What never settles is every member of a dependency cycle PLUS everything
+  // transitively downstream of one — exactly the items whose position no order can prove.
+  // Deciding this lazily inside the placement loop ("this dep is not placed yet") only catches
+  // whichever cycle member the loop happens to reach FIRST; the rest saw their dep already placed,
+  // were appended to a non-serial wave, and could then be joined by another item.
+  const settled = new Set()
+  for (let pass = 0; pass < norm.length; pass++) {
+    let changed = false
+    for (const it of norm) {
+      if (settled.has(it.number)) continue
+      if (it.deps.every((d) => !byNumber.has(d) || settled.has(d))) { settled.add(it.number); changed = true }
+    }
+    if (!changed) break
+  }
+  // Deterministic placement: shallowest first, then by issue number — so a dependency is always
+  // placed before its dependent, and the same input always yields the same plan.
+  const ordered = [...norm].sort((a, b) => (depth.get(a.number) - depth.get(b.number)) || (a.number - b.number))
+  const waves = []           // [{ items: [], serial: boolean }]
+  const placedAt = new Map() // issue number -> wave index
+  for (const it of ordered) {
+    let earliest = 0
+    const unresolved = !settled.has(it.number) // in a cycle, or downstream of one
+    for (const dep of it.deps) {
+      if (!byNumber.has(dep)) continue    // out-of-set dep: not ours to order
+      if (!placedAt.has(dep)) continue    // unresolved dep: nothing yet to order against
+      earliest = Math.max(earliest, placedAt.get(dep) + 1)
+    }
+    let idx = -1
+    if (!it.unknown && !unresolved) {
+      for (let w = earliest; w < waves.length; w++) {
+        if (waves[w].serial) continue
+        if (waves[w].items.some((o) => sharedFiles(o.files, it.files).length > 0)) continue
+        idx = w
+        break
+      }
+    }
+    if (idx < 0) {
+      // Appending is always >= earliest: every already-placed dep sits at index <= waves.length-1.
+      waves.push({ items: [], serial: it.unknown || unresolved })
+      idx = waves.length - 1
+    }
+    waves[idx].items.push(it)
+    placedAt.set(it.number, idx)
+  }
+  // Every wave is created immediately before an item is pushed into it, so an EMPTY wave is
+  // impossible. Assert that rather than filtering empties away: a silent filter would renumber
+  // `order` and hide whatever bug produced the empty wave.
+  for (const w of waves) {
+    if (!w.items.length) throw new Error('planWaves invariant: a wave was created with no item in it')
+  }
+  return waves.map((w, i) => ({ order: i + 1, parallel: w.items.map((it) => it.number).sort((a, b) => a - b) }))
+}
+
+// planMode: 'parallel' iff this item's footprint is KNOWN and provably disjoint from every OTHER
+// item in the set, with no dependency edge tying it to one of them. Everything else is
+// 'sequential' — the safe direction: a wrong 'sequential' costs wall-clock, a wrong 'parallel'
+// races two writers on one file.
+function planMode(number, items) {
+  const norm = normPlanItems(items)
+  const self = norm.find((it) => it.number === number)
+  if (!self || self.unknown) return 'sequential'
+  for (const other of norm) {
+    if (other.number === self.number) continue
+    if (sharedFiles(self.files, other.files).length > 0) return 'sequential'
+    if (self.deps.includes(other.number) || other.deps.includes(self.number)) return 'sequential'
+  }
+  return 'parallel'
+}
+
 // ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
 // Read-only analysis is expensive (relay→research chain per issue, some web-enabled).
 // Re-running should not re-pay for issues that have not changed since last time. We
@@ -463,9 +654,9 @@ if (missing.length) {
 const counts = {}
 for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
 
-// GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief})
-// so triage -> research -> impl chains cleanly through the orchestrator (with a review
-// gate at each hop). brief = the implementable spec produced by the research.
+// GREEN results, shaped as stacked-impl-lanes lanes ({key,branch,issues,invariant,brief,
+// files,mode}) so triage -> research -> impl chains cleanly through the orchestrator (with a
+// review gate at each hop). brief = the implementable spec produced by the research.
 const green = clean.filter((r) => r.verdict === 'GREEN')
 const green_lanes = green.map((r) => ({
   key: r.group || `issue-${r.number}`,
@@ -478,9 +669,21 @@ const green_lanes = green.map((r) => ({
   brief: r.spec || r.chosen_approach || r.rationale || '',
   // Sequencing hint for the orchestrator only (kept off `issues`): order lanes so deps land first.
   depends_on: (Array.isArray(r.depends_on) ? r.depends_on : []).filter((n) => n !== r.number),
+  // Footprint + execution mode, computed IN SCRIPT CODE (no agent, no prompt — see the
+  // file-overlap helpers above). `files` used to be DROPPED here, so stacked-impl-lanes never
+  // saw the footprint the research had already established and args.mode stayed a human guess.
+  // `files` is the normalized researched footprint — exactly the set `mode` was computed from —
+  // and `mode` is 'parallel' only when this lane is PROVABLY disjoint from every OTHER green
+  // lane; an unknown (absent/empty) footprint, a shared file, or a dependency edge between two
+  // green lanes all fail closed to 'sequential'.
+  files: normFiles(r.files),
+  mode: planMode(r.number, green),
 }))
+const parallelLanes = green_lanes.filter((l) => l.mode === 'parallel').length
 
 log(`Researched ${clean.length}/${NUMBERS.length} (${reused.length} reused from checkpoint): ${JSON.stringify(counts)} | ${green_lanes.length} GREEN lane(s) ready for stacked-impl-lanes`)
+log(`lane plan: ${parallelLanes} parallel / ${green_lanes.length - parallelLanes} sequential — ` +
+  `file-overlap computed in script code, no agent; a lane with no files[] is sequential (fail-closed).`)
 // No-silent-caps coverage line accounting for every requested issue (incl. checkpoint reuse).
 log(`coverage: requested ${NUMBERS.length} / researched ${clean.length} / reused ${reused.length} / missing ${missing.length} (spine v${SPINE_VERSION}).`)
 

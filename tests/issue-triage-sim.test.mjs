@@ -451,6 +451,232 @@ test('the read-checkpoint preserves the existing return contract (additive: reus
   assert.equal(typeof result.checkpointWritten, 'boolean', 'checkpointWritten added')
 })
 
+// ===================== FILE-OVERLAP WAVE PLAN (pure, model-free) =====================
+// waves[] / overlaps[] are computed in SCRIPT code from the files[] + depends_on[] the
+// assessments already carry — no agent(), no prompt, no tokens. The agent-count assertion
+// below is the point: an injected instruction inside an issue body cannot move a set
+// intersection (same reason packages/factory-gate is model-free).
+//
+// FAIL-CLOSED: an absent/empty files[] is an UNKNOWN footprint, never a proof of
+// disjointness — it gets its OWN serial wave rather than being silently parallelized.
+
+// #1 and #2 both touch src/hub.js; #3 is provably disjoint from both.
+const HUB_FILES = { 1: ['src/hub.js', 'src/a.js'], 2: ['src/hub.js'], 3: ['docs/guide.md'] }
+const hubTriage = (n) => ({ ...defaultTriage(n), files: HUB_FILES[n] || [] })
+const waveOf = (result, n) => {
+  assert.ok(Array.isArray(result.waves), 'waves[] is returned')
+  return result.waves.find((w) => Array.isArray(w.parallel) && w.parallel.includes(n))
+}
+
+test('two issues sharing a file never share a wave, while a disjoint third parallelizes', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  assert.ok(Array.isArray(result.waves) && result.waves.length > 0, 'a wave plan is returned')
+  for (const w of result.waves) {
+    assert.ok(!(w.parallel.includes(1) && w.parallel.includes(2)),
+      `#1 and #2 both touch src/hub.js — they must never be in one parallel wave (wave ${w.order}: ${w.parallel})`)
+  }
+  const w1 = waveOf(result, 1)
+  const w2 = waveOf(result, 2)
+  const w3 = waveOf(result, 3)
+  assert.ok(w1 && w2 && w3, 'every assessed issue is placed in exactly one wave')
+  assert.notEqual(w1.order, w2.order, 'the colliding pair is split across waves')
+  assert.equal(w3.order, w1.order, 'the file-disjoint issue DOES parallelize with #1')
+  assert.ok(w1.parallel.includes(1) && w1.parallel.includes(3), 'wave 1 runs #1 and #3 together')
+  // every issue appears exactly once across the whole plan (a partition, not a copy)
+  const flat = result.waves.flatMap((w) => w.parallel)
+  assert.deepEqual(flat.slice().sort(), [1, 2, 3], 'the waves partition the assessed set exactly once each')
+  assert.deepEqual(result.waves.map((w) => w.order), result.waves.map((_, i) => i + 1), 'order is 1-based and contiguous')
+})
+
+test('overlaps[] names every colliding pair and the exact shared files', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  assert.ok(Array.isArray(result.overlaps), 'overlaps[] is returned')
+  assert.equal(result.overlaps.length, 1, 'exactly one colliding pair among the three issues')
+  const o = result.overlaps[0]
+  assert.equal(o.a, 1, 'pair is reported low-number first')
+  assert.equal(o.b, 2)
+  assert.deepEqual(o.files, ['src/hub.js'], 'the shared file is named (not just a boolean collision flag)')
+})
+
+test('the wave plan spawns ZERO agents — agent count is IDENTICAL to the baseline run', async () => {
+  const numbers = [1, 2, 3]
+  // Baseline: the pre-existing fixture (no files[] at all). Planned: colliding footprints.
+  const base = await runScript({ args: { numbers } })
+  const planned = await runScript({ args: { numbers }, triage: hubTriage })
+  assert.equal(planned.calls.agents.length, base.calls.agents.length,
+    'computing waves[]/overlaps[] must not add a single agent call vs the baseline run')
+  // ckpt-load + ckpt-meta + 3x(fetch + triage) + synthesize + ckpt-write = 10
+  assert.equal(base.calls.agents.length, 10, 'the baseline agent budget is 10 for 3 issues')
+  assert.equal(planned.calls.agents.length, 10, 'the wave plan does not move the agent budget')
+  const labels = planned.calls.agents.map((a) => a.opts.label || '')
+  assert.ok(!labels.some((l) => /wave|overlap|partition|plan/i.test(l)),
+    `no wave-planning agent may exist — labels were: ${labels.join(', ')}`)
+  assert.ok(!planned.calls.agents.some((a) => /overlaps\[|waves\[|wave plan/i.test(a.prompt)),
+    'no prompt asks a model to compute the wave plan')
+})
+
+test('an issue with no files[] is serialized into its OWN wave (fail-closed), never parallelized', async () => {
+  // #1 and #2 have disjoint footprints; #3 has an EMPTY files[] and #4 has none at all.
+  const files = { 1: ['a.js'], 2: ['b.js'], 3: [] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 3, 4] },
+    triage: (n) => (n === 4 ? defaultTriage(n) : { ...defaultTriage(n), files: files[n] }),
+  })
+  for (const n of [3, 4]) {
+    const w = waveOf(result, n)
+    assert.ok(w, `#${n} is placed`)
+    assert.deepEqual(w.parallel, [n], `#${n} has an UNKNOWN footprint -> its own serial wave, alone`)
+  }
+  const w1 = waveOf(result, 1)
+  assert.ok(w1.parallel.includes(2), 'the two KNOWN, disjoint footprints still parallelize')
+})
+
+test('depends_on is respected: a dependent lands in a strictly later wave than its dependency', async () => {
+  // #5 depends on #4; their files are disjoint, so ONLY the dependency edge can separate them.
+  const { result } = await runScript({
+    args: { numbers: [4, 5] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: n === 5 ? [4] : [] }),
+  })
+  const w4 = waveOf(result, 4)
+  const w5 = waveOf(result, 5)
+  assert.ok(w4 && w5, 'both issues placed')
+  assert.notEqual(w4.order, w5.order, 'a dependent must not share a wave with what it depends on')
+  assert.ok(w5.order > w4.order, 'the dependent must not precede its dependency')
+})
+
+test('the wave plan is additive: every pre-existing return key is still present', async () => {
+  const { result } = await runScript({ args: { numbers: [1, 2, 3] }, triage: hubTriage })
+  for (const k of ['triaged', 'counts', 'total', 'missing', 'roadmap', 'reused', 'checkpointWritten', 'spineVersion']) {
+    assert.ok(k in result, `pre-existing key '${k}' preserved`)
+  }
+  assert.ok(Array.isArray(result.waves), 'waves[] added')
+  assert.ok(Array.isArray(result.overlaps), 'overlaps[] added')
+  assert.equal(result.triaged.length, 3, 'the triaged payload is unchanged')
+})
+
+// ---------------- PATH-KEY NORMALIZATION (the collision key must be canonical) ---------------
+// Every pair below is ONE file written two ways. A normalizer that only strips a leading "./"
+// leaves them DISTINCT, so two issues that genuinely collide are declared "provably disjoint"
+// and land in the SAME parallel wave — the unsafe direction (two writers racing one file).
+// CASE is compared case-INSENSITIVELY on purpose: on a case-insensitive checkout (macOS/APFS)
+// README.md and readme.md ARE the same file. Over-detecting a collision costs only lost
+// parallelism; missing one corrupts a lane. The last column is the spelling that must be
+// REPORTED in overlaps[] — the original (canonicalized) text, never a lowercased match key.
+const SAME_FILE_SPELLINGS = [
+  ['./a.js', 'a.js', 'a.js'],
+  ['.//a.js', 'a.js', 'a.js'],
+  ['././a.js', 'a.js', 'a.js'],
+  ['./src//a.js', 'src/a.js', 'src/a.js'],
+  ['a.js/', 'a.js', 'a.js'],
+  ['a/../b.js', 'b.js', 'b.js'],
+  ['src/./a.js', 'src/a.js', 'src/a.js'],
+  ['/a.js', 'a.js', 'a.js'],
+  ['  a.js  ', 'a.js', 'a.js'],
+  ['README.md', 'readme.md', 'README.md'],
+  ['src/Hub.js', 'SRC/hub.js', 'src/Hub.js'],
+]
+
+test('two spellings of the SAME path collide: never co-waved, and named in overlaps[] verbatim', async () => {
+  for (const [spellA, spellB, reported] of SAME_FILE_SPELLINGS) {
+    const { result } = await runScript({
+      args: { numbers: [1, 2] },
+      triage: (n) => ({ ...defaultTriage(n), files: [n === 1 ? spellA : spellB] }),
+    })
+    const w1 = waveOf(result, 1)
+    const w2 = waveOf(result, 2)
+    assert.ok(w1 && w2, `both issues placed for '${spellA}' vs '${spellB}'`)
+    assert.notEqual(w1.order, w2.order,
+      `'${spellA}' and '${spellB}' are the SAME file — they must NEVER share a parallel wave`)
+    assert.equal(result.overlaps.length, 1,
+      `'${spellA}' vs '${spellB}' must be reported as a collision, got ${JSON.stringify(result.overlaps)}`)
+    assert.deepEqual(result.overlaps[0].files, [reported],
+      `'${spellA}' vs '${spellB}': overlaps names the ORIGINAL spelling (canonicalized, never lowercased)`)
+  }
+})
+
+test('normalization does not OVER-collapse: genuinely distinct paths still parallelize', async () => {
+  const DISTINCT = [
+    ['src/a.js', 'src/b.js'],
+    ['a/b.js', 'ab.js'],
+    ['a/../b.js', 'a/b.js'],
+    ['src/a.js', 'src/a.js.bak'],
+    ['a.js', 'b/a.js'],
+  ]
+  for (const [spellA, spellB] of DISTINCT) {
+    const { result } = await runScript({
+      args: { numbers: [1, 2] },
+      triage: (n) => ({ ...defaultTriage(n), files: [n === 1 ? spellA : spellB] }),
+    })
+    assert.deepEqual(result.overlaps, [],
+      `'${spellA}' and '${spellB}' are DIFFERENT files — no collision may be reported`)
+    assert.equal(waveOf(result, 1).order, waveOf(result, 2).order,
+      `'${spellA}' and '${spellB}' are disjoint — they must still parallelize`)
+  }
+})
+
+test('a footprint spelled two ways within ONE issue dedupes to a single canonical entry', async () => {
+  const { result } = await runScript({
+    args: { numbers: [1, 2] },
+    triage: (n) => ({
+      ...defaultTriage(n),
+      files: n === 1 ? ['./src//a.js', 'src/a.js', 'SRC/A.JS', 'src/a.js/'] : ['src/a.js'],
+    }),
+  })
+  assert.equal(result.overlaps.length, 1, 'one colliding pair')
+  assert.deepEqual(result.overlaps[0].files, ['src/a.js'],
+    'the four spellings are ONE file — the shared-file list must not repeat it')
+})
+
+// ---------------- depends_on CYCLES (fail-closed: no order can be proven) ---------------
+// An unorderable dependency is treated exactly like an unknown footprint: its own SERIAL
+// wave, alone. That must hold for EVERY member of the cycle (and everything downstream of
+// one), not just whichever member the placement loop happens to reach first.
+
+test('every member of a depends_on cycle — and everything downstream — gets its OWN serial wave', async () => {
+  // #1 <-> #2 is a cycle; #3 depends on #1 (downstream of the cycle). All files disjoint,
+  // so ONLY the unorderable-dependency rule can keep these three apart.
+  const deps = { 1: [2], 2: [1], 3: [1] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 3] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: deps[n] }),
+  })
+  for (const n of [1, 2, 3]) {
+    const w = waveOf(result, n)
+    assert.ok(w, `#${n} is placed`)
+    assert.deepEqual(w.parallel, [n],
+      `#${n}'s order cannot be proven (cycle or downstream of one) -> its own serial wave, ALONE`)
+  }
+  const flat = result.waves.flatMap((w) => w.parallel)
+  assert.deepEqual(flat.slice().sort(), [1, 2, 3], 'still a partition: each issue placed exactly once')
+})
+
+test('two independent depends_on cycles never merge into one wave', async () => {
+  // #1<->#2 and #5<->#6, all four footprints disjoint. Placement order interleaves the two
+  // cycles, so a rule that only flags the FIRST member reached lets the two later members
+  // land together in a non-serial wave.
+  const deps = { 1: [2], 2: [1], 5: [6], 6: [5] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 5, 6] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: deps[n] }),
+  })
+  for (const n of [1, 2, 5, 6]) {
+    assert.deepEqual(waveOf(result, n).parallel, [n],
+      `#${n} is in an unorderable cycle -> its own serial wave, never sharing with another cycle member`)
+  }
+  assert.equal(result.waves.length, 4, 'four unorderable items -> four serial waves')
+})
+
+test('an out-of-set depends_on is NOT a cycle and still parallelizes', async () => {
+  // #1 and #2 depend on #99, which was never triaged. That edge is not ours to order and
+  // must not be mistaken for an unresolvable one.
+  const { result } = await runScript({
+    args: { numbers: [1, 2] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: [99] }),
+  })
+  assert.equal(waveOf(result, 1).order, waveOf(result, 2).order,
+    'an out-of-set dependency leaves both footprints provably disjoint -> one parallel wave')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
