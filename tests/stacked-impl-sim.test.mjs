@@ -887,6 +887,92 @@ test('L3-F4: the default (unset) path logs no warning', async () => {
   assert.equal(byPrefix(calls, 'adversarial:').length, 1, 'default is still opened')
 })
 
+// ============ CROSS-WORKFLOW CONTRACT: issue-research-fanout green_lanes -> args.lanes ============
+// laneModeOf above consumes a per-lane `mode`; issue-research-fanout produces one. Nothing used to
+// assert the two agree, so either side could rename the field or change its value domain with both
+// suites green. The other direction is pinned in tests/issue-research-sim.test.mjs (real lanes ->
+// the real laneModeOf); this end is the whole handoff: the REAL producer runs offline and its REAL
+// green_lanes go into args.lanes VERBATIM — no mapping, no hand-written lane fixture.
+
+const RESEARCH_SRC_PATH = new URL('../.claude/workflows/issue-research-fanout.js', import.meta.url)
+
+// Run the REAL issue-research-fanout with stubbed runtime globals and return its green_lanes.
+// Only the stubs that workflow's own labels demand (checkpoint read/meta/write, the issue relay,
+// the research agent) — everything shaping a lane is the producer's own script code.
+async function realGreenLanes({ numbers, research }) {
+  const src = (await readFile(RESEARCH_SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
+  const agent = async (prompt, opts = {}) => {
+    const label = opts.label || ''
+    if (label === 'ckpt-load') return { raw: '', path: '/home/u/.claude/workflows/state/o-r-issue-research-fanout.json' }
+    if (label === 'ckpt-meta') {
+      const m = prompt.match(/numbers — ([0-9,\s]+) —/)
+      const nums = m ? m[1].split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : []
+      return { items: nums.map((n) => ({ number: n, updatedAt: '2026-06-20T00:00:00Z' })) }
+    }
+    if (label === 'ckpt-write') return { written: true }
+    if (label.startsWith('gather')) return { numbers: [] }
+    if (label.startsWith('fetch:#')) {
+      return { nonce: `nonce-${label.slice('fetch:#'.length)}-cafef00d`, raw: '{"title":"t","body":"b","labels":[],"comments":[]}' }
+    }
+    if (label.startsWith('research:#')) return research(Number(label.slice('research:#'.length)))
+    throw new Error('unexpected producer agent label: ' + label)
+  }
+  const parallel = (thunks) => Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
+  const out = await fn({ numbers }, undefined, agent, parallel, null, () => {}, () => {}, null)
+  return out.green_lanes
+}
+
+// A GREEN research assessment, shaped the way the producer's own schema describes it.
+const greenResearch = (n, files) => ({
+  number: n, title: `Research issue ${n}`, verdict: 'GREEN', rationale: 'r', confidence: 'high',
+  research_comment: 'findings', spec: `build ${n}`, chosen_approach: 'use lib Y',
+  group: `lane-${n}`, branch: `feat/issue-${n}`, files, complexity: 'small', invariant: false,
+})
+
+// #5 and #6 collide on src/hub.js -> both sequential; #7 is disjoint -> parallel. Both halves of
+// the value domain must be present or a rename could hide behind whichever global is in force.
+const handoffLanes = () => realGreenLanes({
+  numbers: [5, 6, 7],
+  research: (n) => greenResearch(n, n === 7 ? ['src/solo.js'] : ['src/hub.js', `src/f${n}.js`]),
+})
+
+test('CONTRACT: REAL green_lanes from issue-research-fanout drive the stack with no field mapping', async () => {
+  const lanes = await handoffLanes()
+  assert.deepEqual(lanes.map((l) => l.key), ['lane-5', 'lane-6', 'lane-7'], 'the producer shaped three lanes')
+
+  // Handed over VERBATIM, and args.mode is deliberately LEFT UNSET (global default 'parallel'):
+  // only a correctly-named, correctly-valued per-lane `mode` can make the first two stack.
+  const { calls, result } = await runScript({ args: { lanes } })
+  assert.equal(implBase(calls, 'lane-5'), 'main', 'the first sequential lane branches off the original base')
+  assert.equal(implBase(calls, 'lane-6'), 'feat/issue-5',
+    `lane-6 was handed over as ${JSON.stringify(lanes[1].mode)} and must stack on lane-5 — a renamed field or a renamed value inherits the global 'parallel' instead and leaves it on main`)
+  assert.equal(implBase(calls, 'lane-7'), 'main', 'the provably disjoint lane runs parallel off the original base')
+  assert.deepEqual(result.results.map((r) => r.mode), lanes.map((l) => l.mode),
+    'every RESOLVED mode equals the mode the producer declared for that lane')
+  for (const l of lanes) {
+    assert.ok(['parallel', 'sequential'].includes(l.mode),
+      `lane '${l.key}' arrived with mode ${JSON.stringify(l.mode)}, outside the 'parallel' | 'sequential' domain laneModeOf accepts`)
+  }
+  // Pinned AFTER the behaviour: a fixture producing only one mode could not tell "honoured" from
+  // "happened to match the global".
+  assert.deepEqual([...new Set(lanes.map((l) => l.mode))].sort(), ['parallel', 'sequential'],
+    "the producer's own plan must exercise BOTH modes")
+})
+
+test('CONTRACT: the handoff mode stays OPTIONAL — stripping it falls back to the global args.mode', async () => {
+  // Proves both that the contract is an opt-in (an older producer payload still runs) and that the
+  // test above has real discriminating power: without `mode`, lane-6 does NOT stack under a global
+  // parallel — which is exactly what a renamed field would look like.
+  const stripped = (await handoffLanes()).map(({ mode, ...rest }) => rest)
+  const par = await runScript({ args: { lanes: stripped } })
+  assert.equal(implBase(par.calls, 'lane-6'), 'main', 'an undeclared lane inherits the global parallel and does not stack')
+  const seq = await runScript({ args: { mode: 'sequential', lanes: stripped } })
+  assert.equal(implBase(seq.calls, 'lane-6'), 'feat/issue-5', 'an undeclared lane inherits a global sequential and stacks')
+  assert.deepEqual(seq.result.results.map((r) => r.mode), ['sequential', 'sequential', 'sequential'],
+    'every lane reports the inherited global mode')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

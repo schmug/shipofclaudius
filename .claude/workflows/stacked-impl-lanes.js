@@ -446,11 +446,13 @@ if (!FRESH) {
 // wave. A lane may now declare its OWN `mode`, and any lane that declares none (or declares
 // garbage) falls back to the global args.mode, so an all-global run behaves exactly as before.
 //
-// This is a consumer-side OPT-IN, not a contract with any producer. The `green_lanes` payload
-// issue-research-fanout emits today is {key,branch,issues,invariant,brief,depends_on} — no
-// `mode` — so every lane it hands over inherits args.mode. If a wave-planning producer starts
-// emitting a per-lane `mode`, it will be honoured here without a change; nothing asserts that
-// it does, in either direction.
+// The mode stays OPTIONAL — any producer that emits no `mode` still inherits args.mode — but it
+// is no longer unasserted. issue-research-fanout's `green_lanes` payload now carries a computed
+// `mode` alongside {key,branch,issues,invariant,brief,depends_on,files}, and the handoff is
+// pinned from BOTH ends: tests/stacked-impl-sim.test.mjs runs the real producer and feeds its
+// real green_lanes into args.lanes verbatim, and tests/issue-research-sim.test.mjs slices THIS
+// function out and resolves the real lanes through it. Renaming the field or changing the
+// accepted values on either side fails both suites.
 function laneModeOf(l) {
   return (l && (l.mode === 'sequential' || l.mode === 'parallel')) ? l.mode : MODE
 }
