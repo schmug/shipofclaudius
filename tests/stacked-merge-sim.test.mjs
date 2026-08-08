@@ -93,6 +93,19 @@ async function runScript({ args, fetch, verify, land, cleanup } = {}) {
 const byPrefix = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || '').startsWith(prefix))
 const one = (calls, label) => calls.agents.find((a) => a.opts.label === label)
 
+// Resolves the `meta` literal's own source text out of the raw workflow file, by BOTH anchors.
+const META_START = 'const meta = {'   // matches `export const meta = {` too
+const META_END = /^const A\b/m        // the first top-level binding after the meta literal
+function metaSlice(src) {
+  const startIdx = src.indexOf(META_START)
+  const endMatch = META_END.exec(src)
+  const endIdx = endMatch ? endMatch.index : -1
+  assert.ok(startIdx !== -1, `meta slice start anchor unresolved: ${JSON.stringify(META_START)} not found`)
+  assert.ok(endIdx !== -1, `meta slice end anchor unresolved: ${META_END} did not match`)
+  assert.ok(endIdx > startIdx, `meta slice anchors unresolved in order: end (${endIdx}) does not follow start (${startIdx})`)
+  return src.slice(startIdx, endIdx)
+}
+
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
@@ -205,12 +218,30 @@ test('LAND_SCHEMA advertises tests_run so the GREEN gate result is reported back
   assert.ok(/tests_run/.test(l.prompt), 'the land prompt asks the actor to return tests_run')
 })
 
-test('the gate-verify that meta (and the README) advertise is actually IN the land prompt', async () => {
+// The slice below is only meaningful if BOTH anchors actually resolve. `indexOf` returns -1
+// for a missing anchor and `slice(start, -1)` then silently widens to the whole rest of the
+// file, at which point /gate-verif/i matches this file's own header prose and the assertion
+// stops being about `meta` at all. metaSlice() therefore hard-fails on an unresolved anchor,
+// and the test right below it proves that guard is live.
+test('meta advertises the gate-verify that the land prompt actually implements', async () => {
   const src = await readFile(SRC_PATH, 'utf8')
-  const metaSrc = src.slice(src.indexOf('const meta = {'), src.indexOf('const A = ('))
+  const metaSrc = metaSlice(src)
+  assert.ok(metaSrc.length > 0 && metaSrc.length < src.length, 'the meta slice is a strict subset of the file, not the whole rest of it')
+  assert.ok(!/GATE-VERIFY \(local\)/.test(metaSrc), 'the slice ends before the prompt bodies — it is meta only')
   assert.ok(/gate-verif/i.test(metaSrc), 'meta advertises a gate-verify (description + the Land phase detail)')
   const { calls } = await runScript({ args: { prs: [1] } })
   assert.ok(/GATE-VERIFY/i.test(one(calls, 'land:#1').prompt), 'and the land prompt implements what meta advertises')
+})
+
+test('metaSlice HARD-FAILS on an unresolved anchor instead of silently widening to the whole file', () => {
+  const good = 'const meta = {\n  description: "gate-verify",\n}\n\nconst A = (args)\nconst L = "GATE-VERIFY (local)"\n'
+  assert.equal(metaSlice(good), 'const meta = {\n  description: "gate-verify",\n}\n\n', 'both anchors resolved -> just the meta literal')
+  assert.throws(() => metaSlice(good.replace('const A = (args)', 'const ARGS = (args)')), /anchor/i,
+    'a RENAMED end anchor throws — it must not fall through to slice(start, -1) and swallow the rest of the file')
+  assert.throws(() => metaSlice(good.replace('const meta = {', 'const META = {')), /anchor/i,
+    'a renamed start anchor throws too')
+  assert.throws(() => metaSlice('const A = (args)\nconst meta = {\n}\n'), /anchor/i,
+    'an end anchor that PRECEDES the start throws (an empty slice would pass no assertion honestly)')
 })
 
 // ─────────────────────── cleanup: only after the whole stack lands ───────────────
