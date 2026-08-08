@@ -166,6 +166,53 @@ test('the land prompt forbids --delete-branch, --admin, and pushing to the base'
   assert.ok(/--force-with-lease/.test(l), 'force-push uses --force-with-lease')
 })
 
+// The LAND actor's step-5 local GATE-VERIFY is a load-bearing claim: meta.description, the
+// `Land` phase detail, and the README workflow row all advertise "gate-verifies, squash-merges".
+// Every neighbouring hard rule above is pinned; this one was not, so deleting the step left the
+// whole suite green. These tests make the claim falsifiable.
+test('the land prompt GATE-VERIFIES locally before merging: test + typecheck, GREEN with exact counts', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1').prompt
+  const gate = l.split('\n').find((line) => /GATE-VERIFY/i.test(line))
+  assert.ok(gate, 'the land prompt has an explicit GATE-VERIFY step')
+  assert.ok(/\btests?\b/i.test(gate), 'the local gate runs the project test command')
+  assert.ok(/typecheck/i.test(gate), 'the local gate runs the project typecheck command')
+  assert.ok(/GREEN/i.test(gate), 'the gate must be confirmed GREEN')
+  assert.ok(/exact counts?/i.test(gate), 'GREEN is reported with exact counts, never a hand-waved "tests pass"')
+  assert.ok(/local/i.test(gate), 'the gate is a LOCAL run')
+  assert.ok(/NOT CI polling|not.*poll/i.test(gate), 'it is a single local run, not a CI poll (the watchdog ban still holds)')
+})
+
+test('the land prompt forbids merging a RED gate, and gate-verify precedes the irreversible squash-merge', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1').prompt
+  const gate = l.split('\n').find((line) => /GATE-VERIFY/i.test(line))
+  assert.ok(gate, 'the land prompt has an explicit GATE-VERIFY step')
+  assert.ok(/never merge a red gate|do NOT merge a red gate/i.test(gate), 'the gate step itself forbids merging a red gate')
+  const gateAt = l.search(/GATE-VERIFY/i)
+  const mergeAt = l.indexOf('gh pr merge')
+  assert.ok(mergeAt !== -1, 'the land prompt issues the squash-merge')
+  assert.ok(gateAt !== -1 && gateAt < mergeAt, 'the local gate-verify comes BEFORE the irreversible squash-merge')
+})
+
+test('LAND_SCHEMA advertises tests_run so the GREEN gate result is reported back', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1')
+  const tr = l.opts.schema.properties.tests_run
+  assert.ok(tr, 'LAND_SCHEMA carries tests_run')
+  assert.equal(tr.type, 'string', 'tests_run is the command(s) + result as a string')
+  assert.ok(/GREEN/i.test(tr.description || ''), 'its description pins the GREEN gate result')
+  assert.ok(/tests_run/.test(l.prompt), 'the land prompt asks the actor to return tests_run')
+})
+
+test('the gate-verify that meta (and the README) advertise is actually IN the land prompt', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const metaSrc = src.slice(src.indexOf('const meta = {'), src.indexOf('const A = ('))
+  assert.ok(/gate-verif/i.test(metaSrc), 'meta advertises a gate-verify (description + the Land phase detail)')
+  const { calls } = await runScript({ args: { prs: [1] } })
+  assert.ok(/GATE-VERIFY/i.test(one(calls, 'land:#1').prompt), 'and the land prompt implements what meta advertises')
+})
+
 // ─────────────────────── cleanup: only after the whole stack lands ───────────────
 test('branches are pruned ONLY after the whole stack lands, and only then', async () => {
   const { result, calls } = await runScript({ args: { prs: [{ pr: 1, branch: 'feat/a' }, { pr: 2, branch: 'feat/b' }] } })
