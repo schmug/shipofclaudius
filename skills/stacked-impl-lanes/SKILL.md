@@ -11,6 +11,10 @@ Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/stacked-impl-lan
 
 Fill `args` from the user's request. Common args: `lanes` (required), `mode`, `base`, `repo`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/stacked-impl-lanes.js`, or the repo README "Arguments" table. WRITES — opens PRs; needs write scope. Do NOT run under a read-only token; see the workflow header for its safety gates.
 
+### Mixed wave plans
+
+`mode` (`parallel` | `sequential`) is the **global default**. A lane may carry its own `mode` — the same field `issue-research-fanout` puts on its `green_lanes` — which wins over the global one. So a single run executes a mixed plan: the `sequential` lanes stack (each branching off the prior verified sequential lane), while the `parallel` lanes branch off the original `base` and run in bounded waves. Lanes that declare no `mode` inherit the global one, so an all-global run behaves exactly as before.
+
 ### Verification gates
 
 Each opened lane is critiqued before it is cleared. A lane that any critic gates is sorted into `gated[]` **and** is barred from becoming the branch base that dependent lanes stack onto — in `sequential` mode the base only advances past a lane that actually verified, so an unreviewed lane never becomes the foundation the rest of the stack is built and reviewed against. A `BLOCKED` lane still does not break the chain: the base simply stays where it was and the next lane falls back to the last verified base.

@@ -524,6 +524,95 @@ test('N7: sequential mode is unaffected — strictly one lane at a time, no wave
   assert.equal(result.prs_opened, 9, 'all lanes still run')
 })
 
+// ===================== N8: PER-LANE mode gives the wave plan a consumer =====================
+// `mode` was a single GLOBAL flag, so a wave plan that says "lanes 1-3 in parallel, lane 4
+// stacked on lane 2" was advisory data a human had to hand-execute one run per wave. A lane
+// may now declare its own `mode` (the field issue-research-fanout puts on green_lanes),
+// falling back to the global args.mode. Sequential lanes stack; parallel lanes branch off
+// the ORIGINAL base.
+
+test('N8: a mixed lane set stacks the sequential lanes and branches the parallel ones off the original base', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'sequential' }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], mode: 'parallel' }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7], mode: 'sequential' }),
+  ]
+  const { calls, result } = await runScript({ args: { mode: 'sequential', lanes } })
+  assert.equal(implBase(calls, 'a'), 'main', 'the first sequential lane branches off the original base')
+  assert.equal(implBase(calls, 'c'), 'feat/a', 'the next sequential lane stacks on the prior VERIFIED sequential lane')
+  assert.equal(implBase(calls, 'b'), 'main', 'the parallel lane branches off the ORIGINAL base, never the stack')
+  assert.equal(result.prs_opened, 3, 'every lane still runs')
+})
+
+test('N8: a lane with no mode falls back to the global args.mode (sequential)', async () => {
+  const { calls } = await runScript({ args: { mode: 'sequential', lanes: seqLanes() } })
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'undeclared lanes inherit the global sequential mode and stack')
+})
+
+test('N8: a lane with no mode falls back to the global args.mode (parallel)', async () => {
+  const { calls } = await runScript({ args: { lanes: seqLanes() } })
+  assert.equal(implBase(calls, 'a'), 'main')
+  assert.equal(implBase(calls, 'b'), 'main', 'undeclared lanes inherit the global parallel mode and do not stack')
+})
+
+test('N8: a lane may declare sequential under a global parallel run', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'sequential' }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], mode: 'sequential' }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+  ]
+  const { calls } = await runScript({ args: { lanes } })
+  assert.equal(implBase(calls, 'a'), 'main', 'first of the declared stack')
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'the declared stack still stacks under a global parallel run')
+  assert.equal(implBase(calls, 'c'), 'main', 'the undeclared lane inherits global parallel')
+})
+
+test('N8: an unrecognized per-lane mode falls back to the global mode', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'wat' }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], mode: null }),
+  ]
+  const { calls } = await runScript({ args: { mode: 'sequential', lanes } })
+  assert.equal(implBase(calls, 'b'), 'feat/a', 'garbage lane modes do not silently un-stack the run')
+})
+
+test("N8: N5's base gate still applies to a per-lane declared stack", async () => {
+  const lanes = () => [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'sequential', invariant: true }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], mode: 'parallel' }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7], mode: 'sequential' }),
+  ]
+  // CONTROL: with the review clean, the declared stack really does form under global parallel.
+  const ok = await runScript({ args: { mode: 'parallel', lanes: lanes() } })
+  assert.equal(implBase(ok.calls, 'c'), 'feat/a', 'control: a verified declared-sequential lane IS the base')
+  // GATED: the same stack, with lane a's security review requesting changes.
+  const rc = await runScript({ args: { mode: 'parallel', lanes: lanes() }, review: () => 'REQUEST_CHANGES — no.' })
+  assert.equal(implBase(rc.calls, 'c'), 'main', 'c does not stack onto the un-signed-off sequential lane a')
+  assert.equal(implBase(rc.calls, 'b'), 'main', 'the parallel lane is off the original base regardless')
+})
+
+test('N8: results stay in the declared lane order, and each carries its resolved mode', async () => {
+  const lanes = [
+    lane({ key: 'a', branch: 'feat/a', issues: [5], mode: 'parallel' }),
+    lane({ key: 'b', branch: 'feat/b', issues: [6], mode: 'sequential' }),
+    lane({ key: 'c', branch: 'feat/c', issues: [7] }),
+  ]
+  const { result } = await runScript({ args: { mode: 'sequential', lanes } })
+  assert.deepEqual(result.results.map((r) => r.lane), ['a', 'b', 'c'], 'results follow the declared lane order')
+  assert.deepEqual(result.results.map((r) => r.mode), ['parallel', 'sequential', 'sequential'], 'each result carries its RESOLVED mode')
+  assert.equal(result.mode, 'sequential', 'the top-level mode still reports the GLOBAL default (additive, unchanged)')
+})
+
+test('N8: the parallel half of a mixed run is still wave-bounded', async () => {
+  const lanes = [
+    ...manyLanes(9).map((l) => ({ ...l, mode: 'parallel' })),
+    lane({ key: 'z', branch: 'feat/z', issues: [200], mode: 'sequential' }),
+  ]
+  const { result, calls } = await runScript({ args: { lanes } })
+  assert.ok(calls.peakImpl <= 4, `mixed runs still respect the wave cap, saw ${calls.peakImpl}`)
+  assert.equal(result.prs_opened, 10, 'all ten lanes run')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

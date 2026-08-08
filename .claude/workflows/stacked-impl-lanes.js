@@ -20,9 +20,13 @@
 //                    the next lane falls back to the last verified base and the
 //                    chain is never broken.
 //
+// args.mode is the GLOBAL default; a lane may override it with its OWN `mode` (the field
+// issue-research-fanout puts on its green_lanes), so ONE run can execute a mixed wave plan —
+// the sequential lanes stack while the parallel ones branch off the original base.
+//
 // Run:  Workflow({ scriptPath: "~/.claude/workflows/stacked-impl-lanes.js",
 //                  args: { mode: "sequential", base: "main", lanes: [...] } })
-//   lane = { key, branch, issues:[...], invariant:bool, brief:"..." }
+//   lane = { key, branch, issues:[...], invariant:bool, brief:"...", mode?:"parallel"|"sequential" }
 //
 // HARD RULES baked into every agent prompt (learned the hard way on a large
 // multi-lane run): no advisor calls, no WebFetch/WebSearch, no CI polling
@@ -362,15 +366,25 @@ if (!FRESH) {
   if (skipN) log(`Idempotency: ${skipN} lane(s) already have an open PR — skipping (no duplicate writes). Pass args.fresh:true to force re-implement.`)
 }
 
-async function runLane(lane, base) {
+// ── Per-lane mode (the wave plan's consumer). ────────────────────────────────────────────
+// `mode` used to be a single GLOBAL flag, so a wave plan that says "these three in parallel,
+// this one stacked on that one" was advisory data a human had to hand-execute, one run per
+// wave. A lane may now declare its OWN `mode` — exactly the field issue-research-fanout puts
+// on its `green_lanes` — and any lane that declares none (or declares garbage) falls back to
+// the global args.mode, so an all-global run behaves exactly as it did before.
+function laneModeOf(l) {
+  return (l && (l.mode === 'sequential' || l.mode === 'parallel')) ? l.mode : MODE
+}
+
+async function runLane(lane, base, laneMode) {
   // Idempotent skip: this lane's branch already has an open PR — do NOT re-implement it.
   const exists = preexisting[lane.branch]
   if (exists) {
     log(`${lane.key}: open PR already exists (${exists.pr_url || lane.branch}) — skipped (idempotent).`)
     return {
-      lane: lane.key, issues: lane.issues,
+      lane: lane.key, issues: lane.issues, mode: laneMode,
       impl: { key: lane.key, issues: Array.isArray(lane.issues) ? lane.issues : [], status: 'PR_EXISTS', pr_url: exists.pr_url || '', branch: lane.branch, base },
-      review: null, doc: null, confidence: 1, autonomy: 'skipped_existing',
+      review: null, doc: null, adv: null, confidence: 1, autonomy: 'skipped_existing',
     }
   }
 
@@ -420,7 +434,7 @@ async function runLane(lane, base) {
   const docDrift = !!(doc && doc.verdict === 'DOCS_DRIFT')
   const advFail = !!(adv && adv.verdict === 'FAIL')
   const autonomy = (impl && impl.status === 'PR_OPENED' && confidence >= T && !docDrift && !advFail) ? 'auto_execute' : 'gated'
-  return { lane: lane.key, issues: lane.issues, impl, review, doc, adv, confidence, autonomy }
+  return { lane: lane.key, issues: lane.issues, mode: laneMode, impl, review, doc, adv, confidence, autonomy }
 }
 
 // ── The stacked-base gate (the verification invariant). ──────────────────────────────────
@@ -445,22 +459,40 @@ function laneAdvancesBase(r) {
   return !!(r && (r.autonomy === 'auto_execute' || r.autonomy === 'skipped_existing'))
 }
 
-let results
-if (MODE === 'parallel') {
-  // Bounded fan-out: waves of <= BATCH lanes, so peak concurrency stays under the silent
-  // StructuredOutput cliff. Every lane still runs — waving throttles, it never drops.
-  results = (await runWaves(LANES, (lane) => runLane(lane, BASE0), BATCH)).filter(Boolean)
-} else {
-  results = []
-  let base = BASE0 // advances ONLY past a lane that VERIFIED (laneAdvancesBase); a gated,
-  for (const lane of LANES) { // BLOCKED or FAILED lane leaves the base where it is, so the
-    const r = await runLane(lane, base) // next lane falls back to the last verified base
-    const advances = laneAdvancesBase(r)
-    if (advances) base = lane.branch
-    results.push(r)
-    log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''}${r.adv && r.adv.verdict === 'FAIL' ? ' ⚠️defects' : ''}${advances ? '' : ' ⛔not-a-base (gated/blocked — dependents do NOT stack on it)'} | next base=${base}`)
-  }
+// Split the lane set by its RESOLVED per-lane mode. An all-global run degenerates to exactly
+// the previous behaviour: every lane parallel -> one bounded wave set off BASE0; every lane
+// sequential -> one serial stack. A mixed set now runs BOTH in a single pass instead of
+// forcing a human to hand-execute one workflow run per wave.
+const seqIdx = []
+const parIdx = []
+LANES.forEach((l, i) => (laneModeOf(l) === 'sequential' ? seqIdx : parIdx).push(i))
+
+// Results are written back into their DECLARED positions, so the returned order always
+// matches args.lanes regardless of which half a lane ran in.
+const slots = new Array(LANES.length).fill(null)
+
+// Sequential lanes STACK: each branches off the prior sequential lane's branch, and the base
+// advances ONLY past a lane that VERIFIED (laneAdvancesBase). A gated, BLOCKED or FAILED lane
+// leaves the base where it is, so the next lane falls back to the last verified base.
+let base = BASE0
+for (const i of seqIdx) {
+  const lane = LANES[i]
+  const r = await runLane(lane, base, 'sequential')
+  const advances = laneAdvancesBase(r)
+  if (advances) base = lane.branch
+  slots[i] = r
+  log(`${lane.key}: ${r.impl ? r.impl.status : 'NULL'}${r.review ? ' (reviewed)' : ''}${r.doc && r.doc.verdict === 'DOCS_DRIFT' ? ' ⚠️docs' : ''}${r.adv && r.adv.verdict === 'FAIL' ? ' ⚠️defects' : ''}${advances ? '' : ' ⛔not-a-base (gated/blocked — dependents do NOT stack on it)'} | next base=${base}`)
 }
+
+// Parallel lanes NEVER stack — every one branches off the ORIGINAL base — and run in bounded
+// waves of <= BATCH so peak concurrency stays under the silent StructuredOutput cliff. Every
+// lane still runs: waving throttles, it never drops.
+if (parIdx.length) {
+  const parResults = await runWaves(parIdx.map((i) => LANES[i]), (lane) => runLane(lane, BASE0, 'parallel'), BATCH)
+  parIdx.forEach((i, j) => { slots[i] = parResults[j] })
+}
+
+const results = slots.filter(Boolean)
 
 const opened = results.filter((r) => r.impl && r.impl.status === 'PR_OPENED')
 
@@ -471,6 +503,7 @@ const opened = results.filter((r) => r.impl && r.impl.status === 'PR_OPENED')
 const summarize = (r) => ({
   lane: r.lane,
   issues: r.issues,
+  mode: r.mode || MODE,
   pr_url: (r.impl && r.impl.pr_url) || '',
   status: (r.impl && r.impl.status) || 'NULL',
   confidence: r.confidence,
@@ -486,7 +519,7 @@ const skipped_existing = results.filter((r) => r.autonomy === 'skipped_existing'
 const auto_execute = results.filter((r) => r.autonomy === 'auto_execute').map(summarize)
 const gated = results.filter((r) => r.autonomy === 'gated').map(summarize).sort((a, b) => a.confidence - b.confidence)
 
-log(`${MODE} impl done: ${opened.length}/${LANES.length} PRs opened | auto_execute ${auto_execute.length} / gated ${gated.length} / skipped ${skipped_existing.length} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (merge/mark-ready) are staged for human approval, never taken here.`)
+log(`${MODE} impl done (${seqIdx.length} sequential / ${parIdx.length} parallel lane(s), wave size ${BATCH}): ${opened.length}/${LANES.length} PRs opened | auto_execute ${auto_execute.length} / gated ${gated.length} / skipped ${skipped_existing.length} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (merge/mark-ready) are staged for human approval, never taken here.`)
 
 // Return shape is ADDITIVE: mode/results/prs_opened/total preserved; the autonomy contract
 // (auto_execute / gated / skipped_existing / confidenceThreshold) and spineVersion are new.
