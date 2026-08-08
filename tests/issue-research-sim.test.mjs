@@ -811,12 +811,25 @@ test('CONTRACT: every green_lanes mode is honoured verbatim by the REAL stacked-
   const resolve = await realLaneModeOf()
   // #12 and #13 collide on src/hub.js -> both sequential; #14 is disjoint -> parallel. Both
   // halves of the value domain have to be present or a rename could hide behind one global.
+  // Each issue gets its OWN `group` on purpose: same-group issues with overlapping footprints
+  // are one BATCHED lane (planLaneGroups), and #12+#13 collide by construction — under a shared
+  // group they would collapse into a single lane whose footprint is disjoint from #14's, leaving
+  // every lane 'parallel' and this fixture unable to tell "honoured" from "matched the global".
+  // Distinct groups keep one lane per issue, so a lane's mode IS that issue's mode. The subject
+  // here is the mode contract, not batching — batching has its own tests above. (Same shape as
+  // the sibling half of this contract in tests/stacked-impl-sim.test.mjs, which groups `lane-N`.)
   const { result } = await runScript({
     args: { numbers: [12, 13, 14] },
-    research: (n) => ({ ...greenResearch(n), files: n === 14 ? ['src/solo.js'] : ['src/hub.js', `src/f${n}.js`] }),
+    research: (n) => ({
+      ...greenResearch(n),
+      group: `lane-${n}`,
+      files: n === 14 ? ['src/solo.js'] : ['src/hub.js', `src/f${n}.js`],
+    }),
   })
   const lanes = result.green_lanes
   assert.equal(lanes.length, 3, 'three GREEN lanes are handed over')
+  assert.deepEqual(lanes.map((l) => l.issues), [[12], [13], [14]],
+    'distinct groups keep these unbatched — one lane per issue, so each lane mode is that issue\'s own')
   for (const l of lanes) {
     // Resolved under BOTH global defaults, so no global can be the reason an answer matches.
     // A renamed FIELD or a renamed VALUE reads as "undeclared" on the consumer side and silently
