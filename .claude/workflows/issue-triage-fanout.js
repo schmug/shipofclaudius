@@ -106,7 +106,8 @@ async function runWaves(items, fn, batchSize = 8) {
 //
 // FAIL-CLOSED: an ABSENT or EMPTY files[] is an UNKNOWN footprint. Unknown is never a proof of
 // disjointness, so such an item gets its OWN SERIAL wave (and mode 'sequential') rather than
-// being silently parallelized. An unorderable dependency (a cycle) is treated the same way.
+// being silently parallelized. An unorderable dependency (a member of a `depends_on` cycle, or
+// anything transitively downstream of one) is treated the same way.
 //
 // NOTE: unrelated to runWaves() above — that batches AGENT CONCURRENCY; this partitions FILE
 // FOOTPRINTS. This block is copied VERBATIM into issue-triage-fanout.js and
@@ -116,17 +117,45 @@ async function runWaves(items, fn, batchSize = 8) {
 // each fan-out calls only some: triage returns waves[]/overlaps[], research derives each green
 // lane's mode via planMode().
 
-// Normalize a raw files[] into a deduped, sorted array of comparable paths. Non-strings and
-// blanks are dropped; a leading "./" is stripped so "./a.js" and "a.js" collide as they should.
+// Canonicalize ONE path. Repeated separators collapse, leading/trailing separators drop, "."
+// segments vanish, ".." resolves against the preceding segment (clamping at the root), so
+// "./a.js", ".//a.js", "./src//a.js", "a.js/", "a/../b.js" and "/a.js" all reduce the way a
+// filesystem would. This USED to strip only a leading "./", which left every other spelling of
+// one file looking like two DIFFERENT files — i.e. two genuinely colliding issues were declared
+// "provably disjoint" and co-scheduled. That is the unsafe direction (see planMode below: a
+// wrong 'parallel' races two writers on one file).
+function normPath(p) {
+  const out = []
+  for (const seg of String(p).trim().split('/')) {
+    if (seg === '' || seg === '.') continue   // repeated / leading / trailing separators, and "."
+    if (seg === '..') { out.pop(); continue } // ".." above the root simply clamps there
+    out.push(seg)
+  }
+  return out.join('/')
+}
+
+// The COMPARISON key: canonical path, lowercased. Case-insensitivity is a deliberate choice in
+// the OVER-detecting direction — on a case-insensitive checkout (macOS/APFS, Windows)
+// "README.md" and "readme.md" ARE one file, so a case-SENSITIVE compare would call a real
+// collision disjoint. A false 'sequential' costs only lost parallelism; a false 'parallel' races
+// two writers and corrupts a lane. The key is used ONLY for comparison — every path we REPORT
+// (overlaps[].files, a lane's files[]) keeps its original spelling.
+function fileKey(p) { return normPath(p).toLowerCase() }
+
+// Normalize a raw files[] into a deduped, sorted array of comparable paths, each in its ORIGINAL
+// spelling (canonicalized, never lowercased). Non-strings, blanks, and entries that name no file
+// at all (".", "/", "./") are dropped; two spellings of one path collapse to the first seen.
 function normFiles(files) {
   if (!Array.isArray(files)) return []
-  const out = new Set()
+  const byKey = new Map()
   for (const f of files) {
     if (typeof f !== 'string') continue
-    const t = f.trim().replace(/^(\.\/)+/, '')
-    if (t) out.add(t)
+    const t = normPath(f)
+    if (!t) continue
+    const k = t.toLowerCase()
+    if (!byKey.has(k)) byKey.set(k, t)
   }
-  return [...out].sort()
+  return [...byKey.values()].sort()
 }
 
 // Normalize a result set into plan items {number, files[], deps[], unknown}. An item without an
@@ -145,10 +174,11 @@ function normPlanItems(items) {
   return out
 }
 
-// The files two normalized footprints share (sorted; empty === provably disjoint).
+// The files two normalized footprints share (sorted; empty === provably disjoint). Membership is
+// decided on the case-insensitive fileKey, but the entries returned keep `a`'s original spelling.
 function sharedFiles(a, b) {
-  const other = new Set(b)
-  return a.filter((f) => other.has(f))
+  const other = new Set(b.map(fileKey))
+  return a.filter((f) => other.has(fileKey(f)))
 }
 
 // overlaps: every unordered pair whose footprints intersect, naming the shared files. An
@@ -169,7 +199,9 @@ function computeOverlaps(items) {
 
 // planWaves: a layered partition. Every item inside ONE wave is PROVABLY file-disjoint from
 // every other item in that wave, and a dependent never shares a wave with — or precedes —
-// anything it depends on. Returns [{ order, parallel: [numbers] }] with a 1-based order.
+// anything it depends on. An item whose position no order can prove (unknown footprint, or a
+// `depends_on` cycle) gets a wave to ITSELF, flagged serial so nothing may join it later.
+// Returns [{ order, parallel: [numbers] }] with a 1-based order.
 function planWaves(items) {
   const norm = normPlanItems(items)
   const byNumber = new Map(norm.map((it) => [it.number, it]))
@@ -187,6 +219,21 @@ function planWaves(items) {
     }
     if (!changed) break
   }
+  // ORDERABLE set, computed UP FRONT by peeling (Kahn): an item settles once every in-set dep of
+  // it has settled. What never settles is every member of a dependency cycle PLUS everything
+  // transitively downstream of one — exactly the items whose position no order can prove.
+  // Deciding this lazily inside the placement loop ("this dep is not placed yet") only catches
+  // whichever cycle member the loop happens to reach FIRST; the rest saw their dep already placed,
+  // were appended to a non-serial wave, and could then be joined by another item.
+  const settled = new Set()
+  for (let pass = 0; pass < norm.length; pass++) {
+    let changed = false
+    for (const it of norm) {
+      if (settled.has(it.number)) continue
+      if (it.deps.every((d) => !byNumber.has(d) || settled.has(d))) { settled.add(it.number); changed = true }
+    }
+    if (!changed) break
+  }
   // Deterministic placement: shallowest first, then by issue number — so a dependency is always
   // placed before its dependent, and the same input always yields the same plan.
   const ordered = [...norm].sort((a, b) => (depth.get(a.number) - depth.get(b.number)) || (a.number - b.number))
@@ -194,10 +241,10 @@ function planWaves(items) {
   const placedAt = new Map() // issue number -> wave index
   for (const it of ordered) {
     let earliest = 0
-    let unresolved = false
+    const unresolved = !settled.has(it.number) // in a cycle, or downstream of one
     for (const dep of it.deps) {
-      if (!byNumber.has(dep)) continue                       // out-of-set dep: not ours to order
-      if (!placedAt.has(dep)) { unresolved = true; continue } // cycle: no order can be proven
+      if (!byNumber.has(dep)) continue    // out-of-set dep: not ours to order
+      if (!placedAt.has(dep)) continue    // unresolved dep: nothing yet to order against
       earliest = Math.max(earliest, placedAt.get(dep) + 1)
     }
     let idx = -1
@@ -217,9 +264,13 @@ function planWaves(items) {
     waves[idx].items.push(it)
     placedAt.set(it.number, idx)
   }
-  return waves
-    .filter((w) => w.items.length > 0)
-    .map((w, i) => ({ order: i + 1, parallel: w.items.map((it) => it.number).sort((a, b) => a - b) }))
+  // Every wave is created immediately before an item is pushed into it, so an EMPTY wave is
+  // impossible. Assert that rather than filtering empties away: a silent filter would renumber
+  // `order` and hide whatever bug produced the empty wave.
+  for (const w of waves) {
+    if (!w.items.length) throw new Error('planWaves invariant: a wave was created with no item in it')
+  }
+  return waves.map((w, i) => ({ order: i + 1, parallel: w.items.map((it) => it.number).sort((a, b) => a - b) }))
 }
 
 // planMode: 'parallel' iff this item's footprint is KNOWN and provably disjoint from every OTHER

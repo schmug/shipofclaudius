@@ -491,6 +491,118 @@ test('green_lanes keep every pre-existing key — additive only, and issues[] st
   }
 })
 
+test('the lane plan spawns ZERO agents — agent count is IDENTICAL to the baseline run', async () => {
+  const numbers = [12, 13]
+  // Baseline: the pre-existing fixture. Planned: colliding footprints + a dependency edge.
+  const base = await runScript({ args: { numbers } })
+  const planned = await runScript({
+    args: { numbers },
+    research: (n) => ({ ...greenResearch(n), files: ['README.md', `src/f${n}.js`], depends_on: n === 13 ? [12] : [] }),
+  })
+  assert.equal(planned.calls.agents.length, base.calls.agents.length,
+    'computing files[]/mode must not add a single agent call vs the baseline run')
+  // ckpt-load + ckpt-meta + 2x(fetch + research) + ckpt-write = 7
+  assert.equal(base.calls.agents.length, 7, 'the baseline agent budget is 7 for 2 issues')
+  assert.equal(planned.calls.agents.length, 7, 'the lane plan does not move the agent budget')
+  const labels = planned.calls.agents.map((a) => a.opts.label || '')
+  assert.ok(!labels.some((l) => /wave|overlap|partition|plan|mode/i.test(l)),
+    `no lane-planning agent may exist — labels were: ${labels.join(', ')}`)
+  assert.ok(!planned.calls.agents.some((a) => /compute .*\bmode\b|wave plan|file-overlap/i.test(a.prompt)),
+    'no prompt asks a model to compute the lane plan')
+  assert.equal(laneFor(planned.result, 12).mode, 'sequential', 'and the plan itself is still computed')
+})
+
+// ---------------- PATH-KEY NORMALIZATION (the collision key must be canonical) ---------------
+// Byte-identical helper block to issue-triage-fanout.js, so the same table is pinned on both
+// sides. Every pair is ONE file written two ways; a normalizer that only strips a leading
+// "./" leaves them distinct and emits mode:'parallel' for two lanes that race one file.
+// CASE is compared case-INSENSITIVELY on purpose (README.md === readme.md on macOS/APFS):
+// a false 'sequential' costs wall-clock, a false 'parallel' corrupts a lane.
+const SAME_FILE_SPELLINGS = [
+  ['./a.js', 'a.js', 'a.js'],
+  ['.//a.js', 'a.js', 'a.js'],
+  ['././a.js', 'a.js', 'a.js'],
+  ['./src//a.js', 'src/a.js', 'src/a.js'],
+  ['a.js/', 'a.js', 'a.js'],
+  ['a/../b.js', 'b.js', 'b.js'],
+  ['src/./a.js', 'src/a.js', 'src/a.js'],
+  ['/a.js', 'a.js', 'a.js'],
+  ['  a.js  ', 'a.js', 'a.js'],
+  ['README.md', 'readme.md', 'README.md'],
+  ['src/Hub.js', 'SRC/hub.js', 'src/Hub.js'],
+]
+
+test('two spellings of the SAME path force mode:sequential on BOTH lanes', async () => {
+  for (const [spellA, spellB, canonicalA] of SAME_FILE_SPELLINGS) {
+    const { result } = await runScript({
+      args: { numbers: [12, 13] },
+      research: (n) => ({ ...greenResearch(n), files: [n === 12 ? spellA : spellB] }),
+    })
+    assert.equal(laneFor(result, 12).mode, 'sequential',
+      `'${spellA}' and '${spellB}' are the SAME file — lane #12 must not claim parallel`)
+    assert.equal(laneFor(result, 13).mode, 'sequential',
+      `'${spellA}' and '${spellB}' are the SAME file — lane #13 must not claim parallel`)
+    assert.deepEqual(laneFor(result, 12).files, [canonicalA],
+      `'${spellA}' is reported canonicalized in its ORIGINAL case, never lowercased`)
+  }
+})
+
+test('normalization does not OVER-collapse: genuinely distinct footprints stay mode:parallel', async () => {
+  const DISTINCT = [
+    ['src/a.js', 'src/b.js'],
+    ['a/b.js', 'ab.js'],
+    ['a/../b.js', 'a/b.js'],
+    ['src/a.js', 'src/a.js.bak'],
+    ['a.js', 'b/a.js'],
+  ]
+  for (const [spellA, spellB] of DISTINCT) {
+    const { result } = await runScript({
+      args: { numbers: [12, 13] },
+      research: (n) => ({ ...greenResearch(n), files: [n === 12 ? spellA : spellB] }),
+    })
+    assert.equal(laneFor(result, 12).mode, 'parallel', `'${spellA}' vs '${spellB}' are DIFFERENT files -> parallel`)
+    assert.equal(laneFor(result, 13).mode, 'parallel', `'${spellA}' vs '${spellB}' are DIFFERENT files -> parallel`)
+  }
+})
+
+test('a footprint spelled several ways within ONE lane dedupes to a single canonical entry', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), files: ['./src//a.js', 'src/a.js', 'SRC/A.JS', 'src/a.js/'] }),
+  })
+  assert.deepEqual(laneFor(result, 12).files, ['src/a.js'],
+    'the four spellings are ONE file — the lane footprint must not repeat it')
+})
+
+test('a footprint whose every entry normalizes away is UNKNOWN -> fail-closed to sequential', async () => {
+  // './', '.', '/' and blanks name no file at all. Treating them as a known footprint would
+  // let a lane with a garbage files[] claim mode:'parallel'.
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), files: n === 12 ? ['./', '.', '   ', '/', '//'] : ['src/b.js'] }),
+  })
+  assert.deepEqual(laneFor(result, 12).files, [], 'nothing survives normalization -> an empty footprint')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'an unknown footprint is never proof of disjointness')
+})
+
+test('the inlined file-overlap helper block is BYTE-IDENTICAL in both fan-outs (drift guard)', async () => {
+  // Workflow scripts cannot `import`, so the block is duplicated. A fix applied to one copy
+  // and not the other silently reintroduces the bug in the other fan-out.
+  const MARK_START = '// ── File-overlap wave plan (PURE, MODEL-FREE).'
+  const MARK_END = "  return 'parallel'\n}"
+  const slice = async (url) => {
+    const src = await readFile(url, 'utf8')
+    const i = src.indexOf(MARK_START)
+    const j = src.indexOf(MARK_END, i)
+    assert.ok(i >= 0 && j > i, `helper block not found in ${url.pathname}`)
+    return src.slice(i, j + MARK_END.length)
+  }
+  const a = await slice(new URL('../.claude/workflows/issue-triage-fanout.js', import.meta.url))
+  const b = await slice(SRC_PATH)
+  assert.equal(a, b, 'the two inlined copies of the file-overlap helper block have drifted')
+  assert.ok(/function normFiles\(/.test(a) && /function planWaves\(/.test(a), 'the compared block really is the helper block')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

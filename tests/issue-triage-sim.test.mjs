@@ -554,6 +554,129 @@ test('the wave plan is additive: every pre-existing return key is still present'
   assert.equal(result.triaged.length, 3, 'the triaged payload is unchanged')
 })
 
+// ---------------- PATH-KEY NORMALIZATION (the collision key must be canonical) ---------------
+// Every pair below is ONE file written two ways. A normalizer that only strips a leading "./"
+// leaves them DISTINCT, so two issues that genuinely collide are declared "provably disjoint"
+// and land in the SAME parallel wave — the unsafe direction (two writers racing one file).
+// CASE is compared case-INSENSITIVELY on purpose: on a case-insensitive checkout (macOS/APFS)
+// README.md and readme.md ARE the same file. Over-detecting a collision costs only lost
+// parallelism; missing one corrupts a lane. The last column is the spelling that must be
+// REPORTED in overlaps[] — the original (canonicalized) text, never a lowercased match key.
+const SAME_FILE_SPELLINGS = [
+  ['./a.js', 'a.js', 'a.js'],
+  ['.//a.js', 'a.js', 'a.js'],
+  ['././a.js', 'a.js', 'a.js'],
+  ['./src//a.js', 'src/a.js', 'src/a.js'],
+  ['a.js/', 'a.js', 'a.js'],
+  ['a/../b.js', 'b.js', 'b.js'],
+  ['src/./a.js', 'src/a.js', 'src/a.js'],
+  ['/a.js', 'a.js', 'a.js'],
+  ['  a.js  ', 'a.js', 'a.js'],
+  ['README.md', 'readme.md', 'README.md'],
+  ['src/Hub.js', 'SRC/hub.js', 'src/Hub.js'],
+]
+
+test('two spellings of the SAME path collide: never co-waved, and named in overlaps[] verbatim', async () => {
+  for (const [spellA, spellB, reported] of SAME_FILE_SPELLINGS) {
+    const { result } = await runScript({
+      args: { numbers: [1, 2] },
+      triage: (n) => ({ ...defaultTriage(n), files: [n === 1 ? spellA : spellB] }),
+    })
+    const w1 = waveOf(result, 1)
+    const w2 = waveOf(result, 2)
+    assert.ok(w1 && w2, `both issues placed for '${spellA}' vs '${spellB}'`)
+    assert.notEqual(w1.order, w2.order,
+      `'${spellA}' and '${spellB}' are the SAME file — they must NEVER share a parallel wave`)
+    assert.equal(result.overlaps.length, 1,
+      `'${spellA}' vs '${spellB}' must be reported as a collision, got ${JSON.stringify(result.overlaps)}`)
+    assert.deepEqual(result.overlaps[0].files, [reported],
+      `'${spellA}' vs '${spellB}': overlaps names the ORIGINAL spelling (canonicalized, never lowercased)`)
+  }
+})
+
+test('normalization does not OVER-collapse: genuinely distinct paths still parallelize', async () => {
+  const DISTINCT = [
+    ['src/a.js', 'src/b.js'],
+    ['a/b.js', 'ab.js'],
+    ['a/../b.js', 'a/b.js'],
+    ['src/a.js', 'src/a.js.bak'],
+    ['a.js', 'b/a.js'],
+  ]
+  for (const [spellA, spellB] of DISTINCT) {
+    const { result } = await runScript({
+      args: { numbers: [1, 2] },
+      triage: (n) => ({ ...defaultTriage(n), files: [n === 1 ? spellA : spellB] }),
+    })
+    assert.deepEqual(result.overlaps, [],
+      `'${spellA}' and '${spellB}' are DIFFERENT files — no collision may be reported`)
+    assert.equal(waveOf(result, 1).order, waveOf(result, 2).order,
+      `'${spellA}' and '${spellB}' are disjoint — they must still parallelize`)
+  }
+})
+
+test('a footprint spelled two ways within ONE issue dedupes to a single canonical entry', async () => {
+  const { result } = await runScript({
+    args: { numbers: [1, 2] },
+    triage: (n) => ({
+      ...defaultTriage(n),
+      files: n === 1 ? ['./src//a.js', 'src/a.js', 'SRC/A.JS', 'src/a.js/'] : ['src/a.js'],
+    }),
+  })
+  assert.equal(result.overlaps.length, 1, 'one colliding pair')
+  assert.deepEqual(result.overlaps[0].files, ['src/a.js'],
+    'the four spellings are ONE file — the shared-file list must not repeat it')
+})
+
+// ---------------- depends_on CYCLES (fail-closed: no order can be proven) ---------------
+// An unorderable dependency is treated exactly like an unknown footprint: its own SERIAL
+// wave, alone. That must hold for EVERY member of the cycle (and everything downstream of
+// one), not just whichever member the placement loop happens to reach first.
+
+test('every member of a depends_on cycle — and everything downstream — gets its OWN serial wave', async () => {
+  // #1 <-> #2 is a cycle; #3 depends on #1 (downstream of the cycle). All files disjoint,
+  // so ONLY the unorderable-dependency rule can keep these three apart.
+  const deps = { 1: [2], 2: [1], 3: [1] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 3] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: deps[n] }),
+  })
+  for (const n of [1, 2, 3]) {
+    const w = waveOf(result, n)
+    assert.ok(w, `#${n} is placed`)
+    assert.deepEqual(w.parallel, [n],
+      `#${n}'s order cannot be proven (cycle or downstream of one) -> its own serial wave, ALONE`)
+  }
+  const flat = result.waves.flatMap((w) => w.parallel)
+  assert.deepEqual(flat.slice().sort(), [1, 2, 3], 'still a partition: each issue placed exactly once')
+})
+
+test('two independent depends_on cycles never merge into one wave', async () => {
+  // #1<->#2 and #5<->#6, all four footprints disjoint. Placement order interleaves the two
+  // cycles, so a rule that only flags the FIRST member reached lets the two later members
+  // land together in a non-serial wave.
+  const deps = { 1: [2], 2: [1], 5: [6], 6: [5] }
+  const { result } = await runScript({
+    args: { numbers: [1, 2, 5, 6] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: deps[n] }),
+  })
+  for (const n of [1, 2, 5, 6]) {
+    assert.deepEqual(waveOf(result, n).parallel, [n],
+      `#${n} is in an unorderable cycle -> its own serial wave, never sharing with another cycle member`)
+  }
+  assert.equal(result.waves.length, 4, 'four unorderable items -> four serial waves')
+})
+
+test('an out-of-set depends_on is NOT a cycle and still parallelizes', async () => {
+  // #1 and #2 depend on #99, which was never triaged. That edge is not ours to order and
+  // must not be mistaken for an unresolvable one.
+  const { result } = await runScript({
+    args: { numbers: [1, 2] },
+    triage: (n) => ({ ...defaultTriage(n), files: [`f${n}.js`], depends_on: [99] }),
+  })
+  assert.equal(waveOf(result, 1).order, waveOf(result, 2).order,
+    'an out-of-set dependency leaves both footprints provably disjoint -> one parallel wave')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
