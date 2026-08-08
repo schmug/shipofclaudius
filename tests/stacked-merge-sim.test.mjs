@@ -310,6 +310,74 @@ test('CI_PENDING stops the walk without sleeping (no wait-for-CI loop)', async (
   assert.deepEqual(result.outcomes.map((o) => o.status), ['ESCALATED', 'SKIPPED'])
 })
 
+// ───────────────────── post-merge verify (issue #71) ────────────────────────────
+test('the land prompt runs a POST-MERGE VERIFY step, ordered after the squash-merge', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1').prompt
+  assert.ok(/POST-MERGE VERIFY/.test(l), 'a post-merge verify step is present')
+  assert.ok(/git checkout --detach origin\/main\b/.test(l), 'checks out the moving base detached')
+  const squashIdx = l.indexOf('SQUASH-MERGE')
+  const postIdx = l.indexOf('POST-MERGE VERIFY')
+  assert.ok(squashIdx >= 0 && postIdx > squashIdx, 'post-merge verify is instructed AFTER the squash-merge step')
+  assert.ok(/base_green/.test(l) && /post_merge_tests/.test(l), 'the prompt asks for base_green + post_merge_tests')
+})
+
+test('LAND_SCHEMA advertises post_merge_tests and base_green (additive, status enum unchanged)', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1')
+  assert.ok(l.opts.schema.properties.post_merge_tests, 'schema carries post_merge_tests')
+  assert.ok(l.opts.schema.properties.base_green, 'schema carries base_green')
+  assert.equal(l.opts.schema.properties.base_green.type, 'boolean')
+  assert.deepEqual(l.opts.schema.properties.status.enum, ['LANDED', 'ESCALATED', 'FAILED'], 'the closed status enum is NOT widened')
+})
+
+test('a red base after landing (base_green:false) stops the walk — cannot be repaired here', async () => {
+  const { result, calls } = await runScript({
+    args: { prs: [1, 2, 3] },
+    land: (ref) => (ref === '1' ? landed(ref, { base_green: false, post_merge_tests: 'red: 2 failing' }) : landed(ref)),
+  })
+  assert.equal(result.landed, 1, 'PR #1 itself landed — the merge already happened')
+  assert.equal(result.complete, false, 'the stack is not complete: a red base blocks the rest')
+  assert.equal(result.baseRed, true, 'the red-base condition is reported on the result')
+  assert.equal(byPrefix(calls, 'verify:#2').length, 0, 'the walk stops — PR #2 is never even verified')
+  assert.equal(byPrefix(calls, 'land:#2').length, 0, 'PR #2 is never handed to the land actor')
+  assert.equal(one(calls, 'cleanup'), undefined, 'no branch cleanup while the base is red')
+  assert.deepEqual(result.outcomes.map((o) => o.status), ['LANDED', 'SKIPPED', 'SKIPPED'], 'PR #1 keeps status=LANDED (the merge was not undone); the closed enum is not widened')
+  assert.ok(/cannot.*repair/i.test(result.outcomes[0].reason || ''), 'the reason explains the base cannot be repaired here')
+  assert.ok(/red|base/i.test(result.outcomes[1].reason || ''), 'downstream PRs are skipped with a reason naming the red base')
+})
+
+test('base_green:true (or omitted, as in the default stub) does not stop the walk', async () => {
+  const { result } = await runScript({ args: { prs: [1, 2] } })
+  assert.equal(result.landed, 2)
+  assert.equal(result.complete, true)
+  assert.equal(result.baseRed, false)
+})
+
+test('args.postMergeVerify:false skips the post-merge step and its instructions', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1], postMergeVerify: false } })
+  const l = one(calls, 'land:#1').prompt
+  assert.ok(/SKIPPED/.test(l), 'the prompt tells the agent the step is skipped')
+  assert.ok(!/git checkout --detach/.test(l), 'no detached-checkout instruction when disabled')
+  assert.equal(result.landed, 1, 'landing still proceeds normally')
+})
+
+test('args.postMergeVerify:false means a land stub reporting base_green:false does NOT stop the walk', async () => {
+  // the escape hatch means the orchestrator no longer trusts/acts on base_green at all
+  const { result } = await runScript({
+    args: { prs: [1, 2], postMergeVerify: false },
+    land: (ref) => (ref === '1' ? landed(ref, { base_green: false }) : landed(ref)),
+  })
+  assert.equal(result.landed, 2, 'both PRs land — the opted-out post-merge signal is ignored')
+  assert.equal(result.complete, true)
+})
+
+test('the LAST node in the stack is also post-merge verified (nothing else runs after it lands)', async () => {
+  const { calls } = await runScript({ args: { prs: [1, 2, 3] } })
+  const last = one(calls, 'land:#3').prompt
+  assert.ok(/POST-MERGE VERIFY/.test(last), 'the last stacked PR gets a post-merge verify instruction too')
+})
+
 // ───────────────────── fail-open: a degraded relay fetch never crashes ───────────
 test('a failed relay fetch (null) degrades to a note and still verifies/lands (no crash)', async () => {
   const { result, calls } = await runScript({ args: { prs: [1] }, fetch: () => null })
