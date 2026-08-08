@@ -422,10 +422,14 @@ test('green_lanes entries carry files[] and a mode in {parallel, sequential}', a
   assert.deepEqual(laneFor(result, 12).files, ['src/f12.js'], 'the lane footprint is the researched files[]')
 })
 
+// NOTE on the `group: 'g'+n` in the collision fixtures below: same-group issues that share a
+// file are now BATCHED into one lane (see the batching section further down), which would leave
+// nothing to observe here. Distinct groups keep them two lanes so the overlap math — the thing
+// these tests exist to pin — is still exercised through `mode`.
 test('two GREEN issues both touching README.md are BOTH emitted mode:sequential', async () => {
   const { result } = await runScript({
     args: { numbers: [12, 13] },
-    research: (n) => ({ ...greenResearch(n), files: n === 12 ? ['README.md', 'src/a.js'] : ['README.md'] }),
+    research: (n) => ({ ...greenResearch(n), group: `g${n}`, files: n === 12 ? ['README.md', 'src/a.js'] : ['README.md'] }),
   })
   assert.equal(laneFor(result, 12).mode, 'sequential', '#12 collides with #13 on README.md')
   assert.equal(laneFor(result, 13).mode, 'sequential', '#13 collides with #12 on README.md')
@@ -536,8 +540,9 @@ test('two spellings of the SAME path force mode:sequential on BOTH lanes', async
   for (const [spellA, spellB, canonicalA] of SAME_FILE_SPELLINGS) {
     const { result } = await runScript({
       args: { numbers: [12, 13] },
-      research: (n) => ({ ...greenResearch(n), files: [n === 12 ? spellA : spellB] }),
+      research: (n) => ({ ...greenResearch(n), group: `g${n}`, files: [n === 12 ? spellA : spellB] }),
     })
+    assert.equal(result.green_lanes.length, 2, 'distinct groups keep this a two-lane collision')
     assert.equal(laneFor(result, 12).mode, 'sequential',
       `'${spellA}' and '${spellB}' are the SAME file — lane #12 must not claim parallel`)
     assert.equal(laneFor(result, 13).mode, 'sequential',
@@ -583,6 +588,176 @@ test('a footprint whose every entry normalizes away is UNKNOWN -> fail-closed to
   })
   assert.deepEqual(laneFor(result, 12).files, [], 'nothing survives normalization -> an empty footprint')
   assert.equal(laneFor(result, 12).mode, 'sequential', 'an unknown footprint is never proof of disjointness')
+})
+
+// ============ GROUP BATCHING + UNIQUE LANE KEYS ============
+// `group` is documented in BOTH fan-outs' schemas as "a canonical grouping key so related
+// issues batch into one PR" — but green_lanes used to emit strictly `issues: [r.number]`, so
+// it batched NOTHING and two GREEN issues in group `ci` produced two lanes BOTH keyed `ci`
+// (stacked-impl-lanes then dispatched two indistinguishable `impl:ci` agents).
+//
+// The batching rule is EVIDENCE-BASED and fail-closed. Two GREEN issues join one lane only
+// when: same non-empty `group`, BOTH footprints KNOWN, the footprints OVERLAP, and there is
+// NO dependency edge either way. Overlap is the evidence that they are genuinely one unit of
+// work (and they could never have shipped independently anyway, so batching costs no
+// parallelism); a dependency edge NEVER merges, because `issues[]` is what the lane CLOSES.
+const keysOf = (result) => result.green_lanes.map((l) => l.key)
+const assertUniqueKeys = (result) => {
+  const keys = keysOf(result)
+  assert.equal(new Set(keys).size, keys.length, `lane keys must be unique — got ${JSON.stringify(keys)}`)
+  const branches = result.green_lanes.map((l) => l.branch)
+  assert.equal(new Set(branches).size, branches.length, `lane branches must be unique — got ${JSON.stringify(branches)}`)
+}
+
+test('two GREEN issues in the same group never produce duplicate lane keys', async () => {
+  // Disjoint footprints -> they stay two lanes, so the group name alone cannot be the key:
+  // stacked-impl-lanes dispatches `impl:${lane.key}` and logs by key.
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: [`src/f${n}.js`] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'provably disjoint footprints are NOT one unit of work')
+  assertUniqueKeys(result)
+  assert.deepEqual(keysOf(result).slice().sort(), ['ci-12', 'ci-13'],
+    'a contended base key is disambiguated by the lane\'s lowest issue number')
+})
+
+test('same-group GREEN issues with OVERLAPPING footprints batch into ONE lane', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: n === 12 ? ['src/hub.js', 'src/a.js'] : ['src/hub.js'] }),
+  })
+  assert.equal(result.green_lanes.length, 1, 'one unit of work -> one lane -> one PR')
+  const lane = result.green_lanes[0]
+  assert.deepEqual(lane.issues, [12, 13], 'the batched lane closes BOTH issues, sorted')
+  assert.equal(lane.key, 'ci', 'an uncontended base key stays the bare group name')
+  assert.deepEqual(lane.files, ['src/a.js', 'src/hub.js'], 'the lane footprint is the UNION of its members')
+  assert.equal(lane.mode, 'parallel', 'the intra-lane collision is gone — one writer, so nothing serializes it')
+  assert.ok(lane.brief.includes('#12') && lane.brief.includes('#13'),
+    'the batched brief names every issue it implements, so the impl agent builds both')
+})
+
+test('different groups never batch, even when the footprints overlap', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: n === 12 ? 'ci' : 'docs', files: ['src/hub.js'] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'a shared file is not by itself a batching signal')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'two lanes on one file still serialize')
+  assert.equal(laneFor(result, 13).mode, 'sequential', 'two lanes on one file still serialize')
+  assertUniqueKeys(result)
+})
+
+test('a dependency edge NEVER absorbs the dependency into its dependent lane', async () => {
+  // Same group, OVERLAPPING footprints — batchable on every other axis — but #13 depends on
+  // #12. Merging them would put #12 into a lane whose PR emits `Closes #12` alongside #13:
+  // the dependency gets closed by its dependent and, being GREEN, double-implemented.
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: ['src/hub.js'], depends_on: n === 13 ? [12] : [] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'a dependency edge vetoes the batch')
+  assert.deepEqual(laneFor(result, 12).issues, [12], 'the dependency closes only itself')
+  assert.deepEqual(laneFor(result, 13).issues, [13], 'the dependent closes only itself')
+  assert.deepEqual(laneFor(result, 13).depends_on, [12], 'the edge survives as a sequencing hint, off issues[]')
+  assertUniqueKeys(result)
+})
+
+test('a TRANSITIVE chain never smuggles a dependency into its dependent lane', async () => {
+  // #12-#13 overlap on hub.js and #13-#14 overlap on util.js, so the batchable relation
+  // connects all three — but #14 depends on #12. Pairwise vetoing only #12/#14 would still
+  // union them through #13. The whole component must fail closed to singletons.
+  const FILES = { 12: ['src/hub.js'], 13: ['src/hub.js', 'src/util.js'], 14: ['src/util.js'] }
+  const { result } = await runScript({
+    args: { numbers: [12, 13, 14] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: FILES[n], depends_on: n === 14 ? [12] : [] }),
+  })
+  assert.equal(result.green_lanes.length, 3, 'the dependency-linked component is split back to singletons')
+  for (const n of [12, 13, 14]) {
+    assert.deepEqual(laneFor(result, n).issues, [n], `#${n} closes only itself`)
+  }
+  assert.ok(!laneFor(result, 14).issues.includes(12), 'a depends_on target is never absorbed into its dependent')
+  assertUniqueKeys(result)
+})
+
+test('an UNKNOWN footprint never batches, even inside its own group (fail-closed)', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: n === 12 ? [] : ['src/hub.js'] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'an empty files[] is no evidence of ONE unit of work')
+  assert.deepEqual(laneFor(result, 12).issues, [12], 'the unknown-footprint issue keeps its own lane')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'and stays fail-closed to sequential')
+  assertUniqueKeys(result)
+})
+
+test('a batched lane closes ONLY its members — an out-of-lane depends_on stays a hint', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({
+      ...greenResearch(n), group: 'ci', files: ['src/hub.js'],
+      depends_on: n === 12 ? [99, 12] : [99],
+    }),
+  })
+  assert.equal(result.green_lanes.length, 1, 'no in-lane dependency edge -> the pair batches')
+  const lane = result.green_lanes[0]
+  assert.deepEqual(lane.issues, [12, 13], 'issues[] is exactly the batch members — nothing else')
+  assert.deepEqual(lane.depends_on, [99],
+    'the union of member depends_on, deduped, self-reference filtered, and NEVER folded into issues[]')
+  assert.ok(!lane.issues.includes(99), 'an out-of-set dependency is never closed by the lane')
+})
+
+test('a lane-level dependency edge is honoured by mode across BATCHED lanes', async () => {
+  // #12+#13 batch (group ci, share hub.js). #20 is a separate lane that #13 depends on. The
+  // dep is recorded against issue #13, but the mode math runs over LANES — it must still see
+  // the edge between the batched lane and #20's lane and refuse to call either parallel.
+  const FILES = { 12: ['src/hub.js'], 13: ['src/hub.js'], 20: ['docs/x.md'] }
+  const { result } = await runScript({
+    args: { numbers: [12, 13, 20] },
+    research: (n) => ({
+      ...greenResearch(n), group: n === 20 ? 'docs' : 'ci', files: FILES[n],
+      depends_on: n === 13 ? [20] : [],
+    }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'the ci pair batches; docs stays its own lane')
+  assert.deepEqual(laneFor(result, 12).issues, [12, 13], 'the ci lane closes both ci issues')
+  assert.deepEqual(laneFor(result, 12).depends_on, [20], 'the member dep is lifted to the lane')
+  assert.equal(laneFor(result, 12).mode, 'sequential', 'a lane that must land after another is not parallel')
+  assert.equal(laneFor(result, 20).mode, 'sequential', 'and neither is the lane it waits on')
+})
+
+test('batching is computed in script code — it spawns ZERO extra agents', async () => {
+  const numbers = [12, 13]
+  const base = await runScript({ args: { numbers } })
+  const batched = await runScript({
+    args: { numbers },
+    research: (n) => ({ ...greenResearch(n), group: 'ci', files: ['src/hub.js'] }),
+  })
+  assert.equal(batched.calls.agents.length, base.calls.agents.length,
+    'batching must not add a single agent call vs the baseline run')
+  assert.equal(batched.result.green_lanes.length, 1, 'and the batch itself really happened')
+  const labels = batched.calls.agents.map((a) => a.opts.label || '')
+  assert.ok(!labels.some((l) => /batch|group|lane/i.test(l)),
+    `no lane-batching agent may exist — labels were: ${labels.join(', ')}`)
+})
+
+test('the group key is matched case-insensitively (CI and ci are one taxonomy key)', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: n === 12 ? 'CI' : ' ci ', files: ['src/hub.js'] }),
+  })
+  assert.equal(result.green_lanes.length, 1, "'CI' and ' ci ' name the same group")
+  assert.deepEqual(result.green_lanes[0].issues, [12, 13])
+})
+
+test('a GREEN issue with no group keeps its unique issue-scoped fallback key', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12, 13] },
+    research: (n) => ({ ...greenResearch(n), group: '', files: ['src/hub.js'] }),
+  })
+  assert.equal(result.green_lanes.length, 2, 'an empty group is not a grouping signal — it never batches')
+  assert.deepEqual(keysOf(result).slice().sort(), ['issue-12', 'issue-13'])
+  assertUniqueKeys(result)
 })
 
 test('the inlined file-overlap helper block is BYTE-IDENTICAL in both fan-outs (drift guard)', async () => {
