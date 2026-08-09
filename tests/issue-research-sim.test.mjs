@@ -778,6 +778,90 @@ test('the inlined file-overlap helper block is BYTE-IDENTICAL in both fan-outs (
   assert.ok(/function normFiles\(/.test(a) && /function planWaves\(/.test(a), 'the compared block really is the helper block')
 })
 
+// ============ CROSS-WORKFLOW CONTRACT: green_lanes[].mode -> stacked-impl-lanes ============
+// This workflow emits a per-lane `mode` and stacked-impl-lanes resolves one, but nothing used to
+// assert the two agree — either side could rename the field or change its value domain and both
+// suites stayed green. Same move as tests/factory-issue-fix-sim.test.mjs, which feeds its own
+// `evidence` block to the REAL checkFixtureEvidence: the lanes below are the REAL output of this
+// workflow, resolved by the REAL consumer function, with no hand-written fixture in between.
+
+const IMPL_SRC_PATH = new URL('../.claude/workflows/stacked-impl-lanes.js', import.meta.url)
+
+// The consumer's per-lane mode resolver, executed VERBATIM out of stacked-impl-lanes.js. Workflow
+// scripts cannot be `import`ed (top-level return/await + injected runtime globals), so the
+// declaration is sliced out and rebuilt with `MODE` — the one free variable it closes over, the
+// global args.mode default — as a parameter. Nothing is re-implemented here: if the consumer
+// renames the field it reads or narrows the values it accepts, what this returns changes.
+// (The interpolated text is a slice of a first-party file in this repo — the same trust boundary
+// as the `new AsyncFunction(..., src)` every suite here already builds the whole workflow from.)
+async function realLaneModeOf() {
+  const src = await readFile(IMPL_SRC_PATH, 'utf8')
+  const START = 'function laneModeOf(l) {'
+  const i = src.indexOf(START)
+  assert.ok(i >= 0, 'laneModeOf() not found in stacked-impl-lanes.js — the consumer-side contract moved')
+  assert.equal(src.indexOf(START, i + 1), -1, 'laneModeOf() is declared more than once — the slice is ambiguous')
+  const j = src.indexOf('\n}', i)
+  assert.ok(j > i, 'could not delimit laneModeOf() — its closing brace must sit in column 0')
+  const decl = src.slice(i, j + 2)
+  const factory = new Function('MODE', `${decl}\nreturn laneModeOf`)
+  return (laneObject, globalMode) => factory(globalMode)(laneObject)
+}
+
+test('CONTRACT: every green_lanes mode is honoured verbatim by the REAL stacked-impl-lanes resolver', async () => {
+  const resolve = await realLaneModeOf()
+  // #12 and #13 collide on src/hub.js -> both sequential; #14 is disjoint -> parallel. Both
+  // halves of the value domain have to be present or a rename could hide behind one global.
+  // Each issue gets its OWN `group` on purpose: same-group issues with overlapping footprints
+  // are one BATCHED lane (planLaneGroups), and #12+#13 collide by construction — under a shared
+  // group they would collapse into a single lane whose footprint is disjoint from #14's, leaving
+  // every lane 'parallel' and this fixture unable to tell "honoured" from "matched the global".
+  // Distinct groups keep one lane per issue, so a lane's mode IS that issue's mode. The subject
+  // here is the mode contract, not batching — batching has its own tests above. (Same shape as
+  // the sibling half of this contract in tests/stacked-impl-sim.test.mjs, which groups `lane-N`.)
+  const { result } = await runScript({
+    args: { numbers: [12, 13, 14] },
+    research: (n) => ({
+      ...greenResearch(n),
+      group: `lane-${n}`,
+      files: n === 14 ? ['src/solo.js'] : ['src/hub.js', `src/f${n}.js`],
+    }),
+  })
+  const lanes = result.green_lanes
+  assert.equal(lanes.length, 3, 'three GREEN lanes are handed over')
+  assert.deepEqual(lanes.map((l) => l.issues), [[12], [13], [14]],
+    'distinct groups keep these unbatched — one lane per issue, so each lane mode is that issue\'s own')
+  for (const l of lanes) {
+    // Resolved under BOTH global defaults, so no global can be the reason an answer matches.
+    // A renamed FIELD or a renamed VALUE reads as "undeclared" on the consumer side and silently
+    // inherits the global — which contradicts one of these two asserts for every lane.
+    assert.equal(resolve(l, 'parallel'), l.mode,
+      `lane '${l.key}' declares mode ${JSON.stringify(l.mode)} but the REAL consumer resolved it to the global 'parallel' — the field name or its value domain has drifted`)
+    assert.equal(resolve(l, 'sequential'), l.mode,
+      `lane '${l.key}' declares mode ${JSON.stringify(l.mode)} but the REAL consumer resolved it to the global 'sequential' — the field name or its value domain has drifted`)
+    assert.ok(['parallel', 'sequential'].includes(l.mode),
+      `lane '${l.key}' emitted mode ${JSON.stringify(l.mode)}, outside the 'parallel' | 'sequential' domain the consumer accepts`)
+  }
+  // Asserted AFTER the loop: a fixture that only ever produced one mode could not distinguish
+  // "honoured" from "happened to match the global", so the coverage itself is pinned.
+  assert.deepEqual([...new Set(lanes.map((l) => l.mode))].sort(), ['parallel', 'sequential'],
+    'the fixture must exercise BOTH halves of the value domain')
+})
+
+test('CONTRACT: the handoff mode stays OPTIONAL — a lane without one inherits the global args.mode', async () => {
+  // The contract is an opt-in, not a requirement: stripping `mode` off a real emitted lane must
+  // leave the consumer inheriting args.mode, exactly as an older producer's payload would.
+  const resolve = await realLaneModeOf()
+  const { result } = await runScript({ args: { numbers: [12] } })
+  const emitted = result.green_lanes[0]
+  assert.equal(emitted.mode, 'parallel', 'a lone lane with a known footprint is emitted parallel')
+  const { mode, ...withoutMode } = emitted
+  assert.ok(!('mode' in withoutMode), 'the stripped lane really carries no mode')
+  assert.equal(resolve(withoutMode, 'sequential'), 'sequential', 'an undeclared lane inherits a global sequential')
+  assert.equal(resolve(withoutMode, 'parallel'), 'parallel', 'an undeclared lane inherits a global parallel')
+  // ...and this is the same resolver that honours a declared mode, so the two paths are distinct.
+  assert.equal(resolve(emitted, 'sequential'), 'parallel', 'a DECLARED mode still wins over the global')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
