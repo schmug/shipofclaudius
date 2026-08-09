@@ -1,0 +1,18 @@
+{
+  "description": "Cross-session agent question board — injects open questions from schmug/agent-notes at session start. Pairs with the ask-board skill.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "q=$(gh discussion list -R schmug/agent-notes --state open --limit 20 --json number,title,answered,category --jq '.discussions[]|select(.answered==false)|\"#\\(.number) \\(.title)\\(if .category.name!=\"Q&A\" then \"  [!! MISFILED in \\(.category.name) - cannot be answered, move to Q&A]\" else \"\" end)\"' 2>/dev/null); [ -n \"$q\" ] && jq -nc --arg q \"$q\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"Open agent questions (answer only if your work happens to cover it; do not chase):\\n\"+$q)}}'; true",
+            "timeout": 10,
+            "statusMessage": "Checking question board..."
+          }
+        ]
+      }
+    ]
+  }
+}
