@@ -300,6 +300,34 @@ test('every workflow has a suite, and every suite is in the package.json test ch
   }
 })
 
+test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', async () => {
+  // Hooks auto-discover at the PLUGIN ROOT (`hooks/hooks.json`) — unlike `.claude/agents/`,
+  // no plugin.json key is needed. Getting the path wrong ships a file that never runs.
+  let raw
+  try { raw = await read('hooks/hooks.json') } catch { return }  // not shipping hooks: fine
+  const h = JSON.parse(raw)
+  assert.ok(h.hooks && typeof h.hooks === 'object', 'has a top-level "hooks" object')
+  const EVENTS = new Set(['PreToolUse', 'PostToolUse', 'SessionStart', 'SessionEnd', 'Stop',
+    'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Notification', 'SubagentStop'])
+  for (const [event, groups] of Object.entries(h.hooks)) {
+    assert.ok(EVENTS.has(event), `"${event}" is a real hook event (a typo here silently never fires)`)
+    for (const g of [].concat(groups)) {
+      for (const entry of [].concat(g.hooks || [])) {
+        assert.ok(entry.type === 'command', `${event}: only command hooks are used here`)
+        assert.ok(typeof entry.command === 'string' && entry.command.length > 0, `${event}: non-empty command`)
+        // A session-lifecycle hook that can exit non-zero can wedge startup for every
+        // project the plugin is enabled in. Ours must swallow failure explicitly.
+        if (event === 'SessionStart') {
+          assert.ok(/(\|\|\s*true|;\s*true)\s*$/.test(entry.command.trim()),
+            'SessionStart hook must end in `|| true` or `; true` so a broken/absent CLI cannot block startup')
+          assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
+            'SessionStart hook sets a timeout (it makes a network call)')
+        }
+      }
+    }
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
