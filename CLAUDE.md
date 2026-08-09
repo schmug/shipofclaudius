@@ -56,6 +56,16 @@ Workflows that read attacker-writable text (issue/PR bodies, comments, reviews, 
 
 The full per-workflow security model (and the required read-scoped `gh` token for the read-only fan-outs) is documented in [README.md](README.md) "Security model" — consult it before changing any agent's tool grants or fetch path.
 
+## This plugin is canonical (resolved in #87)
+
+For any skill name this repo ships, **the plugin is the source of truth**. Hand-rolled copies under a user's `~/.claude/skills/` predate the plugin and are legacy — they are not a second supported entry point, and they must not be treated as a fallback or a place to patch behavior.
+
+This matters because both load at once. A skill installed via the plugin is addressed `shipofclaudius:<name>`, while a same-named directory in `~/.claude/skills/` claims the bare `<name>` — so the *local* copy silently wins for anyone who types the short form. That ambiguity is the whole reason for this rule.
+
+**Before retiring a local copy, diff its bundled assets against this repo.** The pre-plugin copies were not always older renderings of the same skill — some carried capability that never existed here. Retiring `security-diff-scan` turned up a CI/CD pipeline-abuse lens, a content-contract test, and a report template with no equivalent on `main` (see #89). Check `references/`, `tests/`, and `assets/` subdirectories, and search by **content**, not just filename — the lens was prose-embedded across three methodology phases and matched no filename.
+
+Nothing in this repo can enforce this: `~/.claude/` is outside the tree, so `plugin-integrity.test.mjs` cannot see it. The rule is documentation, and the cleanup is a manual step for the maintainer.
+
 ## Layout
 
 - `.claude/workflows/*.js` — the workflows (the actual product).
