@@ -1,6 +1,7 @@
 ---
 name: merge-pr-with-gate
-description: Gates ONE pull request and squash-merges it only if green (mergeStateStatus + required-check rollup, UNKNOWN=must-verify) — a standalone single-PR slice of stacked-merge-walk's landing gate with no stacking/rebasing. Stages by default; execute:true records the caller's gate decision to merge (gated-autonomous — agent-decided when the deterministic gate passes).
+description: Gates ONE pull request and squash-merges it only if green (mergeStateStatus + required-check rollup, UNKNOWN=must-verify) — a standalone single-PR slice of stacked-merge-walk's landing gate with no stacking/rebasing. Stages by default; execute:true records the caller's gate decision to merge (gated-autonomous — agent-decided when the deterministic gate passes). Use when you want to land ONE already-green, non-factory PR through the same gate stacked-merge-walk uses, without any stacking or rebasing; for a chain of stacked PRs use stacked-merge-walk, and for a factory-produced PR use factory-land.
+argument-hint: <pr-number>
 ---
 
 Run the `merge-pr-with-gate` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
