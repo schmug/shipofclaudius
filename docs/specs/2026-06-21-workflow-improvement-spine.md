@@ -57,12 +57,21 @@ those copies are hand-synced snapshots and have drifted.
 1. **Sequencing:** spine-first (define the cross-cutting patterns once), then apply
    per-workflow.
 2. **Autonomy = confidence-gated, reversible-only floor.** A per-item confidence score gates
-   autonomy, but it governs **reversible** actions only. **Irreversible** actions always stage
-   for one-pass human approval, regardless of confidence. This honors the user's global
-   CLAUDE.md hard gates: *never auto-merge an incomplete branch, never push to `main`,
-   approval before batched destructive actions.*
-3. **Confidence floor:** `confidence ≥ T` may auto-execute a **reversible** action; an
-   **irreversible** action is **never** auto-executed by a workflow no matter the confidence.
+   autonomy, but it governs **reversible** actions only. Everything else falls into the two
+   non-reversible classes of decision 3 — one of which (gated-autonomous, amended 2026-08-15)
+   may auto-execute behind its deterministic gate. This honors the user's global CLAUDE.md
+   hard gates: *merge single PRs only through a mechanical gate (the merge decision is the
+   agent's when the gate is green), never push to `main`, approval before batched destructive
+   actions.*
+3. **Action classes (amended 2026-08-15 — merge-authority policy):**
+   - **REVERSIBLE** — `confidence ≥ T` may auto-execute (draft PR, comment, label, report).
+   - **GATED-AUTONOMOUS** — a **single squash-merge behind the deterministic gate**
+     (mergeStateStatus + required-check rollup, UNKNOWN=must-verify) **may auto-execute**:
+     when the gate passes, the merge decision is the caller's — agent or human — recorded as
+     `execute:true`. The fail-closed gate conditions themselves never loosen.
+   - **IRREVERSIBLE-never-auto** — **batch landings, force-push, and deletion remain
+     IRREVERSIBLE-never-auto**, as do releases/deploys and guardrail edits: they always
+     stage for one-pass human approval, no matter the confidence.
 4. **Idempotency = hybrid:**
    - **Writes → state-derived.** Before any write, verify GitHub truth (PR already open for
      this lane? issue already closed? PR already merged?) and skip if the end-state holds.
@@ -104,7 +113,7 @@ sim test.
 | **Resilience** | Failed agents vanish silently from the result. | Compute `missing[]` = requested − assessed; `log` it and return it for a one-arg recovery re-run (`args.numbers=<missing>`). |
 | **Idempotency** | No checkpoint / no skip-done. | Hybrid per §2.4. The **script cannot do file IO** — a gather agent reads the state file, and a single **writer agent runs between waves** (sequential → no race) to persist. |
 | **Confidence** | Single-pass classification; no confidence signal for the autonomy gate. | Adversarial-verify: `N=3` skeptics (default) each prompted to **refute**, default-refuted on uncertainty; `confidence = fraction not-refuted`. **Invoke only on action-candidates** (items that would trigger a reversible auto-write) and on security findings — NOT on every read-only classification (keeps cost bounded). |
-| **Autonomy** | No structured execution contract. | Tag each proposed action `REVERSIBLE {draft PR, comment, label, report}` vs `IRREVERSIBLE {merge, push-main, deploy, bulk close/delete, force-push}`. Return `auto_execute[]` (reversible AND `confidence ≥ T`, default `T=2/3`) and `gated[]` (everything else, ranked). The workflow itself **never** performs an irreversible action. |
+| **Autonomy** | No structured execution contract. | Tag each proposed action `REVERSIBLE {draft PR, comment, label, report}` vs `GATED-AUTONOMOUS {single squash-merge behind the deterministic merge gate — auto-executes on a green gate under the caller's recorded execute:true}` vs `IRREVERSIBLE {batched landings, push-main, deploy, bulk close/delete, force-push}` (§2.3, amended 2026-08-15). Return `auto_execute[]` (reversible AND `confidence ≥ T`, default `T=2/3`) and `gated[]` (everything else, ranked). A workflow **never** performs an IRREVERSIBLE action, and performs a GATED-AUTONOMOUS one only behind its green deterministic gate. |
 | **Outputs** | Returns raw `{triaged, counts}`; the human report is left to the orchestrator. | Additive synthesis phase → `roadmap` with grouped, dependency-ordered buckets + a `markdown` report. **Additive only** — keep the existing keys. |
 | **Coverage** | Only a count is logged. | No-silent-caps: log every drop/skip/cap with reason + count (non-author, non-open, limit-hit, batch-missing, checkpoint-skipped) + a final `gathered N / processed M / skipped K / missing J` line. |
 | **Stale docs ↓** | Builder lanes don't enforce doc updates. | `stacked-impl-lanes`: a lane that changes behavior must update touched docs in the **same** PR; add a completeness-critic that flags doc drift. |
@@ -130,8 +139,10 @@ Each phase = its own branch + PR + sim-test additions.
   already exists), confidence-gated **reversible** writes (open **draft** PR), doc-freshness in
   each lane. Keep the `security-hardening-reviewer` gate on invariant lanes.
 - **Phase 5 — `stacked-merge-walk`:** **first add it to the repo** + a sim test (it is
-  runtime-only today). This is the only workflow touching **irreversible** actions (merges), so
-  the §2 gate policy is its core: it stages, ranks, and gates — never auto-merges.
+  runtime-only today). It BATCHES merges with force-pushes and branch deletion, so it sits in
+  the §2.3 **IRREVERSIBLE-never-auto** class: it stages, ranks, and gates — the batch lands
+  only under one-pass human approval. (A SINGLE squash-merge behind the deterministic gate is
+  the **gated-autonomous** class — `merge-pr-with-gate`; amended 2026-08-15.)
 - **Phase 6 (optional) — `deep-security-scan` / `defense-scan`:** already the most advanced
   (disprove-first validation = adversarial-verify; `foxguard` prefilter; HTML report). Only add
   a checkpoint so long scans resume cheaply. Reconcile the defense-scan runtime→repo drift here.

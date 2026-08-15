@@ -17,8 +17,11 @@
 //                as the gh selector if no number is known).
 //   args.repo    "owner/name" (optional; defaults to the gh-resolved repo in cwd).
 //   args.execute DEFAULT false → STAGE only: verify read-only and return a verdict, merging
-//                NOTHING. Pass true as the explicit one-pass human approval to actually
-//                squash-merge if (and only if) the gate is green (a merge is irreversible).
+//                NOTHING. Pass true as the caller's recorded gate decision to actually
+//                squash-merge if (and only if) the gate is green. A single squash-merge behind
+//                this deterministic gate is GATED-AUTONOMOUS (2026-08-15 merge-authority policy):
+//                when the gate is green the decision is the caller's — agent or human — and the
+//                fail-closed gate conditions stay mandatory either way.
 //   args.readonlyAgent  the read-only agentType for the untrusted-text relay + the read-only
 //                verify gate (default built-in `Explore`). Does NOT scope the write merge actor.
 //
@@ -50,7 +53,7 @@
 
 export const meta = {
   name: 'merge-pr-with-gate',
-  description: 'Gate ONE pull request and squash-merge it only if green: re-verify mergeStateStatus + the required-check rollup read-only (UNKNOWN=must-verify, never a pass), then squash-merge only when required checks pass, the PR is mergeable, and no review blocks it — otherwise stage/escalate and merge nothing. No stacking/rebasing (that is stacked-merge-walk). STAGES by default (verifies read-only and returns a verdict, merging nothing); pass args.execute:true as the explicit one-pass human approval to actually merge.',
+  description: 'Gate ONE pull request and squash-merge it only if green: re-verify mergeStateStatus + the required-check rollup read-only (UNKNOWN=must-verify, never a pass), then squash-merge only when required checks pass, the PR is mergeable, and no review blocks it — otherwise stage/escalate and merge nothing. No stacking/rebasing (that is stacked-merge-walk). STAGES by default (verifies read-only and returns a verdict, merging nothing); pass args.execute:true as the caller’s recorded gate decision to actually merge — gated-autonomous, agent-decided when the deterministic gate passes.',
   whenToUse: 'You want to land ONE already-green PR through the same gate stacked-merge-walk uses (mergeStateStatus + required-check rollup, UNKNOWN=must-verify), without any stack walking or rebasing. For a chain of stacked PRs use stacked-merge-walk; to only classify PRs use pr-triage-fanout.',
   phases: [
     { title: 'Verify', detail: 'a read-only relay fetches the untrusted PR text, then a read-only agent re-checks mergeStateStatus + the required-check rollup over nonce-fenced data + trusted metadata and returns a merge verdict (UNKNOWN=must-verify). DEFAULT (no args.execute): stop here and return the verdict — merge nothing' },
@@ -88,11 +91,14 @@ const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.t
 // the hand-synced copies in ~/.claude/workflows/ can be diffed for drift. ─────────────────
 const SPINE_VERSION = '1.0.0'
 
-// IRREVERSIBLE-action gate (spine §2/§5). A squash-merge is an IRREVERSIBLE, destructive action.
-// The autonomy floor (and the user's hard gate "explicit approval before destructive actions")
-// says this workflow STAGES and GATES by default and merges NOTHING: a bare run verifies the PR
-// read-only and returns a verdict for review. Pass args.execute:true as the explicit one-pass
-// human approval to actually merge. The default is fail-safe (stage, never merge).
+// GATED-AUTONOMOUS action (spine §2/§5, amended 2026-08-15). A squash-merge is irreversible, but
+// a SINGLE squash-merge behind this deterministic gate (mergeStateStatus + required-check rollup,
+// UNKNOWN=must-verify) is the caller's decision — agent or human — once the gate is green; human
+// approval is reserved for batched destructive landings (stacked-merge-walk), releases/deploys,
+// and guardrail edits. The workflow still STAGES and GATES by default and merges NOTHING: a bare
+// run verifies the PR read-only and returns a verdict. Pass args.execute:true as the caller's
+// recorded gate decision to actually merge. The fail-closed gate conditions are unchanged and
+// mandatory; the default is fail-safe (stage, never merge).
 const EXECUTE = A.execute === true
 
 const INJECTION_GUARD =

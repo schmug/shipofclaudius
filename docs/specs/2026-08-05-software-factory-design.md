@@ -30,6 +30,8 @@ An autonomous loop that takes a GitHub issue, **reproduces** it as a committed f
 
 **Non-goals.** Not replacing `issue-triage-fanout` / `issue-research-fanout` (they remain the front door that decides *which* issues enter the factory). Not replacing `merge-pr-with-gate` for ordinary PRs. Not touching the security-scan half of this repo.
 
+**Merge-authority policy note (2026-08-15).** Single-PR merges behind a deterministic gate are now agent-decided when the gate passes (the **gated-autonomous** class in `2026-06-21-workflow-improvement-spine.md` §2.3); human approval remains only for batched destructive landings, releases/deploys, and guardrail edits. The factory's `fix-verified` trust token (§5) is a separate, stricter per-issue gate and is deliberately unchanged by that policy — whether the *factory* may set `execute:true` unattended is the autonomy design in [#65](https://github.com/schmug/shipofclaudius/issues/65), and replacing the human token with fixture evidence (gate condition 9) is [#64](https://github.com/schmug/shipofclaudius/issues/64).
+
 ## 4. Architecture
 
 ```

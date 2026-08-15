@@ -372,7 +372,7 @@ const reviewIsClean = !!review && review.verdict === 'APPROVE' && review.weakene
   review.attacker_path_blocked !== false && review.test_encodes_issue !== false
 const autonomy = (confidence >= T && reviewIsClean && impl.weakened_control !== true) ? 'auto_execute' : 'gated'
 
-log(`fixed: draft PR ${impl.pr_url || ''} | review ${review ? review.verdict : 'none'} | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (merge/mark-ready) are staged for human approval, never taken here.`)
+log(`fixed: draft PR ${impl.pr_url || ''} | review ${review ? review.verdict : 'none'} | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). Merge/mark-ready are never taken here — they stage for the caller's gated merge decision (merge-pr-with-gate; agent-decided when the deterministic gate passes).`)
 
 return {
   outcome: 'fixed', autonomy, reversible: true,

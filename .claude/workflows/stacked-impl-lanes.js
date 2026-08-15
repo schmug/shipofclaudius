@@ -168,10 +168,13 @@ const SPINE_VERSION = '1.0.0'
 // AUTONOMY (spine §2): confidence-gated, REVERSIBLE-ONLY floor. The only write this workflow
 // performs is opening a DRAFT PR — a REVERSIBLE action (a draft cannot be auto-merged).
 // IRREVERSIBLE actions (merge, mark-ready, push-main, --admin, force-push, branch delete) are
-// NEVER taken here; they always stage for one-pass human approval. A per-lane confidence —
-// derived from the impl status, the invariant-lane security review (which IS the adversarial
-// verify), and the doc-freshness critic — sorts each opened draft PR into auto_execute[]
-// (confidence >= T → cleared for a human to mark ready & merge) vs gated[] (needs attention).
+// NEVER taken here. Merge/mark-ready stage for the caller's gated merge decision downstream
+// (a single gated squash-merge is agent-decided — 2026-08-15 merge-authority policy; a batched
+// landing via stacked-merge-walk stays human-approved); push-main / --admin / force-push /
+// branch-delete stay human-only. A per-lane confidence — derived from the impl status, the
+// invariant-lane security review (which IS the adversarial verify), and the doc-freshness
+// critic — sorts each opened draft PR into auto_execute[] (confidence >= T → cleared for a
+// gated mark-ready & merge) vs gated[] (needs attention).
 const FRESH = A.fresh === true
 const T = (typeof A.confidenceThreshold === 'number' && A.confidenceThreshold >= 0 && A.confidenceThreshold <= 1)
   ? A.confidenceThreshold : 2 / 3
@@ -648,9 +651,11 @@ const results = slots.filter(Boolean)
 const opened = results.filter((r) => r.impl && r.impl.status === 'PR_OPENED')
 
 // Autonomy contract (spine §2): reversible-only floor. auto_execute = opened draft PRs with
-// confidence >= T (cleared for a one-pass human merge); gated = everything needing human
-// attention first (low confidence, REQUEST_CHANGES, doc drift, BLOCKED/FAILED). The workflow
-// itself performs NO irreversible action — merge/mark-ready always stage for human approval.
+// confidence >= T (cleared for a gated mark-ready & merge downstream); gated = everything
+// needing human attention first (low confidence, REQUEST_CHANGES, doc drift, BLOCKED/FAILED).
+// The workflow itself performs NO irreversible action — merge/mark-ready stage for the caller's
+// gated merge decision (agent-decided behind the deterministic gate; batched landings stay
+// human-approved).
 const summarize = (r) => ({
   lane: r.lane,
   issues: r.issues,
@@ -676,7 +681,7 @@ const gated = results.filter((r) => r.autonomy === 'gated').map(summarize).sort(
 // re-running is what releases these (the run is idempotent, so the prefix is not re-done).
 const blocked_on_predecessor = results.filter((r) => r.autonomy === 'blocked_on_predecessor').map(summarize)
 
-log(`${MODE} impl done (${seqIdx.length} sequential / ${parIdx.length} parallel lane(s), wave size ${BATCH} lanes / agent cap ${AGENT_CAP}): ${opened.length}/${LANES.length} PRs opened | auto_execute ${auto_execute.length} / gated ${gated.length} / blocked_on_predecessor ${blocked_on_predecessor.length} / skipped ${skipped_existing.length} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (merge/mark-ready) are staged for human approval, never taken here.`)
+log(`${MODE} impl done (${seqIdx.length} sequential / ${parIdx.length} parallel lane(s), wave size ${BATCH} lanes / agent cap ${AGENT_CAP}): ${opened.length}/${LANES.length} PRs opened | auto_execute ${auto_execute.length} / gated ${gated.length} / blocked_on_predecessor ${blocked_on_predecessor.length} / skipped ${skipped_existing.length} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). Merge/mark-ready are never taken here — they stage for the caller's gated merge decision (batched landings stay human-approved).`)
 if (blocked_on_predecessor.length) {
   log(`⛔ The sequential walk STOPPED at '${heldKey}' (${heldWhy}). Completed prefix: ${auto_execute.length + skipped_existing.length} lane(s). Held: ${blocked_on_predecessor.map((s) => s.lane).join(', ')} — fix '${heldKey}' and re-run to continue the stack.`)
 }

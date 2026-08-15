@@ -13,7 +13,7 @@ Always pass `gateBin` as shown so the gate that runs is the one bundled with **t
 
 Args: `pr` (**required** — the PR number; `number` also accepted), `repo?`, `execute?` (default `false`), `issue?` (override the `Closes #N` routing), `evidence?` (the `{ fixtureTest, redOnBase, greenOnHead }` block returned by `factory-issue-fix`), `gateBin?`, `gateFromRef?` (default `main`), `readonlyAgent?` (default `Explore`). For the full, current list read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-land.js`, or the repo README "Arguments" table.
 
-**STAGE-BY-DEFAULT.** A bare run gathers, gates, and returns the verdict plus the exact audit comment it *would* post — writing **nothing at all**, not even that comment. `execute: true` is the explicit one-pass human approval that lets it comment, label, and merge.
+**STAGE-BY-DEFAULT.** A bare run gathers, gates, and returns the verdict plus the exact audit comment it *would* post — writing **nothing at all**, not even that comment. `execute: true` is the caller's recorded gate decision that lets it comment, label, and merge (single gated squash-merges are agent-decided under the 2026-08-15 merge-authority policy; the human trust token in this pipeline is `fix-verified` — see [#64](https://github.com/schmug/shipofclaudius/issues/64)/[#65](https://github.com/schmug/shipofclaudius/issues/65)).
 
 **WRITES (merges) under `execute: true`** — needs a **write-scoped** `gh` token. `readonlyAgent` scopes only the relays and the gate runner, never the land actor.
 

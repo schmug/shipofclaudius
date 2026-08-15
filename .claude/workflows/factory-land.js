@@ -10,8 +10,11 @@
 //                    args: { pr: 123, repo: "owner/name", gateBin: "<plugin>/packages/factory-gate/bin/gate.mjs" } })
 //
 // STAGE BY DEFAULT. A bare run gathers, gates, and returns the verdict plus the exact comment it
-// WOULD post — writing nothing at all. `execute: true` is the explicit one-pass human approval that
-// lets it comment, label, and merge. Same ladder as merge-pr-with-gate and stacked-merge-walk.
+// WOULD post — writing nothing at all. `execute: true` is the caller's recorded gate decision that
+// lets it comment, label, and merge (2026-08-15 merge-authority policy: a single gated squash-merge
+// is agent-decided; the human trust token in THIS pipeline is `fix-verified` on the issue — whether
+// the factory may set execute unattended is issue #65, fixture evidence for condition 9 is issue
+// #64). Same ladder as merge-pr-with-gate and stacked-merge-walk.
 //
 // ── WHY THE GATE IS CODE, AND HOW THAT SURVIVES THE WORKFLOW RUNTIME ────────────────────────────
 // The merge decision must not be a judgement call: issue and PR bodies are public, attacker-
@@ -52,7 +55,7 @@
 
 export const meta = {
   name: 'factory-land',
-  description: "The software factory's gated landing step: gather ONE PR + its linked issue + the required-check rollup + the repo's gate config (read from the BASE ref, never the PR) through read-only relays, run the deterministic model-free merge gate over that input, post the rendered verdict table as the audit comment, and squash-merge only when all nine conditions pass. The merge decision is re-derived in script code from the full verdict record and the process exit code — never from an agent's boolean. STAGES by default (gathers, gates, and returns the verdict + the exact comment it would post, writing nothing); pass args.execute:true as the explicit one-pass human approval to comment, label, and merge.",
+  description: "The software factory's gated landing step: gather ONE PR + its linked issue + the required-check rollup + the repo's gate config (read from the BASE ref, never the PR) through read-only relays, run the deterministic model-free merge gate over that input, post the rendered verdict table as the audit comment, and squash-merge only when all nine conditions pass. The merge decision is re-derived in script code from the full verdict record and the process exit code — never from an agent's boolean. STAGES by default (gathers, gates, and returns the verdict + the exact comment it would post, writing nothing); pass args.execute:true as the caller's recorded gate decision to comment, label, and merge.",
   whenToUse: 'A factory PR is open, a human has applied the `fix-verified` trust token, and you want the deterministic gate to decide whether it may land unattended. This is the terminal WRITE step of the factory pipeline. For an ordinary (non-factory) PR use merge-pr-with-gate; for a chain of stacked PRs use stacked-merge-walk.',
   phases: [
     { title: 'Gather', detail: 'read-only relays fetch the PR, its linked issue, the base branch required-context list, and the repo .factory/gate.json READ FROM THE BASE REF — each behind a fresh nonce. The raw bytes are parsed in script code into the typed gate input; no model interprets or summarizes them' },
