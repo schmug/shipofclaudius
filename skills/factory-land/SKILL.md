@@ -1,6 +1,7 @@
 ---
 name: factory-land
-description: The software factory's gated landing step — gather ONE PR, its linked issue, the required-check rollup, and the repo's gate config (read from the BASE ref, never the PR), run the deterministic model-free merge gate, post the verdict table as an audit comment, and squash-merge only when all nine fail-closed conditions pass. Stages by default and writes nothing; execute:true is the explicit approval that merges.
+description: The software factory's gated landing step — gather ONE PR, its linked issue, the required-check rollup, and the repo's gate config (read from the BASE ref, never the PR), run the deterministic model-free merge gate, post the verdict table as an audit comment, and squash-merge only when all nine fail-closed conditions pass. Stages by default and writes nothing; execute:true is the explicit approval that merges. Use when a factory PR has been trust-tagged fix-verified and you want the deterministic gate to decide whether it may land unattended; for an ordinary (non-factory) PR use merge-pr-with-gate, and for a chain of stacked PRs use stacked-merge-walk.
+argument-hint: <pr-number>
 ---
 
 Run the `factory-land` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path, injecting the bundled gate binary:

@@ -1,6 +1,6 @@
 ---
 name: stacked-merge-walk
-description: Lands a chain of stacked PRs onto a moving base (base-first, gate-verified, rebase-own-commits, escalate real conflicts). The terminal write step of the dev-lifecycle pipeline.
+description: Lands a chain of stacked PRs onto a moving base (base-first, gate-verified, rebase-own-commits, escalate real conflicts). The terminal write step of the dev-lifecycle pipeline. Use after stacked-impl-lanes has opened a chain of stacked PRs and you want to land the whole stack in order; for a single ordinary PR use merge-pr-with-gate, and for a factory-produced PR use factory-land.
 ---
 
 Run the `stacked-merge-walk` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
