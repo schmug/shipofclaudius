@@ -29,7 +29,10 @@
 //     lanes:    [{ key, branch, issues }, ...]        // stacked-impl-lanes lane objects
 //   args.execute:  DEFAULT false → STAGE only: verify the stack read-only and return a ranked
 //                  land-plan, merging NOTHING. Pass true as the explicit one-pass human approval
-//                  to actually walk + land (batched merges/force-pushes/deletes are irreversible).
+//                  to actually walk + land. The human requirement is owed to the BATCH — this
+//                  walk bundles squash-merges with force-pushes and branch deletion, and batched
+//                  destructive landings stay human-approved — not to the merges themselves (a
+//                  single gated squash-merge is agent-decided; see merge-pr-with-gate).
 //   args.postMergeVerify: DEFAULT true → after each squash-merge, re-run test+typecheck on a
 //                  detached `origin/<base>`. Pass false to skip it on a slow suite (see below).
 //
@@ -63,7 +66,7 @@
 
 export const meta = {
   name: 'stacked-merge-walk',
-  description: 'Land a chain of stacked PRs onto a moving base: walk base-first, re-verify mergeStateStatus + required-check rollup (UNKNOWN=must-verify), rebase each child’s own commits --onto the base after its parent squash-merges, resolve only mechanical docs/test-type conflicts (escalate real/semantic ones), gate-verify, squash-merge, re-verify the merged base post-merge (a RED base stops the walk), and prune branches only once the whole stack lands. STAGES by default (verifies read-only and returns a ranked land-plan, merging nothing); pass args.execute:true as the explicit one-pass human approval to actually land.',
+  description: 'Land a chain of stacked PRs onto a moving base: walk base-first, re-verify mergeStateStatus + required-check rollup (UNKNOWN=must-verify), rebase each child’s own commits --onto the base after its parent squash-merges, resolve only mechanical docs/test-type conflicts (escalate real/semantic ones), gate-verify, squash-merge, re-verify the merged base post-merge (a RED base stops the walk), and prune branches only once the whole stack lands. STAGES by default (verifies read-only and returns a ranked land-plan, merging nothing); pass args.execute:true as the explicit one-pass human approval to actually land — kept human because the walk BATCHES merges with force-pushes and branch deletion, not because a single gated merge needs one.',
   whenToUse: 'After stacked-impl-lanes has opened a chain of stacked PRs (and pr-triage-fanout has classified them) and you want to LAND the whole stack. This is the terminal, WRITE step of the dev-lifecycle pipeline — it merges/rebases, so do NOT run it under the read-only gh token. Give it the ordered, base-first stack (prs / branches / lanes).',
   phases: [
     { title: 'Verify', detail: 'per PR (read-only, in waves): a relay fetches the untrusted PR text, then an agent re-checks mergeStateStatus + the required-check rollup over nonce-fenced data + trusted metadata and returns a land verdict (UNKNOWN=must-verify). DEFAULT (no args.execute): stop here and return the ranked land-plan — merge nothing' },
@@ -126,11 +129,13 @@ const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.t
 const SPINE_VERSION = '1.0.0'
 
 // IRREVERSIBLE-action gate (spine §2/§5). Landing a stack = batched squash-merges + force-pushes
-// + branch deletes — an IRREVERSIBLE, batched-destructive action. The autonomy floor (and the
-// user's hard gate "explicit approval before batched destructive actions") says this workflow
+// + branch deletes — an IRREVERSIBLE, batched-destructive action. The human gate here is owed to
+// the BATCH: the user's hard gate is "explicit approval before batched destructive actions", not
+// "merges need humans" — a SINGLE squash-merge behind the deterministic gate is agent-decided
+// (gated-autonomous; see merge-pr-with-gate, 2026-08-15 merge-authority policy). So this workflow
 // STAGES, RANKS, and GATES by default and merges NOTHING: a bare run returns a ranked land-plan
 // (every PR verified read-only) for review. Pass args.execute:true as the explicit one-pass human
-// approval to actually walk the stack and land it. The default is fail-safe (stage, never merge).
+// approval for the batched landing. The default is fail-safe (stage, never merge).
 const EXECUTE = A.execute === true
 
 // POST-MERGE VERIFICATION (issue #71). The land actor's step-5 gate runs BEFORE the squash-merge,

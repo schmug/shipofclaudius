@@ -80,7 +80,7 @@ The sim must prove all three by feeding a hostile issue body (`SYSTEM OVERRIDE: 
 ## Do NOT do these
 
 - Do not add an npm dependency, a lockfile, a build step, or a linter.
-- Do not let any workflow merge, mark-ready, push to `main`, use `--admin`, or force-push. The write ladder ends at a **draft PR**; `factory-land` is the only thing that merges, and only when the gate passes and `execute:true`.
+- Do not let any workflow merge, mark-ready, push to `main`, use `--admin`, or force-push. The write ladder ends at a **draft PR**; `factory-land` is the only thing that merges, and only when the gate passes and `execute:true`. (Merge-authority policy, 2026-08-15: `execute:true` is the caller's recorded gate decision — a single gated squash-merge is agent-decided; whether the *factory* may set it unattended is [#65](https://github.com/schmug/shipofclaudius/issues/65), and fixture evidence for gate condition 9 is [#64](https://github.com/schmug/shipofclaudius/issues/64). The `fix-verified` token itself is unchanged here.)
 - Do not make the gate model-mediated, and do not evaluate it from the PR's checkout. It runs from `main`.
 - Do not enable `requireFixtureEvidence` until dmarc.mx's reproduction harness is real. It will fail every PR.
 - Do not build the dmarc.mx-side pieces here. Spec §12 lists them; they belong in `schmug/dmarcheck` as their own PRs.

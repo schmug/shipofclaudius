@@ -16,7 +16,7 @@
 - One wrapper per workflow — **all nine** — and the wrappers add **no logic** (pure indirection). Descriptions drive natural-language triggering.
 - Do **not** change any workflow's behavior or the in-repo project-level auto-load.
 - Tests are **offline**, Node built-ins only (`node:fs/promises`, `node:assert/strict`), zero token cost, wired into `npm test`. The suite count only goes up.
-- Conventional-commit prefixes; every commit ends with a `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` trailer; open a PR (never push `main`); do not enable auto-merge.
+- Conventional-commit prefixes; every commit ends with a `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` trailer; open a PR (never push `main`); enable auto-merge only when the target repo has required checks (auto-merge without required checks merges instantly, gating nothing).
 - The nine workflow names (canonical, = filename stems): `deep-security-scan`, `defense-scan`, `issue-research-fanout`, `issue-triage-fanout`, `pr-review-fanout`, `pr-triage-fanout`, `security-diff-scan`, `stacked-impl-lanes`, `stacked-merge-walk`.
 
 ---
@@ -349,7 +349,7 @@ gh pr create --base main --head feat/workflow-plugin \
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
-Do not enable auto-merge.
+Enable auto-merge only when the target repo has required checks (auto-merge without required checks merges instantly, gating nothing).
 
 ---
 
