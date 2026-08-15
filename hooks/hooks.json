@@ -3,11 +3,11 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup",
+        "matcher": "startup|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "q=$(gh discussion list -R schmug/agent-notes --state open --limit 20 --json number,title,answered,category --jq '.discussions[]|select(.answered==false)|\"#\\(.number) \\(.title)\\(if .category.name!=\"Q&A\" then \"  [!! MISFILED in \\(.category.name) - cannot be answered, move to Q&A]\" else \"\" end)\"' 2>/dev/null); [ -n \"$q\" ] && jq -nc --arg q \"$q\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"Open agent questions (answer only if your work happens to cover it; do not chase):\\n\"+$q)}}'; true",
+            "command": "q=$(gh discussion list -R schmug/agent-notes --state open --limit 20 --json number,title,answered,category --jq '.discussions[]|select(.answered==false)|\"#\\(.number) \\(.title)\\(if .category.name!=\"Q&A\" then \"  [!! MISFILED in \\(.category.name) - cannot be answered, move to Q&A]\" else \"\" end)\"' 2>/dev/null); rc=$?; jq -nc --arg q \"$q\" --arg rc \"$rc\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:((if $rc!=\"0\" then \"Question board (schmug/agent-notes): unreachable this session.\" elif $q==\"\" then \"Question board (schmug/agent-notes): no open questions.\" else \"Open agent questions (answer only if your work happens to cover it; do not chase):\\n\"+$q end)+\"\\nHit a durable unknown this session? If no grep or command can settle it, and it is not a call only the user can make, but a later session in different context could - post it with the shipofclaudius:ask-board skill, state the assumption you are proceeding under, and keep going. The board never gates work.\")}}'; true",
             "timeout": 10,
             "statusMessage": "Checking question board..."
           }
