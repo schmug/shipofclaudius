@@ -333,6 +333,41 @@ test('SPINE_VERSION is stamped as a constant in the source', async () => {
   assert.ok(/const\s+SPINE_VERSION\s*=/.test(src), 'a SPINE_VERSION constant is declared')
 })
 
+// ---------- model independence (#94) ----------
+// fix-finding already has ROLE independence (Verify runs under the security-hardening-reviewer
+// agentType). What it lacked was MODEL independence: both the writer and the reviewer inherited
+// the session model, so one model graded its own work — and the reviewer's verdict is not
+// advisory, it drives the auto_execute autonomy decision.
+
+test('models: Verify runs on a DIFFERENT model family from Fix', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  const r = byPrefix(calls, 'review')[0]
+  assert.ok(f.opts.model, 'the fix agent is pinned to an explicit model')
+  assert.ok(r.opts.model, 'the review agent is pinned to an explicit model')
+  assert.notEqual(r.opts.model, f.opts.model, 'a same-model reviewer agrees with itself — the models must differ')
+})
+
+test('models: both are overridable, and a caller that collapses them is rejected', async () => {
+  const { calls } = await runScript({ args: baseArgs({ fixModel: 'opus', reviewModel: 'haiku' }) })
+  assert.equal(byPrefix(calls, 'fix')[0].opts.model, 'opus', 'fixModel is honoured')
+  assert.equal(byPrefix(calls, 'review')[0].opts.model, 'haiku', 'reviewModel is honoured')
+  await assert.rejects(
+    () => runScript({ args: baseArgs({ fixModel: 'opus', reviewModel: 'opus' }) }),
+    (e) => /DIFFERENT model family/i.test(e.message) && /opus/.test(e.message),
+    'collapsing the two must THROW and name both values, not silently degrade'
+  )
+})
+
+test('models: the model pin does not disturb the fix agent tools or the reviewer role', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  const r = byPrefix(calls, 'review')[0]
+  assert.equal(f.opts.isolation, 'worktree', 'the fix agent keeps worktree isolation')
+  assert.ok(!f.opts.agentType, 'the fix agent keeps its write tools (no read-only agentType)')
+  assert.equal(r.opts.agentType, 'security-hardening-reviewer', 'model independence is ADDED TO role independence, not swapped for it')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

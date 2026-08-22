@@ -612,6 +612,28 @@ test('report prompt carries the bundle + SARIF for embedding', async () => {
   assert.ok(/fingerprint/i.test(map.reportPrompt))
 })
 
+// ---------- model independence forwarding (#94 criterion 4) ----------
+// Once #92 gave deep-security-scan discoveryModel/validateModel, defense-scan's Layer 1
+// composition call had to forward them or Layer 1 silently keeps the old inherit-everything
+// behaviour — the exact "documented but not shipped" failure #70 warns about.
+
+test('models: Layer 1 forwards the scan model args to deep-security-scan', async () => {
+  const { calls } = await runScript({ args: { target: '/tmp/fake', discoveryModel: 'opus', validateModel: 'haiku' }, map: {} })
+  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  assert.ok(wf, 'Layer 1 composes deep-security-scan')
+  assert.equal(wf.args.discoveryModel, 'opus', 'discoveryModel reaches Layer 1')
+  assert.equal(wf.args.validateModel, 'haiku', 'validateModel reaches Layer 1')
+})
+
+test('models: forwarding is absent-safe — an unset arg is not forwarded as undefined-ish junk', async () => {
+  const { calls } = await runScript({ args: { target: '/tmp/fake' }, map: {} })
+  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  assert.ok(wf, 'Layer 1 still composes deep-security-scan with no model args')
+  for (const k of ['discoveryModel', 'validateModel']) {
+    if (k in wf.args) assert.ok(typeof wf.args[k] === 'string' && wf.args[k], k + ' is either omitted or a real string')
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
