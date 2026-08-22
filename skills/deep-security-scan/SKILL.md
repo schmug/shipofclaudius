@@ -10,3 +10,5 @@ Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/deep-security-sc
 ```
 
 Fill `args` from the user's request. Common args: `target` (default `"."`), `scope`, `rounds`, `threshold` (default `low`), `tools`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/deep-security-scan.js`, or the repo README "Arguments" table. Read-only analysis; writes a report file.
+
+Reports are written **outside** the target repo's working tree by default (`${TMPDIR:-/tmp}/shipofclaudius-scans/<ts>-<kind>/`) so a routine `git add -A` can never stage unpatched findings; `outputDir` overrides it, and an in-tree override makes the run ensure a `.gitignore` entry first. On a **public** (or unresolved) target the run emits a `DISCLOSURE RISK` warning and returns `disclosure_warning` — route findings to the private intake (`/ghsa`, or `/track-findings` which does it automatically), never a committed report or public PR.
