@@ -1,6 +1,6 @@
 ---
 name: issue-research-fanout
-description: Web-enabled fan-out over the RESEARCH bucket — one agent per issue investigates (codebase + gh + web) and returns a verdict aiming to move it to GREEN with an implementable spec.
+description: Web-enabled fan-out over the RESEARCH bucket — one agent per issue investigates (codebase + gh + web) and returns GREEN/DECISION/BLOCKED/STILL_RESEARCH, aiming to move each issue to GREEN with an implementable spec and a lane-shaped handoff. Read-only on GitHub. Use after issue-triage-fanout has bucketed the backlog and you want its RESEARCH issues resolved into buildable ones — work out what this issue actually needs, unblock the research pile. Not for classifying the backlog in the first place (use issue-triage-fanout, which produces the numbers this takes) and not for implementing the result (use stacked-impl-lanes).
 ---
 
 Run the `issue-research-fanout` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
