@@ -176,6 +176,16 @@ export function checkFixtureEvidence(input, config) {
   if (!config.requireFixtureEvidence) return cond('fixture_evidence', true, 'fixture evidence not required by config')
   const e = input?.evidence
   if (!e || typeof e !== 'object') return cond('fixture_evidence', false, 'no fixture evidence supplied')
+  // PROVENANCE (#64). These booleans decide whether code lands unattended, so they must come from
+  // a CI job that RAN the fixture and observed the process exit codes — never from the fix agent,
+  // which authored the very code under judgement. `source` is a marker, not proof; the real
+  // guarantee is the transport (an artifact from a pull_request-triggered job, consumed by a land
+  // job that only ever checks out the BASE ref). The marker exists so that agent-shaped or
+  // legacy-shaped evidence fails LOUDLY here instead of passing silently.
+  if (e.source !== 'ci') {
+    return cond('fixture_evidence', false,
+      `fixture evidence not produced by CI (provenance is "${e.source || 'none'}") — condition 9 accepts only evidence carrying source:"ci", written by the fixture-evidence job from observed test exit codes`)
+  }
   const problems = []
   if (!e.fixtureTest) problems.push('no fixture test path recorded')
   if (e.redOnBase !== true) problems.push('the fixture test was not proven RED on the base commit')

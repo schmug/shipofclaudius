@@ -128,15 +128,46 @@ test('factory.yml: the gate exit code is captured, not swallowed by the inherite
   assert.ok(/if: always\(\)/.test(y), 'the comment/escalate steps run under always(), or they are skipped on escalate')
 })
 
+// Split the workflow into its top-level job blocks. #64 added `fixture-evidence`, which runs on the
+// UNPRIVILEGED `pull_request` event and therefore MAY check out and run PR-authored code — that is
+// its entire purpose. The invariant was never "this file contains no head.sha"; it is "the
+// write-privileged job never touches PR code". A file-wide substring ban was a proxy for that, and
+// the proxy stopped matching the property. These assertions are job-scoped and strictly stronger.
+const factoryJobs = (y) => {
+  const body = y.slice(y.indexOf('\njobs:'))
+  const out = {}
+  const re = /^ {2}([a-z][a-z0-9-]*):$/gm
+  const marks = [...body.matchAll(re)]
+  marks.forEach((m, i) => {
+    out[m[1]] = body.slice(m.index, i + 1 < marks.length ? marks[i + 1].index : body.length)
+  })
+  return out
+}
+
 test('factory.yml: pull_request_target never checks out or executes PR-authored code', async () => {
   const y = await factoryCode()
   assert.ok(/pull_request_target/.test(y), 'the workflow uses pull_request_target')
-  assert.ok(!/head\.sha|head\.ref/.test(y),
-    'the land job must never check out the PR head — pull_request_target runs with write access')
   assert.ok(/ref: \$\{\{ github\.event\.pull_request\.base\.ref \}\}/.test(y), 'it checks out the BASE ref')
-  const land = y.slice(y.indexOf('  land:'))
+  const jobs = factoryJobs(y)
+  const land = jobs.land
+  assert.ok(land, 'the land job exists')
+  assert.ok(!/ref:\s*\$\{\{\s*github\.event\.pull_request\.head\./.test(land),
+    'the land job must never check out the PR head — pull_request_target runs with write access')
+  assert.ok(!/git\s+checkout/.test(land), 'and never git-checkouts anything itself')
   assert.ok(!/npm ci|npm install|npm run build/.test(land),
     'no install or build step in the land job — the gate is dependency-free on purpose')
+})
+
+test('factory.yml: the job that DOES run PR code is unprivileged and secretless', async () => {
+  const y = await factoryCode()
+  const prod = factoryJobs(y)['fixture-evidence']
+  assert.ok(prod, 'the fixture-evidence producer exists')
+  assert.ok(/if: github\.event_name == 'pull_request'/.test(prod),
+    "it runs ONLY on the unprivileged pull_request event, never pull_request_target")
+  assert.ok(!/secrets\./.test(prod),
+    'and never reads a secret — it executes PR-authored code, so a leak there is a repo compromise')
+  assert.ok(/permissions:\n\s+contents: read/.test(prod), 'with a read-only token')
+  assert.ok(!/gh pr merge|gh pr review|gh pr ready/.test(prod), 'and no write actions at all')
 })
 
 test('factory.yml: the gate config is read from the base ref, never the PR', async () => {
@@ -155,8 +186,17 @@ test('factory.yml: the merge is never forced', async () => {
 
 test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
   const y = await factoryYml()
+  // Previously a flat "never appears" ban. #64 needs the PR body to pick the fixture test, and the
+  // SAFE way to do that is exactly what this test is named for: bind it to an env var, never
+  // interpolate it into the script. So the assertion now enforces the shape rather than banning the
+  // field — every occurrence must be an `ENV_NAME: ${{ ... }}` binding, never inline in a run:.
   for (const field of ['issue.title', 'pull_request.title', 'pull_request.body', 'issue.body', 'head_commit.message']) {
-    assert.ok(!y.includes(`github.event.${field}`), `${field} is never interpolated (injection vector)`)
+    const needle = `github.event.${field}`
+    for (const line of y.split('\n')) {
+      if (!line.includes(needle)) continue
+      assert.match(line, new RegExp(`^\\s+[A-Z][A-Z0-9_]*: \\$\\{\\{ \\s*github\\.event\\.${field.replace('.', '\\.')}\\s*\\}\\}$`),
+        `${field} may only be bound to an env var, never interpolated into a script: ${line.trim()}`)
+    }
   }
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
 })

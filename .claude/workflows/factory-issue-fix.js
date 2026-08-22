@@ -631,7 +631,8 @@ if (stopped('diagnose')) {
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'reproduce', report: renderReport(ISSUE, parts),
     reproduce: repro, fixture: FIXTURE, test: TEST,
-    evidence: { fixtureTest: TEST, redOnBase: false, greenOnHead: false },
+    evidence: null,
+    fixture_self_report: { fixtureTest: TEST, redOnBase: false, greenOnHead: false, source: 'fix-agent-self-report', gate_input: false },
     transition: transition(['repro-ok'], ['needs-repro'], ''),
   })
 }
@@ -662,7 +663,8 @@ if (stopped('verify')) {
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'diagnose', report: renderReport(ISSUE, parts),
     reproduce: repro, diagnose: diag, fixture: FIXTURE, test: TEST,
-    evidence: { fixtureTest: TEST, redOnBase: false, greenOnHead: false },
+    evidence: null,
+    fixture_self_report: { fixtureTest: TEST, redOnBase: false, greenOnHead: false, source: 'fix-agent-self-report', gate_input: false },
     transition: transition(['repro-ok'], ['needs-repro'], ''),
   })
 }
@@ -713,7 +715,8 @@ if (stopped('fix')) {
   return shell({
     outcome: 'phase_complete', autonomy: 'gated', phase_reached: 'verify', report: renderReport(ISSUE, parts),
     reproduce: repro, diagnose: diag, verify: verification, fixture: FIXTURE, test: TEST,
-    evidence: { fixtureTest: TEST, redOnBase: false, greenOnHead: false },
+    evidence: null,
+    fixture_self_report: { fixtureTest: TEST, redOnBase: false, greenOnHead: false, source: 'fix-agent-self-report', gate_input: false },
     transition: transition(['diagnosed'], ['needs-repro'], ''),
   })
 }
@@ -737,15 +740,24 @@ if (!impl || impl.status !== 'PR_OPENED') {
   })
 }
 
-// The typed evidence handoff. This block is shaped EXACTLY as the gate's `fixture_evidence` input
-// (packages/factory-gate/src/gate-core.mjs :: checkFixtureEvidence) — that is the whole point of the
-// contract, and it is what makes a mechanically-minted `fix-verified` possible once a repo's
-// reproduction harness has a track record. The booleans come from the fix agent OBSERVING the runs,
-// never from prose; the verbatim outputs live in report.md.
-const evidence = {
+// GATE-BOUND EVIDENCE IS NOT PRODUCED HERE (#64). Condition 9 is the one condition designed to
+// eventually replace the human reviewer, so it must not be the one condition a model can assert
+// about its own work. `impl` is the return of the WRITE-CAPABLE fix agent — the same agent that
+// wrote the code being judged — so its red_on_base / green_on_head fields are a claim, not an
+// observation, and they no longer reach the gate. The gate's evidence comes from a CI job that runs
+// the fixture on both refs and records process exit codes, delivered as an artifact
+// (`factory-evidence.json`, see .factory/templates/factory.yml :: fixture-evidence).
+const evidence = null
+
+// The agent's claim is still worth keeping — it is a useful cross-check against CI in report.md,
+// and a disagreement between the two is itself a signal. It is shaped so it CANNOT be mistaken for
+// gate input: it carries its provenance, and the gate refuses any evidence whose source is not "ci".
+const fixture_self_report = {
   fixtureTest: impl.test_committed || TEST || '',
   redOnBase: impl.red_on_base === true,
   greenOnHead: impl.green_on_head === true,
+  source: 'fix-agent-self-report',
+  gate_input: false,
 }
 
 function fixConfidence(im, dg, vf) {
@@ -760,17 +772,20 @@ function fixConfidence(im, dg, vf) {
   return Math.max(0, Math.min(1, c))
 }
 const confidence = fixConfidence(impl, diag, verification)
-const autonomy = (confidence >= T && impl.weakened_control !== true && evidence.redOnBase && evidence.greenOnHead) ? 'auto_execute' : 'gated'
+// This autonomy value is the WORKFLOW'S OWN advisory hint, not a gate decision — factory-land's
+// deterministic gate is what actually lands anything, and it reads CI-produced evidence only. The
+// hint may therefore read the agent's self-report: being optimistic here cannot merge anything.
+const autonomy = (confidence >= T && impl.weakened_control !== true && fixture_self_report.redOnBase && fixture_self_report.greenOnHead) ? 'auto_execute' : 'gated'
 
 const report = renderReport(ISSUE, parts)
-log(`fix-proposed: draft PR ${impl.pr_url || ''} | red-on-base=${evidence.redOnBase} green-on-head=${evidence.greenOnHead} | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (mark-ready, merge) are NEVER taken here — factory-land gates the merge.`)
+log(`fix-proposed: draft PR ${impl.pr_url || ''} | self-reported red-on-base=${fixture_self_report.redOnBase} green-on-head=${fixture_self_report.greenOnHead} (NOT gate input — CI produces the gate's evidence) | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (mark-ready, merge) are NEVER taken here — factory-land gates the merge.`)
 
 return shell({
   outcome: 'fix_proposed', autonomy, phase_reached: 'fix', report,
   reproduce: repro, diagnose: diag, verify: verification, fix: impl,
-  fixture: impl.fixture_committed || FIXTURE, test: evidence.fixtureTest,
+  fixture: impl.fixture_committed || FIXTURE, test: fixture_self_report.fixtureTest,
   pr_url: impl.pr_url || '', preview_url: impl.preview_url || '',
-  evidence, confidence,
+  evidence, fixture_self_report, confidence,
   transition: transition(['fix-proposed'], ['needs-repro', 'repro-ok'],
     `**Draft PR:** ${impl.pr_url || '(none)'}\n` +
     `**Preview:** ${impl.preview_url || '(none)'}\n\n` +

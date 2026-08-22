@@ -480,33 +480,44 @@ test('the control-not-weakened guard is present in the fix prompt', async () => 
   assert.ok(/auth/i.test(p) && /(authoriz|authz)/i.test(p) && /validation/i.test(p) && /sandbox/i.test(p), 'the named controls are auth, authz, validation, sandboxing')
 })
 
-// ---------- the typed evidence handoff (cross-contract with the real gate) ----------
+// ---------- the evidence handoff: the ENGINE no longer supplies it (#64) ----------
+// These three tests replaced their predecessors, which asserted `result.evidence` was built from
+// `impl.red_on_base` / `impl.green_on_head`. That was the DEFECT: the write-capable fix agent
+// that authored the code also asserted the booleans that judge it. The tests below pin the
+// opposite contract — the engine emits NO gate-bound evidence, and the agent's claim survives only
+// as a clearly-marked self-report for report.md.
 
-test('the returned evidence block is shaped EXACTLY as the real gate consumes it', async () => {
+test('the engine supplies NO gate-bound evidence — the fix agent cannot reach condition 9', async () => {
   const { result } = await runScript({ args: baseArgs() })
-  assert.deepEqual(Object.keys(result.evidence).sort(), ['fixtureTest', 'greenOnHead', 'redOnBase'], 'exactly the three fields the gate reads')
-  // Fed to the REAL condition imported from packages/factory-gate — not a local copy.
-  const passing = checkFixtureEvidence({ evidence: result.evidence }, { requireFixtureEvidence: true })
-  assert.equal(passing.id, 'fixture_evidence', 'it is the fixture_evidence condition')
-  assert.equal(passing.pass, true, "a fix proven red-on-base and green-on-head satisfies the gate's condition 9")
+  assert.equal(result.evidence, null, 'no agent-authored evidence is handed to the gate')
 })
 
-test('unproven evidence fails the real gate condition rather than quietly passing', async () => {
-  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ red_on_base: false }) })
-  assert.equal(result.evidence.redOnBase, false, 'an unobserved red state is reported as false, not assumed')
-  const v = checkFixtureEvidence({ evidence: result.evidence }, { requireFixtureEvidence: true })
-  assert.equal(v.pass, false, 'the real gate refuses evidence that was never proven red on the base')
-  assert.match(v.reason, /RED on the base/i, 'and says why')
+test('the fix agent claim survives only as a self-report, explicitly marked non-gate', async () => {
+  const { result } = await runScript({ args: baseArgs() })
+  const sr = result.fixture_self_report
+  assert.ok(sr, 'the self-report is still returned for report.md as a cross-check')
+  assert.equal(sr.redOnBase, true, 'it still carries what the agent claimed')
+  assert.equal(sr.gate_input, false, 'and is explicitly flagged as NOT gate input')
+  assert.equal(sr.source, 'fix-agent-self-report', 'with its provenance named')
+  const v = checkFixtureEvidence({ evidence: sr }, { requireFixtureEvidence: true })
+  assert.equal(v.pass, false, 'feeding the self-report to the REAL gate is refused on provenance')
+  assert.match(v.reason, /provenance|not produced by CI/i)
 })
 
-test('evidence booleans come from observation, never from prose', async () => {
-  const { result } = await runScript({
-    args: baseArgs(),
-    fix: () => fixOpened({ red_on_base: undefined, green_on_head: undefined, red_output: 'it definitely failed, trust me', green_output: 'it definitely passes now' }),
-  })
-  assert.equal(result.evidence.redOnBase, false, 'a missing observation is false, not inferred from the prose')
-  assert.equal(result.evidence.greenOnHead, false, 'same for the green side')
-  assert.equal(result.autonomy, 'gated', 'unproven evidence can never be auto_execute')
+// THE PROOF TEST for #64. If this passes before the change, the change is doing nothing.
+test('a fixture that PASSES on base is refused by condition 9 even when the fix agent claims red', async () => {
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ red_on_base: true, green_on_head: true }) })
+  assert.equal(result.fixture_self_report.redOnBase, true, 'the agent claims the fixture was red on base')
+  // CI observed the opposite: the fixture passes on base, so it does not encode the bug.
+  const ciSaysGreenOnBase = {
+    schema: 1, source: 'ci', fixtureTest: result.fixture_self_report.fixtureTest,
+    redOnBase: false, greenOnHead: true, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), runId: '1',
+  }
+  const v = checkFixtureEvidence({ evidence: ciSaysGreenOnBase }, { requireFixtureEvidence: true })
+  assert.equal(v.pass, false, "CI's observation wins over the agent's claim")
+  assert.match(v.reason, /RED on the base/i)
+  // And the agent's claim cannot be substituted for CI's:
+  assert.equal(result.evidence, null, 'there is no engine-supplied path for the claim to reach the gate')
 })
 
 // ---------- restartability (one Action run advances one phase) ----------
