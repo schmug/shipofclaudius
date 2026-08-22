@@ -10,4 +10,8 @@ Run the `pr-review-fanout` dynamic workflow bundled with this plugin by calling 
 Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js", args: { /* fill from the request */ } })
 ```
 
-Fill `args` from the user's request. Common args: `number`/`pr` (required), `repo`, `dimensions`, `threshold`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js`, or the repo README "Arguments" table. READ-ONLY; reviews/reports only, never comments/merges; read-scoped `gh` token.
+Fill `args` from the user's request. Common args: `number`/`pr` (required), `repo`, `dimensions`, `issue`, `threshold`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js`, or the repo README "Arguments" table. READ-ONLY; reviews/reports only, never comments/merges; read-scoped `gh` token.
+
+The seventh default lens, **Spec**, checks the diff against the issue it claims to close — acceptance criteria not satisfied, requirements silently dropped, scope quietly cut. The issue is resolved from the PR body's closing keyword (`Closes #N`) or an explicit `issue` arg, and reaches the reviewing agent only through a fixed-command read-only relay, nonce-fenced. A PR with **no linked issue is not a finding**: the lens is skipped entirely (no relay, no agent call, no noise).
+
+Note that a caller-supplied `dimensions` array **replaces** the defaults rather than appending to them, so passing one without a `spec` entry drops this lens. Adding a seventh lens also adds one review agent per PR when an issue is linked.
