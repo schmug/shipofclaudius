@@ -110,14 +110,21 @@ const factoryCode = async () =>
 
 test('factory.yml: the land job readies the draft BEFORE gating', async () => {
   const y = await factoryYml()
-  const ready = y.indexOf('gh pr ready')
-  const build = y.indexOf('build-input.mjs')
+  // Scoped to the land job: #65's land-sweep also calls build-input.mjs, and it sits earlier in the
+  // file, so a file-wide indexOf compared steps from two different jobs. The sweep deliberately does
+  // NOT ready drafts — it skips them, because readying is the human's approval in the labelled path.
+  const land = factoryJobs(y).land
+  assert.ok(land, 'the land job exists')
+  const ready = land.indexOf('gh pr ready')
+  const build = land.indexOf('build-input.mjs')
   assert.ok(ready > 0, 'a `gh pr ready` step exists')
   assert.ok(build > 0 && ready < build,
     'readying must precede the gate input: factory-issue-fix opens a DRAFT, a draft reports ' +
     'mergeStateStatus=DRAFT, and gate condition 8 rejects DRAFT — so without this the factory ' +
     'can never land anything it produced')
-  assert.ok(/--undo/.test(y), 'an escalated PR is converted back to a draft (the ladder still ends at a draft)')
+  assert.ok(/--undo/.test(land), 'an escalated PR is converted back to a draft (the ladder still ends at a draft)')
+  assert.ok(!/gh pr ready/.test(factoryJobs(y)['land-sweep'] || ''),
+    'the unattended sweep never readies a draft — it skips drafts entirely (#65)')
 })
 
 test('factory.yml: the gate exit code is captured, not swallowed by the inherited `bash -e`', async () => {
@@ -168,6 +175,22 @@ test('factory.yml: the job that DOES run PR code is unprivileged and secretless'
     'and never reads a secret — it executes PR-authored code, so a leak there is a repo compromise')
   assert.ok(/permissions:\n\s+contents: read/.test(prod), 'with a read-only token')
   assert.ok(!/gh pr merge|gh pr review|gh pr ready/.test(prod), 'and no write actions at all')
+})
+
+test('factory.yml: the unattended land trigger is killswitch-gated, default-off, and safe (#65)', async () => {
+  const y = await factoryCode()
+  const sweep = factoryJobs(y)['land-sweep']
+  assert.ok(sweep, 'an unattended land trigger exists as its own job')
+  assert.ok(/needs: killswitch/.test(sweep), 'it needs the killswitch job')
+  assert.ok(/needs\.killswitch\.outputs\.paused == 'false'/.test(sweep),
+    'and short-circuits on pipeline-paused exactly as the labelled path does')
+  assert.ok(/vars\.FACTORY_AUTO_LAND == 'true'/.test(sweep),
+    'it is OFF unless a repo variable explicitly arms it — adopting the template unchanged stays human-gated')
+  assert.ok(/github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'/.test(sweep),
+    'it is time-triggered, so nothing a PR author does can fire it')
+  assert.ok(!/--admin/.test(sweep), 'it never bypasses branch protection')
+  assert.ok(!/ref:\s*\$\{\{\s*github\.event\.pull_request\.head\./.test(sweep) && !/git\s+checkout/.test(sweep),
+    'and never checks out PR-authored code — it runs with write access')
 })
 
 test('factory.yml: the gate config is read from the base ref, never the PR', async () => {
