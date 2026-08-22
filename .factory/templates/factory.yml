@@ -27,6 +27,8 @@ on:
     types: [labeled]
   pull_request_target:
     types: [labeled]          # the human-minted `fix-verified` trust token arrives here
+  pull_request:
+    types: [opened, synchronize, reopened]   # UNPRIVILEGED — runs the fixture-evidence producer
   schedule:
     - cron: "0 */4 * * *"     # drain the queue four-hourly
   workflow_dispatch:
@@ -166,6 +168,117 @@ jobs:
   # ── 3. LAND ──────────────────────────────────────────────────────────────────────────────────
   # L1, the gate. NO MODEL RUNS IN THIS JOB AT ALL. It is `gh` + a zero-dependency Node program, so
   # an instruction injected into an issue or PR body has nothing to act on — it cannot move a `<=`.
+  # ── Condition 9's evidence producer (#64) ────────────────────────────────────────────────────
+  # Condition 9 asks whether the committed fixture was RED on the base and GREEN on the head. That
+  # answer must come from OBSERVED PROCESS EXIT CODES, never from the fix agent's self-report — the
+  # agent that wrote the code cannot also be the witness that it works. This job is the witness.
+  #
+  # IT RUNS ON `pull_request`, NOT `pull_request_target`, AND THAT IS THE WHOLE POINT. Producing
+  # evidence requires CHECKING OUT AND RUNNING THE PR's CODE. On `pull_request` that happens with a
+  # read-only token and no access to secrets, so running author-written code is safe. The `land`
+  # job below is `pull_request_target` with write access and MUST NEVER check out the head; it only
+  # downloads this job's artifact. Do not merge these two jobs.
+  #
+  # The evidence cannot instead be committed by the fix agent: `.factory/**` is on the gate's
+  # MANDATORY denylist (packages/factory-gate/src/config.mjs), so a PR carrying its own evidence
+  # there fails condition 5 by construction. An artifact is the only non-author-writable transport.
+  fixture-evidence:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # 2. FILL IN: how this repo names and runs ONE test. The default reads a `Fixture-Test:`
+      #    trailer from the PR body, which is what factory-issue-fix writes. If your repo names
+      #    fixtures differently, change this parser and the two run commands together.
+      - name: Resolve the fixture test named by the PR
+        id: fixture
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -uo pipefail
+          # The body is UNTRUSTED, author-written text. It reaches the shell only via env (never
+          # interpolated into the script), and is constrained to a conservative charset before
+          # being used as a command argument.
+          raw="$(printf '%s' "$PR_BODY" | grep -m1 -oE '^Fixture-Test:[[:space:]]*[A-Za-z0-9_./: -]+' | sed 's/^Fixture-Test:[[:space:]]*//' || true)"
+          if [ -z "${raw:-}" ]; then
+            echo "No Fixture-Test trailer in the PR body — no evidence can be produced."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "test=$raw" >> "$GITHUB_OUTPUT"
+          echo "Fixture test: $raw"
+
+      # The exit code IS the evidence. `|| rc=$?` for the same reason the gate step uses it: these
+      # blocks run as `bash -e`, so a non-zero exit would abort the step before we could record it —
+      # and a FAILING test on the base is precisely the outcome this step exists to observe.
+      - name: Run the fixture on the BASE ref (expect RED)
+        if: steps.fixture.outputs.found == 'true'
+        id: base
+        env:
+          FIXTURE_TEST: ${{ steps.fixture.outputs.test }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          git checkout --quiet --detach "$BASE_SHA"
+          rc=0
+          # 3. FILL IN: the command that runs exactly the one test named in FIXTURE_TEST.
+          npm test -- "$FIXTURE_TEST" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "Base exit: $rc (NON-ZERO is what we want — the fixture must encode the bug)"
+
+      - name: Run the fixture on the PR HEAD (expect GREEN)
+        if: steps.fixture.outputs.found == 'true'
+        id: head
+        env:
+          FIXTURE_TEST: ${{ steps.fixture.outputs.test }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          git checkout --quiet --detach "$HEAD_SHA"
+          rc=0
+          npm test -- "$FIXTURE_TEST" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "Head exit: $rc (ZERO is what we want — the fix closes the bug)"
+
+      # redOnBase / greenOnHead are pure functions of the two exit codes above. No prose is parsed
+      # and no agent field is consulted. source:"ci" is the provenance marker the gate requires.
+      - name: Write factory-evidence.json
+        if: steps.fixture.outputs.found == 'true'
+        env:
+          FIXTURE_TEST: ${{ steps.fixture.outputs.test }}
+          BASE_RC: ${{ steps.base.outputs.rc }}
+          HEAD_RC: ${{ steps.head.outputs.rc }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          node -e 'const fs=require("node:fs");
+            const out={schema:1,source:"ci",fixtureTest:process.env.FIXTURE_TEST,
+              redOnBase:process.env.BASE_RC!=="0",greenOnHead:process.env.HEAD_RC==="0",
+              baseSha:process.env.BASE_SHA,headSha:process.env.HEAD_SHA,runId:process.env.GITHUB_RUN_ID};
+            fs.writeFileSync("factory-evidence.json",JSON.stringify(out,null,2)+"\n");
+            console.error("evidence: "+JSON.stringify(out));'
+
+      - name: Upload the evidence artifact
+        if: steps.fixture.outputs.found == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: factory-evidence
+          path: factory-evidence.json
+          retention-days: 7
+
   land:
     needs: killswitch
     if: >-
@@ -218,11 +331,34 @@ jobs:
             echo "Converted #$PR_NUMBER from draft to ready so the gate can read a real merge state."
           fi
 
-      # Condition 9 (`fixture_evidence`) is OPT-IN and currently has NO producer. Nothing in this
-      # workflow computes red-on-base / green-on-head from CI, and the value must NOT come from the
-      # fix agent's self-report — a model asserting its own work passed is exactly what §4 exists to
-      # prevent. Until a CI job writes `factory-evidence.json` (see the reproduction-harness issue),
-      # leave `requireFixtureEvidence: false`; flipping it today fails every PR at condition 9.
+      # Condition 9's evidence arrives ONLY as an artifact from the unprivileged `fixture-evidence`
+      # job (#64) — never from the fix agent, and never from a file the PR committed (this job
+      # checked out the BASE ref, so PR-authored files are not present here by construction).
+      #
+      # The artifact belongs to the PR's own `pull_request` run, a DIFFERENT workflow run from this
+      # one, so it is resolved by head SHA with gh rather than actions/download-artifact. Downloading
+      # is not executing: the file is read as data by build-input.mjs, and a missing artifact simply
+      # leaves condition 9 to fail closed on "no fixture evidence supplied", which is correct.
+      #
+      # requireFixtureEvidence stays FALSE in shipped configs until a repo's reproduction harness is
+      # real; flipping it before then fails every PR at condition 9.
+      - name: Download the fixture evidence (if the producer ran)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          run_id="$(gh run list --repo "$TARGET_REPO" --commit "$HEAD_SHA" --event pull_request --json databaseId --limit 1 --jq '.[0].databaseId')"
+          if [ -z "${run_id:-}" ] || [ "$run_id" = "null" ]; then
+            echo "No pull_request run for $HEAD_SHA — condition 9 fails closed if it is required."
+            exit 0
+          fi
+          gh run download "$run_id" --repo "$TARGET_REPO" --name factory-evidence --dir . || \
+            echo "No factory-evidence artifact on run $run_id — condition 9 fails closed if required."
+          if [ -f factory-evidence.json ]; then echo "Evidence downloaded from run $run_id."; fi
+
       - name: Build the gate input
         env:
           GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}

@@ -474,14 +474,16 @@ test('the land actor never receives the raw PR or issue bodies — only the rend
 // ---------- evidence passthrough ----------
 
 test('args.evidence is passed through to the gate for the opt-in fixture condition', async () => {
-  const evidence = { fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
+  const evidence = { schema: 1, source: 'ci', fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
   const { calls } = await runScript({ args: baseArgs({ evidence }) })
   const { input } = payloadsFrom(byPrefix(calls, 'gate')[0].prompt)
   assert.deepEqual(JSON.parse(input).evidence, evidence, "factory-issue-fix's evidence block reaches the gate unchanged")
 })
 
 test('requireFixtureEvidence stays satisfiable end to end once a repo opts in', async () => {
-  const evidence = { fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
+  // #64: gate-bound evidence must carry CI provenance. The agent-shaped payload this test used
+  // before is asserted NOT to satisfy the condition in the test below.
+  const evidence = { schema: 1, source: 'ci', fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
   const { result } = await runScript({
     args: baseArgs({ evidence }),
     config: JSON.stringify({ ...GATE_CONFIG, requireFixtureEvidence: true }),
@@ -493,6 +495,17 @@ test('requireFixtureEvidence stays satisfiable end to end once a repo opts in', 
   })
   assert.equal(bare.pass, false, 'and a fix with no evidence fails it')
   assert.ok(bare.failed.includes('fixture_evidence'))
+})
+
+test('agent-shaped evidence does NOT satisfy condition 9 end to end (#64)', async () => {
+  // The pre-#64 payload: exactly the fields the fix agent used to hand over, no provenance.
+  const agentShaped = { fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
+  const { result } = await runScript({
+    args: baseArgs({ evidence: agentShaped }),
+    config: JSON.stringify({ ...GATE_CONFIG, requireFixtureEvidence: true }),
+  })
+  assert.equal(result.pass, false, 'a self-reported red/green claim can no longer land a PR')
+  assert.ok(result.failed.includes('fixture_evidence'), 'it fails specifically at condition 9')
 })
 
 test('the required-contexts relay puts the repo in the API PATH (`gh api` takes no -R)', async () => {

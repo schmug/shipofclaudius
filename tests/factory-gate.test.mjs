@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { globToRegExp, matches, firstMatch } from '../packages/factory-gate/src/glob.mjs'
 import { stripNonSemantic, extractCloses, extractScopeGlobs } from '../packages/factory-gate/src/extract.mjs'
 import { normalizeConfig, MANDATORY_DENYLIST, DEFAULTS } from '../packages/factory-gate/src/config.mjs'
-import { evaluate, renderVerdict, CONDITION_ORDER } from '../packages/factory-gate/src/gate-core.mjs'
+import { evaluate, renderVerdict, CONDITION_ORDER, checkFixtureEvidence } from '../packages/factory-gate/src/gate-core.mjs'
 import { buildGateInput, normalizeChecks, resolveLinkedIssue, requiredContextsPath } from '../packages/factory-gate/src/build-input.mjs'
 
 const tests = []
@@ -310,10 +310,10 @@ test('evaluate: when required, fixture evidence must be red-on-base AND green-on
   const c = { ...CONFIG, requireFixtureEvidence: true }
   assert.ok(evaluate(okInput(), c).failed.includes('fixture_evidence'), 'absent evidence fails')
 
-  const partial = okInput({ evidence: { fixtureTest: 'test/fixtures/foo.test.ts', greenOnHead: true } })
+  const partial = okInput({ evidence: { source: 'ci', fixtureTest: 'test/fixtures/foo.test.ts', greenOnHead: true } })
   assert.ok(evaluate(partial, c).failed.includes('fixture_evidence'), 'green-only is not proof')
 
-  const full = okInput({ evidence: { fixtureTest: 'test/fixtures/foo.test.ts', redOnBase: true, greenOnHead: true } })
+  const full = okInput({ evidence: { source: 'ci', fixtureTest: 'test/fixtures/foo.test.ts', redOnBase: true, greenOnHead: true } })
   assert.ok(!evaluate(full, c).failed.includes('fixture_evidence'))
 })
 
@@ -432,7 +432,7 @@ test('resolveLinkedIssue: routing matches the gate, and ambiguity routes nowhere
 })
 
 test('build-input: the evidence block passes through untouched for the opt-in condition', () => {
-  const evidence = { fixtureTest: 'test/a.test.ts::x', redOnBase: true, greenOnHead: true }
+  const evidence = { schema: 1, source: 'ci', fixtureTest: 'test/a.test.ts::x', redOnBase: true, greenOnHead: true }
   const input = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'], evidence })
   assert.deepEqual(input.evidence, evidence)
   assert.equal(evaluate(input, { ...CONFIG, requireFixtureEvidence: true }).pass, true)
@@ -476,6 +476,55 @@ test('build-input: a genuine zero-line change is still reported as 0, not confla
   const input = buildGateInput({ pr: ghPr({ additions: 0, deletions: 0 }), issue: ghIssue(), requiredContexts: ['check'] })
   assert.equal(input.pr.additions, 0, 'a real 0 survives')
   assert.equal(evaluate(input, CONFIG).pass, true, 'and it is within limits')
+})
+
+// ---------- condition 9 provenance: evidence must come from CI, not from an agent (#64) ----------
+// The one condition designed to eventually replace the human reviewer was the one condition a
+// model could assert about its own work. `source` is the provenance marker; the real guarantee is
+// the transport (a CI artifact, produced by a job that ran the test itself and observed exit codes).
+
+const ciEvidence = (over = {}) => ({
+  schema: 1,
+  source: 'ci',
+  fixtureTest: 'test/policy.test.mjs::reject multiplier',
+  redOnBase: true,
+  greenOnHead: true,
+  baseSha: 'a'.repeat(40),
+  headSha: 'b'.repeat(40),
+  runId: '12345',
+  ...over,
+})
+
+test('cond9: evidence built from CI exit codes satisfies checkFixtureEvidence', () => {
+  const v = checkFixtureEvidence({ evidence: ciEvidence() }, { requireFixtureEvidence: true })
+  assert.equal(v.id, 'fixture_evidence')
+  assert.equal(v.pass, true, 'red on base + green on head, observed by CI, passes condition 9')
+})
+
+test('cond9: a fixture that PASSES on base is refused even though the run otherwise looks clean', () => {
+  const v = checkFixtureEvidence({ evidence: ciEvidence({ redOnBase: false }) }, { requireFixtureEvidence: true })
+  assert.equal(v.pass, false, 'a fixture that does not encode the bug cannot prove the bug is fixed')
+  assert.match(v.reason, /RED on the base/i)
+})
+
+test('cond9: evidence WITHOUT ci provenance fails closed', () => {
+  for (const bad of [{ source: 'fix-agent-self-report' }, { source: '' }, { source: 'agent' }]) {
+    const v = checkFixtureEvidence({ evidence: ciEvidence(bad) }, { requireFixtureEvidence: true })
+    assert.equal(v.pass, false, `source=${JSON.stringify(bad.source)} must not satisfy condition 9`)
+    assert.match(v.reason, /provenance|not produced by CI/i, 'and says the provenance is the problem')
+  }
+})
+
+test('cond9: omitting source entirely fails closed (an old-shaped payload is not grandfathered)', () => {
+  const legacy = { fixtureTest: 't::n', redOnBase: true, greenOnHead: true }
+  const v = checkFixtureEvidence({ evidence: legacy }, { requireFixtureEvidence: true })
+  assert.equal(v.pass, false, 'the pre-#64 agent-shaped payload must stop passing')
+  assert.match(v.reason, /provenance|not produced by CI/i)
+})
+
+test('cond9: still auto-passes when the config does not require it', () => {
+  const v = checkFixtureEvidence({ evidence: null }, { requireFixtureEvidence: false })
+  assert.equal(v.pass, true, 'opt-in condition stays opt-in')
 })
 
 // ---- runner ----
