@@ -40,6 +40,7 @@
 //          llmConfirmed: true,                    // L4 confirm — spends tokens against the target
 //          networkTarget: "staging.example.com",  // L5 gate (network/template scan; URL or host)
 //          repo: "github.com/owner/name",         // L6 gate (posture/governance; read-only, no auth)
+//          discoveryModel: "opus", validateModel: "sonnet", // forwarded verbatim to Layer 1
 //        }})
 //
 // Design notes baked in (match Phase A):
@@ -78,6 +79,12 @@ const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
 const ROUNDS = A.rounds // undefined is fine — deep-security-scan budget-scales its own default
+// Model independence (#92) is enforced INSIDE deep-security-scan; Layer 1 only has to forward the
+// knobs. Omitted rather than passed as undefined so the sub-workflow applies its own defaults.
+const SCAN_MODELS = {
+  ...((typeof A.discoveryModel === 'string' && A.discoveryModel.trim()) ? { discoveryModel: A.discoveryModel.trim() } : {}),
+  ...((typeof A.validateModel === 'string' && A.validateModel.trim()) ? { validateModel: A.validateModel.trim() } : {}),
+}
 const INSTALL_MISSING = A.installMissing === true
 const SUPPLY_CHAIN_ON = A.supplyChain !== false // default on
 const URL = A.url
@@ -243,7 +250,7 @@ log(`Layer 1: composing deep-security-scan over ${SCOPE} (threshold=${THRESHOLD}
 let l1 = null
 let l1Error = null
 try {
-  l1 = await workflow('deep-security-scan', { target: TARGET, scope: SCOPE, rounds: ROUNDS, threshold: THRESHOLD })
+  l1 = await workflow('deep-security-scan', { target: TARGET, scope: SCOPE, rounds: ROUNDS, threshold: THRESHOLD, ...SCAN_MODELS })
 } catch (e) {
   l1Error = (e && e.message) ? e.message : String(e)
   log(`Layer 1 ERROR (fail-open): ${l1Error}`)

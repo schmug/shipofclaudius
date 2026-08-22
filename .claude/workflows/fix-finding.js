@@ -24,6 +24,12 @@
 //                    args: { finding: { title, file, line, vuln_class, evidence,
 //                                       attacker_story, fix, severity } } })
 //
+//   - args.fixModel / args.reviewModel: model families for the Fix and Verify phases
+//     (defaults "opus" / "sonnet"). They must DIFFER — passing the same value THROWS,
+//     because one model grading its own security fix is not the independent check the
+//     auto_execute gate below assumes. This is ADDED TO the reviewer's role independence
+//     (agentType: security-hardening-reviewer), not a replacement for it.
+//
 // HARD RULES baked into the write agent's prompt (mirrors stacked-impl-lanes, the sibling
 // write workflow): no advisor calls, no WebFetch/WebSearch, no CI polling (gh pr checks /
 // sleep-loops trip the no-progress watchdog), no merging, no --admin, no push to main. The
@@ -66,6 +72,19 @@ const TITLE = FINDING.title || `${VCLASS} in ${FINDING.file || 'unknown file'}`
 // Read-only agentType for the triage + idempotency relays only (NOT the fix agent, which must
 // keep write tools). Default built-in `Explore`; override with args.readonlyAgent.
 const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
+
+// MODEL INDEPENDENCE (#94, mirroring factory-issue-fix.js). Verify already has ROLE independence
+// (it runs under the security-hardening-reviewer agentType). This adds MODEL independence ON TOP:
+// the agent that WRITES the fix and the adversarial reviewer that blesses it are pinned to
+// DIFFERENT model families rather than both inheriting the session model. The stakes are higher
+// here than in the scans — the reviewer's verdict is not advisory, it drives the auto_execute
+// autonomy decision below, and a correlated reviewer is exactly the condition under which the
+// weakened-control gate cannot fire. Both are overridable; collapsing them THROWS.
+const FIX_MODEL = (typeof A.fixModel === 'string' && A.fixModel.trim()) ? A.fixModel.trim() : 'opus'
+const REVIEW_MODEL = (typeof A.reviewModel === 'string' && A.reviewModel.trim()) ? A.reviewModel.trim() : 'sonnet'
+if (FIX_MODEL === REVIEW_MODEL) {
+  throw new Error(`fix-finding: the Verify phase must run on a DIFFERENT model family from Fix — one model grading its own security fix cannot be the independent check the auto_execute gate assumes. Got fixModel="${FIX_MODEL}" and reviewModel="${REVIEW_MODEL}".`)
+}
 
 // ── Spine helpers (inlined; Workflow scripts cannot `import`). Stamped with SPINE_VERSION so the
 // hand-synced copy in ~/.claude/workflows/ can be diffed for drift against this source. ──
@@ -330,7 +349,7 @@ if (verdict !== 'REACHABLE') {
 // ── Phase: Fix (write, worktree-isolated) ──
 phase('Fix')
 const impl = await agent(FIX_PROMPT(triage), {
-  label: `fix:${KEY}`, phase: 'Fix', schema: FIX_SCHEMA, isolation: 'worktree',
+  label: `fix:${KEY}`, phase: 'Fix', model: FIX_MODEL, schema: FIX_SCHEMA, isolation: 'worktree',
 })
 
 if (!impl || impl.status !== 'PR_OPENED') {
@@ -349,7 +368,7 @@ if (!impl || impl.status !== 'PR_OPENED') {
 // ── Phase: Verify (read-only, adversarial) ──
 phase('Verify')
 const review = await agent(REVIEW_PROMPT(impl), {
-  label: `review:${KEY}`, phase: 'Verify', agentType: 'security-hardening-reviewer', schema: REVIEW_SCHEMA,
+  label: `review:${KEY}`, phase: 'Verify', agentType: 'security-hardening-reviewer', model: REVIEW_MODEL, schema: REVIEW_SCHEMA,
 })
 
 // Confidence from the fix status + the adversarial review. A weakened control (self-reported OR
