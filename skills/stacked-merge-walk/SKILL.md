@@ -10,3 +10,5 @@ Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/stacked-merge-wa
 ```
 
 Fill `args` from the user's request. Common args: `prs` (required, base-first), `base`, `repo`, `execute`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/stacked-merge-walk.js`, or the repo README "Arguments" table. WRITES — needs write scope; see the workflow header for its safety gates (it stages/gates before landing).
+
+If a landed PR comes back `status: 'ESCALATED'` (a real/semantic conflict, or an unresolved `UNKNOWN`, that a human must resolve), hand its `{ ref, conflicts, escalation }` payload to the bundled `resolve-merge-conflict` skill — it recovers each side's intent from commits/PRs/issues before proposing a fix, rather than leaving the escalation nowhere to land.
