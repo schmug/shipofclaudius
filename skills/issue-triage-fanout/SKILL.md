@@ -1,6 +1,6 @@
 ---
 name: issue-triage-fanout
-description: Read-only fan-out triage of open GitHub issues → GREEN/DECISION/RESEARCH/DONE/BLOCKED with grouping + dependencies. Auto-gathers all open issues when none are given.
+description: Read-only fan-out triage of open GitHub issues → GREEN/DECISION/RESEARCH/DONE/BLOCKED with grouping + dependencies, synthesized into a dependency-ordered roadmap. Auto-gathers all open issues when none are given. Use when you want the whole open-issue backlog sorted into what is buildable now, what needs a human decision, and what is already done — triage my issues, what should I work on next, is this backlog stale. Not for investigating one unresolved issue in depth (use issue-research-fanout, which consumes the RESEARCH bucket this produces), not for triaging PRs (use pr-triage-fanout), and not for implementing the result (use stacked-impl-lanes).
 ---
 
 Run the `issue-triage-fanout` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
