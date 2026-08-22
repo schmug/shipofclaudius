@@ -43,3 +43,37 @@ The contract these implement is [`docs/specs/2026-08-05-software-factory-design.
 `fix-verified` is the trust token — the only thing that unlocks the merge gate. Apply it only after
 reviewing the draft PR and its preview. `pipeline-paused` is the kill switch: apply it to any open
 issue and the whole factory halts on its next run, no PR or redeploy required.
+
+## Arming ladder — from human-gated to machine-gated
+
+Removing the human is **not one flag**. `fix-verified` is simultaneously gate condition 2 (a
+required label) and the land job's clock (`pull_request_target: [labeled]`), so turning on machine
+verification without also replacing the trigger produces a factory that never lands anything, and
+dropping the label requirement without machine evidence removes the check entirely rather than
+replacing it.
+
+Climb these in order. **Each rung has a precondition, and each is independently revertable.** Stop
+at any rung — every one of them is a valid resting posture, and rung 0 is the default.
+
+| # | Change | Precondition | Revert |
+|---|---|---|---|
+| 0 | *(default)* human applies `fix-verified`; gate requires it | — | — |
+| 1 | The evidence producer runs | A repo fixture harness exists and the `fixture-evidence` job's two FILL-IN commands are filled in | Delete the job; nothing consumes its artifact |
+| 2 | `requireFixtureEvidence: true` | Rung 1 green on real PRs — check the artifact is produced and `redOnBase` is actually `true` | Set back to `false`; condition 9 auto-passes again |
+| 3 | Drop `fix-verified` from `requiredLabels` | Rung 2 has a track record. **This is the rung that removes the human judgement**, so it should sit the longest | Put the label back in `requiredLabels` |
+| 4 | `FACTORY_AUTO_LAND=true` (repo variable) | Rung 3 stable. Enables the `land-sweep` job | Unset the variable; the sweep stops firing |
+
+**Rung 3 is the load-bearing one.** Rungs 1, 2 and 4 are plumbing; rung 3 is the moment nothing
+human is required for a merge. Do not climb 3 and 4 in the same change — if something lands that
+should not have, you want to know which rung did it.
+
+**Why the sweep is a cron, not a push trigger.** `land-sweep` runs on `schedule` /
+`workflow_dispatch` only. A `check_suite: completed` trigger would let a PR author choose when a
+write-privileged workflow fires; dispatching from `advance` would couple the writer to the lander.
+A cron is reachable by nobody, and selection is by `fix-proposed` — a label the factory's own
+privileged job applies, which a PR author has no permission to set.
+
+**What the sweep will not do.** It never readies a draft (the write ladder still ends at a draft;
+readying is the human's approval in the labelled path, so the sweep skips drafts entirely), never
+passes `--admin`, never deletes a branch, and never checks out PR-authored code. `pipeline-paused`
+halts it exactly as it halts everything else.

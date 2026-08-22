@@ -497,6 +497,35 @@ test('requireFixtureEvidence stays satisfiable end to end once a repo opts in', 
   assert.ok(bare.failed.includes('fixture_evidence'))
 })
 
+// ---------- the autonomy flip: condition 2 and condition 9 are separable (#65) ----------
+// `fix-verified` is BOTH a gate condition (2) and the land trigger. Turning on machine
+// verification therefore is not one flag — it is a ladder. This proves the first coupling is
+// genuinely breakable: with the label requirement dropped and real CI evidence present, a PR that
+// NO human ever labelled still passes the gate.
+
+test('with requiredLabels:[] and valid CI evidence, an unlabelled PR passes the gate (#65)', async () => {
+  const evidence = { schema: 1, source: 'ci', fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }
+  const { result } = await runScript({
+    // No `fix-verified` anywhere — not on the PR, not on the issue.
+    ...notVerified,
+    args: baseArgs({ evidence }),
+    config: JSON.stringify({ ...GATE_CONFIG, requiredLabels: [], requireFixtureEvidence: true }),
+  })
+  assert.equal(result.pass, true, 'machine evidence alone can satisfy the gate once the label is not required')
+  assert.ok(!result.failed.includes('required_labels'), 'condition 2 is satisfied by not being required')
+  assert.ok(!result.failed.includes('fixture_evidence'), 'and condition 9 is satisfied by the CI evidence')
+})
+
+test('dropping requiredLabels alone is NOT enough — condition 9 still fails without CI evidence (#65)', async () => {
+  const { result } = await runScript({
+    ...notVerified,
+    args: baseArgs(),
+    config: JSON.stringify({ ...GATE_CONFIG, requiredLabels: [], requireFixtureEvidence: true }),
+  })
+  assert.equal(result.pass, false, 'removing the human without machine evidence removes the check entirely')
+  assert.ok(result.failed.includes('fixture_evidence'), 'the ladder rungs are independent, and both are load-bearing')
+})
+
 test('agent-shaped evidence does NOT satisfy condition 9 end to end (#64)', async () => {
   // The pre-#64 payload: exactly the fields the fix agent used to hand over, no provenance.
   const agentShaped = { fixtureTest: 'test/fixtures.test.ts::foo.com grades A', redOnBase: true, greenOnHead: true }

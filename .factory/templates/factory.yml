@@ -279,6 +279,108 @@ jobs:
           path: factory-evidence.json
           retention-days: 7
 
+  # ── The unattended land trigger (#65) ────────────────────────────────────────────────────────
+  # `fix-verified` is BOTH gate condition 2 and the land job's clock. Removing the human is
+  # therefore not one flag but a LADDER (see .factory/templates/README.md "Arming ladder"), and its
+  # last rung is a trigger that does not wait for a label. This is that rung.
+  #
+  # WHY A SCHEDULED SWEEP, and not the alternatives the issue listed:
+  #   • `check_suite: completed` fires on a PR author's push, so the author controls the clock. On a
+  #     write-privileged workflow that is a trigger keyed to attacker-controlled timing.
+  #   • `advance` dispatching land on fix_proposed couples the writer to the lander: a bug in the
+  #     agent's self-reported outcome would directly cause a merge.
+  #   • A cron is reachable by NOBODY. The only author-influenced input is which PRs exist, and each
+  #     is still judged by the same deterministic gate. Selection is by `fix-proposed`, applied by
+  #     the factory's own privileged `advance` job — applying a label needs triage permission, so a
+  #     PR author cannot self-select into this sweep.
+  #
+  # DEFAULT OFF. It runs only when the repo variable FACTORY_AUTO_LAND is exactly "true". A repo
+  # that adopts these templates unchanged stays human-triggered and human-gated.
+  land-sweep:
+    needs: killswitch
+    if: >-
+      needs.killswitch.outputs.paused == 'false' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      vars.FACTORY_AUTO_LAND == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # Same gate-from-base invariant as `land`: the rules a PR is judged by are never editable by
+      # that PR. This job NEVER checks out a PR head — build-input reads the PR over the API, and
+      # the gate is pure, dependency-free Node.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.FACTORY_PLUGIN_REPO }}
+          ref: ${{ env.FACTORY_PLUGIN_REF }}
+          path: .factory-plugin
+          token: ${{ secrets.FACTORY_GH_TOKEN }}
+          persist-credentials: false
+
+      - name: Gate every fix-proposed PR and land the ones that pass
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          CONFIG_ARG=""
+          [ -f .factory/gate.json ] && CONFIG_ARG="--config .factory/gate.json"
+
+          # Selection is by a label only a privileged actor can apply. Draft PRs are skipped: the
+          # write ladder deliberately ends at a draft, and readying one is the human's approval in
+          # the labelled path. Unattended landing does not ready drafts.
+          prs="$(gh pr list --repo "$TARGET_REPO" --state open --label fix-proposed \
+            --json number,isDraft --jq '.[] | select(.isDraft == false) | .number')"
+          if [ -z "${prs:-}" ]; then echo "No fix-proposed, non-draft PRs to sweep."; exit 0; fi
+
+          for pr in $prs; do
+            echo "::group::PR #$pr"
+            base="$(gh pr view "$pr" --repo "$TARGET_REPO" --json baseRefName --jq .baseRefName)"
+            head_sha="$(gh pr view "$pr" --repo "$TARGET_REPO" --json headRefOid --jq .headRefOid)"
+
+            rm -f factory-evidence.json
+            run_id="$(gh run list --repo "$TARGET_REPO" --commit "$head_sha" --event pull_request --json databaseId --limit 1 --jq '.[0].databaseId')"
+            if [ -n "${run_id:-}" ] && [ "$run_id" != "null" ]; then
+              gh run download "$run_id" --repo "$TARGET_REPO" --name factory-evidence --dir . || true
+            fi
+
+            node .factory-plugin/packages/factory-gate/bin/build-input.mjs \
+              --pr "$pr" --repo "$TARGET_REPO" --base "$base" --out gate-input.json \
+              $( [ -f factory-evidence.json ] && echo "--evidence factory-evidence.json" ) || {
+                echo "::warning::build-input failed for #$pr — skipped."; echo "::endgroup::"; continue; }
+
+            code=0
+            node .factory-plugin/packages/factory-gate/bin/gate.mjs \
+              --input gate-input.json $CONFIG_ARG \
+              --config-source "$base@${{ github.sha }}" \
+              --verdict-out verdict.json --comment-out comment.md || code=$?
+
+            [ -f comment.md ] || printf '### Factory gate — ⛔ escalate\n\nThe gate could not produce a verdict (exit %s).\n' "$code" > comment.md
+            gh pr comment "$pr" --repo "$TARGET_REPO" --body-file comment.md || true
+
+            if [ "$code" = "0" ]; then
+              # Never --admin, never --delete-branch: identical to the labelled path.
+              gh pr merge "$pr" --repo "$TARGET_REPO" --squash || echo "::warning::merge failed for #$pr"
+            elif [ "$code" = "2" ]; then
+              gh pr edit "$pr" --repo "$TARGET_REPO" --add-label needs-you || true
+              echo "::notice::#$pr escalated — see the audit comment."
+            else
+              echo "::error::The gate FAILED TO RUN on #$pr (exit $code). Not a verdict."
+            fi
+            echo "::endgroup::"
+          done
+
   land:
     needs: killswitch
     if: >-
