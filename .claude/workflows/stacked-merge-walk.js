@@ -149,10 +149,31 @@ const EXECUTE = A.execute === true
 // not fix anything, and (b) this workflow only ever merges under an explicit args.execute:true
 // approval, so the operator who opted into an irreversible batched landing walk is exactly the
 // operator who wants the merged result verified. args.postMergeVerify:false is the documented
-// escape hatch for a slow target repo. The failure modes are split deliberately: fail-SAFE about
-// stopping (only an EXPLICIT base_green:false stops the walk) and fail-OPEN about being unrunnable
-// (a missing verdict is recorded as unverified and does NOT stop), so a slow repo degrades to
-// "unverified", never to a walk that dies on a step which runs after the irreversible action.
+// escape hatch for a slow target repo.
+//
+// FIVE-STATE POST-MERGE MODEL (issue #116). base_green used to be a tri-state whose `null` fused
+// three different situations — "step 8 was disabled", "step 8 could not run", "the actor forgot" —
+// and only the third is a defect. baseVerifyState now names all five, and the walk stops on the
+// two that mean the remaining nodes would land on an unsafe or unobserved base:
+//
+//   disabled    args.postMergeVerify:false — the operator opted out       → CONTINUE
+//   green       base_green:true — test+typecheck GREEN on the merged base → CONTINUE
+//   red         base_green:false — either is RED on the merged base       → STOP (a human fixes the base)
+//   unrunnable  no verdict, but the actor SAID why it could not verify    → CONTINUE, reported loudly
+//   missing     no verdict and NO reason — affirmative silence            → STOP (base state UNKNOWN)
+//
+// The discriminator is AFFIRMATIVE SILENCE, not the absence of a verdict. The fail-open rationale
+// this file used to carry — a step that runs AFTER the irreversible `gh pr merge` must not strand a
+// partially-landed stack because a slow suite or missing tooling could not finish — is preserved
+// exactly, and is why `unrunnable` still continues (the naive `base_green !== true` gate was
+// REJECTED in #116 for inverting it). But that argument only ever covered a step that RAN and could
+// not finish; it was never an argument for continuing when a model-returned field simply never came
+// back. A `missing` verdict voids the #71 guarantee silently, so it stops.
+//
+// A `missing` stop is NOT a red base: it means WE DO NOT KNOW, not that the base is broken. Its
+// reason string and log line must say so (no "a human must fix the base" wording), and — as with
+// any stop — branches are not pruned. An explicit base_green is honoured ahead of `disabled`: an
+// actor that ran step 8 anyway and found the base RED still stops the walk, exactly as before.
 const POST_MERGE_VERIFY = A.postMergeVerify !== false
 
 // Batch the read-only relay-fetch / stage-verify fan-out into sequential waves of <=BATCH so a
@@ -276,8 +297,8 @@ const LAND_SCHEMA = {
     conflicts: { type: 'array', items: { type: 'string' }, description: 'For ESCALATED: the conflicting files the human must resolve.' },
     escalation: { type: 'string', description: 'For ESCALATED: the one-line reason a human is needed.' },
     tests_run: { type: 'string', description: 'The local gate command(s) run + their GREEN result.' },
-    post_merge_tests: { type: 'string', description: 'The POST-MERGE run (step 8): the test + typecheck command(s) re-run on the detached, just-merged base + their exact result. If the step was skipped or could not be completed, say why here and leave base_green unset.' },
-    base_green: { type: 'boolean', description: 'POST-MERGE verdict for the base as it now stands: true = test AND typecheck GREEN on detached origin/base after this merge; false = either is RED (this STOPS the walk — the rest of the stack would land on a broken base). OMIT it entirely if the post-merge step did not run: unverified is NOT the same as green, and only an explicit false stops the walk.' },
+    post_merge_tests: { type: 'string', description: 'The POST-MERGE run (step 8): the test + typecheck command(s) re-run on the detached, just-merged base + their exact result. This is ALSO the reason field: if the step was skipped or could not be completed, say WHY here (e.g. "no test runner in this repo", "the suite did not finish promptly") and leave base_green unset. REQUIRED whenever you omit base_green on a LANDED node — an omitted verdict with NOTHING said here STOPS the walk, because silence is indistinguishable from forgetting to verify.' },
+    base_green: { type: 'boolean', description: 'POST-MERGE verdict for the base as it now stands: true = test AND typecheck GREEN on detached origin/base after this merge; false = either is RED (this STOPS the walk — the rest of the stack would land on a broken base). OMIT it entirely if the post-merge step did not run — unverified is NOT the same as green — but then you MUST state the reason in post_merge_tests: an omission with no reason given also STOPS the walk (the base state is then unknown, not green).' },
     detail: { type: 'string', description: 'Short summary of what happened.' },
   },
 }
@@ -306,7 +327,8 @@ ${POST_MERGE_VERIFY ? `8. POST-MERGE VERIFY (local, on the base you just moved):
    - \`git fetch origin && git checkout --detach origin/${BASE}\` — DETACHED. Do not check out, create, or modify a local \`${BASE}\` branch, and do not push anything anywhere.
    - Re-run the SAME project test + typecheck commands you ran in step 5, on that merged base, and record the commands + their exact result in \`post_merge_tests\`.
    - Set \`base_green: true\` only if BOTH are GREEN; set \`base_green: false\` if EITHER is RED, naming the failing command and the failure in \`post_merge_tests\`/\`detail\`. A RED base STOPS the whole walk. Do NOT try to fix, revert, or re-merge it: you may not push to \`${BASE}\`, and repairing the base is a human decision, not yours.
-   - ONE local run, exactly like step 5: no \`--watch\`, no sleep/retry loop, no CI polling. If it cannot be completed here (tooling missing, or it does not finish promptly) do NOT retry and do NOT wait — leave \`base_green\` UNSET, say why in \`post_merge_tests\`, and still return status=LANDED: the squash-merge already happened and must be reported.` : `8. POST-MERGE VERIFY: DISABLED for this run (args.postMergeVerify:false — the target suite is too slow to re-run per node). Skip it entirely: do not re-run the suite, leave \`base_green\` UNSET, and note in \`post_merge_tests\` that the merged \`${BASE}\` was not verified by this walk. The step-5 pre-merge gate is then the only test evidence for this node; still return status=LANDED as usual.`}
+   - ONE local run, exactly like step 5: no \`--watch\`, no sleep/retry loop, no CI polling. If it cannot be completed here (tooling missing, or it does not finish promptly) do NOT retry and do NOT wait — leave \`base_green\` UNSET, STATE THE REASON in \`post_merge_tests\` ("no test runner in this repo", "the suite did not finish promptly", …), and still return status=LANDED: the squash-merge already happened and must be reported.
+   - The stated reason is REQUIRED, not optional prose: a LANDED node with no \`base_green\` and NOTHING said in \`post_merge_tests\` STOPS the whole walk, because silence is indistinguishable from forgetting to verify at all. Saying why you could not verify is exactly what lets the walk keep landing the rest of the stack.` : `8. POST-MERGE VERIFY: DISABLED for this run (args.postMergeVerify:false — the target suite is too slow to re-run per node). Skip it entirely: do not re-run the suite, leave \`base_green\` UNSET, and note in \`post_merge_tests\` that the merged \`${BASE}\` was not verified by this walk. The step-5 pre-merge gate is then the only test evidence for this node; still return status=LANDED as usual.`}
 
 If you cannot reach a clean, green, merged state, do NOT force it: return status=ESCALATED (or FAILED for an unexpected error) with a precise \`escalation\`/\`detail\` so the human and the rest of the stack are unblocked deliberately.
 
@@ -377,8 +399,9 @@ if (!EXECUTE) {
     staged,
     outcomes: staged.map((s) => ({ ref: s.ref, key: s.key, status: s.landable ? 'STAGED' : 'BLOCKED', verdict: s.verdict, verify: s.verify })),
     cleanup: null, spineVersion: SPINE_VERSION,
-    // Stage mode merges nothing, so the base never moved and there is nothing to verify.
-    postMergeVerify: POST_MERGE_VERIFY, baseGreen: null,
+    // Stage mode merges nothing, so the base never moved and there is nothing to verify: null is
+    // "no post-merge verdict happened", distinct from all five of the #116 states below.
+    postMergeVerify: POST_MERGE_VERIFY, baseGreen: null, baseVerifyState: null,
   }
 }
 
@@ -387,6 +410,7 @@ let parent = null   // the previously-LANDED item: { ref, branch } — drives th
 let landedCount = 0
 let stopped = false
 let lastBaseGreen = null   // post-merge verdict for the base as it now stands (null = unverified)
+let lastBaseVerifyState = null   // #116: green | red | disabled | unrunnable | missing (null = nothing landed yet)
 
 for (let i = 0; i < STACK.length; i++) {
   const item = STACK[i]
@@ -422,22 +446,49 @@ for (let i = 0; i < STACK.length; i++) {
   landedCount++
   if (!item.branch) item.branch = agentBranch(L.head_branch)   // land actor's step-1 resolve, as fallback
   parent = { ref: item.ref, branch: item.branch }   // becomes the next child's rebase upstream
-  // POST-MERGE (step 8): tri-state. true=verified green, false=verified RED, null=not verified
-  // (skipped, disabled, or unrunnable). Only an EXPLICIT false is treated as red — an absent
-  // verdict must never read as green, but it must not stop the walk either.
-  const baseGreen = L.base_green === true ? true : (L.base_green === false ? false : null)
+  // POST-MERGE (step 8), five-state (#116). An EXPLICIT verdict wins over everything — an actor
+  // that ran the step anyway under postMergeVerify:false and found the base RED still stops the
+  // walk. With no verdict, the discriminator is AFFIRMATIVE SILENCE: a stated reason in
+  // post_merge_tests is `unrunnable` (the step ran and could not finish → CONTINUE, the fail-open
+  // trade-off documented above); nothing at all is `missing` (→ STOP, the base is unobserved).
+  const stated = typeof L.post_merge_tests === 'string' ? L.post_merge_tests.trim() : ''
+  const baseVerifyState = L.base_green === true ? 'green'
+    : L.base_green === false ? 'red'
+    : !POST_MERGE_VERIFY ? 'disabled'
+    : stated ? 'unrunnable'
+    : 'missing'
+  const baseGreen = baseVerifyState === 'green' ? true : (baseVerifyState === 'red' ? false : null)
+  const stopReason = baseVerifyState === 'red'
+    ? `${BASE} is RED after this PR landed (post-merge test/typecheck failed) — a human must fix ${BASE}; the rest of the stack would rebase onto and merge into a broken base`
+    : baseVerifyState === 'missing'
+      ? `the land actor returned no post-merge verdict for ${BASE} and no reason it could not verify, so the state of ${BASE} as merged is UNKNOWN — nothing observed it after the squash-merge (this is NOT a report that ${BASE} failed). Stopping so the rest of the stack does not land on an unobserved base; re-run the walk for the remaining PRs once the post-merge check reports, or pass args.postMergeVerify:false to opt out of it deliberately`
+      : null
   outcomes.push({
-    ref: item.ref, key: item.key, status: 'LANDED', verify: v, land: L, base_green: baseGreen,
-    ...(baseGreen === false ? { reason: `${BASE} is RED after this PR landed (post-merge test/typecheck failed) — a human must fix ${BASE}; the rest of the stack would rebase onto and merge into a broken base` } : {}),
+    ref: item.ref, key: item.key, status: 'LANDED', verify: v, land: L,
+    base_green: baseGreen, base_verify_state: baseVerifyState,
+    ...(stopReason ? { reason: stopReason } : {}),
   })
-  log(`#${item.ref}: LANDED (${landedCount}/${STACK.length})${L.rebased ? ' [rebased --onto ' + BASE + ']' : ''}${baseGreen === true ? ' [base green]' : baseGreen === false ? ' [base RED]' : ' [base unverified]'}.`)
+  const baseTag = baseVerifyState === 'green' ? ' [base green]'
+    : baseVerifyState === 'red' ? ' [base RED]'
+    : baseVerifyState === 'disabled' ? ' [base verify disabled]'
+    : baseVerifyState === 'unrunnable' ? ` [base UNVERIFIED — could not run: ${stated}]`
+    : ' [base verdict MISSING]'
+  log(`#${item.ref}: LANDED (${landedCount}/${STACK.length})${L.rebased ? ' [rebased --onto ' + BASE + ']' : ''}${baseTag}.`)
   lastBaseGreen = baseGreen
+  lastBaseVerifyState = baseVerifyState
   // A RED base STOPS the walk. It cannot be repaired here: the land prompt's HARD RULES forbid
   // pushing to the base, and spine design-decision 2 forbids a workflow auto-executing an
   // irreversible repair (a revert/re-merge) no matter how confident it is. Report and stop.
-  if (baseGreen === false) {
+  if (baseVerifyState === 'red') {
     stopped = true
     log(`#${item.ref}: post-merge ${BASE} is RED → STOPPING the walk. ${BASE} cannot be repaired here (no push to ${BASE}, no auto-revert) — a human must fix it before the rest of the stack lands.${L.post_merge_tests ? ` Post-merge run: ${L.post_merge_tests}` : ''}`)
+  } else if (baseVerifyState === 'missing') {
+    // NOT a red base — an UNKNOWN one. The actor said nothing at all about step 8, so the #71
+    // guarantee (something tested the base AS MERGED) was silently voided for this node and would
+    // be for every node after it. An actor that simply could not run the check says so and the
+    // walk continues; only silence stops it.
+    stopped = true
+    log(`#${item.ref}: post-merge verdict for ${BASE} is MISSING — the land actor returned neither base_green nor a reason it could not verify → STOPPING the walk. The state of ${BASE} as merged is UNKNOWN: nothing observed it after the merge, which is the exact hole issue #71 closed. Branches are NOT pruned. Re-run the remaining PRs once the post-merge check reports, or pass args.postMergeVerify:false to opt out of it deliberately.`)
   }
 }
 
@@ -454,19 +505,28 @@ if (complete && landedCount > 0 && !stopped) {
   log(`Stack fully landed — cleanup pruned ${(cleanup && cleanup.deleted && cleanup.deleted.length) || 0} branch(es).`)
 }
 
-const baseNote = !POST_MERGE_VERIFY ? `${BASE} not post-merge verified (args.postMergeVerify:false)`
-  : lastBaseGreen === true ? `${BASE} post-merge GREEN`
-  : lastBaseGreen === false ? `${BASE} post-merge RED — fix it before landing the rest`
-  : `${BASE} post-merge UNVERIFIED`
-log(`${complete && lastBaseGreen !== false ? 'Stack LANDED' : 'Walk STOPPED'}: ${landedCount}/${STACK.length} PR(s) landed onto ${BASE}; ${baseNote} (executed; spine v${SPINE_VERSION}).`)
+// One note per #116 state, so the summary line says WHICH of the five happened on the last
+// landed node — never a bare "unverified" that fuses opted-out, unrunnable, and unreported.
+const BASE_NOTE = {
+  green: `${BASE} post-merge GREEN`,
+  red: `${BASE} post-merge RED — fix it before landing the rest`,
+  disabled: `${BASE} not post-merge verified (args.postMergeVerify:false)`,
+  unrunnable: `${BASE} post-merge UNVERIFIED — the check could not run; the actor's reason is on the node`,
+  missing: `${BASE} post-merge verdict MISSING — no verdict and no reason given, so ${BASE} as merged is UNKNOWN (it is not known to have failed)`,
+}
+const baseNote = BASE_NOTE[lastBaseVerifyState] || (!POST_MERGE_VERIFY
+  ? `${BASE} not post-merge verified (args.postMergeVerify:false)`
+  : `${BASE} post-merge UNVERIFIED (nothing landed)`)
+log(`${complete && !stopped ? 'Stack LANDED' : 'Walk STOPPED'}: ${landedCount}/${STACK.length} PR(s) landed onto ${BASE}; ${baseNote} (executed; spine v${SPINE_VERSION}).`)
 // Return shape is ADDITIVE: base/total/landed/complete/outcomes/cleanup preserved; executed/
 // staged/spineVersion are new (staged mirrors the plan shape so both modes return it), as are
-// postMergeVerify (was the post-merge step enabled) + baseGreen (true/false/null for the base
-// as it now stands — null means the merged base was never verified, NOT that it is green).
+// postMergeVerify (was the post-merge step enabled), baseGreen (true/false/null for the base as
+// it now stands — null means the merged base was never verified, NOT that it is green) and, since
+// #116, baseVerifyState, which names WHY: green | red | disabled | unrunnable | missing.
 const staged = outcomes.map((o) => ({
   ref: o.ref, key: o.key,
   status: o.status,
   verdict: (o.verify && o.verify.verdict) || (o.status === 'LANDED' ? 'READY' : undefined),
   landable: o.status === 'LANDED',
 }))
-return { base: BASE, total: STACK.length, landed: landedCount, complete, executed: true, outcomes, staged, cleanup, spineVersion: SPINE_VERSION, postMergeVerify: POST_MERGE_VERIFY, baseGreen: lastBaseGreen }
+return { base: BASE, total: STACK.length, landed: landedCount, complete, executed: true, outcomes, staged, cleanup, spineVersion: SPINE_VERSION, postMergeVerify: POST_MERGE_VERIFY, baseGreen: lastBaseGreen, baseVerifyState: lastBaseVerifyState }

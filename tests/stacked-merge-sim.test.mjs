@@ -47,7 +47,16 @@ function defaultFetch(ref) {
   }
 }
 const verdict = (ref, over = {}) => ({ ref: String(ref), verdict: 'READY', mergeability: 'CLEAN', ci_status: 'PASSING', ci_detail: '', hold: '', rationale: 'green', ...over })
-const landed = (ref, over = {}) => ({ ref: String(ref), status: 'LANDED', rebased: true, merged_sha: `sha-${ref}`, tests_run: 'green', detail: 'merged', ...over })
+// The DEFAULT land stub is the happy path: the node landed AND step 8 verified the merged base
+// GREEN. Since #116 a LANDED node that reports NEITHER a verdict NOR a reason it could not verify
+// stops the walk, so that silence is opted into explicitly (landedSilent) rather than being every
+// unrelated test's accidental default.
+const landed = (ref, over = {}) => ({ ref: String(ref), status: 'LANDED', rebased: true, merged_sha: `sha-${ref}`, tests_run: 'green', post_merge_tests: 'npm test → 53 passing, 0 failing; npx tsc --noEmit → clean', base_green: true, detail: 'merged', ...over })
+// A LANDED node whose actor said NOTHING about step 8 — no base_green AND no reason (#116 `missing`).
+const landedSilent = (ref, over = {}) => {
+  const { base_green, post_merge_tests, ...rest } = landed(ref)
+  return { ...rest, ...over }
+}
 
 // Runs the workflow with per-PR fetch/verify/land stubs (keyed by ref) + a cleanup stub.
 async function runScript({ args, fetch, verify, land, cleanup } = {}) {
@@ -316,6 +325,7 @@ test('a RED base (base_green:false) STOPS the walk — the rest of the stack wou
   assert.deepEqual(result.outcomes.map((o) => o.status), ['LANDED', 'SKIPPED', 'SKIPPED'])
   assert.equal(result.complete, false)
   assert.equal(result.baseGreen, false, 'the walk reports the base as RED')
+  assert.equal(result.baseVerifyState, 'red', 'RED is its own state — an observed failure, not an absent verdict')
   assert.equal(one(calls, 'cleanup'), undefined, 'no branch pruning while the base is red')
   assert.ok(calls.logs.some((m) => /RED/.test(m)), 'the red base is logged for the human')
 })
@@ -330,25 +340,127 @@ test('a RED base on the LAST node also stops Cleanup — the stack landed but no
   assert.equal(one(calls, 'cleanup'), undefined, 'branches stay for the human diagnosing the red base')
 })
 
-test('base_green:true lands normally; an OMITTED base_green is UNVERIFIED, not red (fail-open)', async () => {
-  const green = await runScript({ args: { prs: [1, 2] }, land: (ref) => landed(ref, { base_green: true }) })
-  assert.equal(green.result.landed, 2)
-  assert.equal(green.result.baseGreen, true)
-  assert.ok(one(green.calls, 'cleanup'), 'a green base prunes branches exactly as before')
+// ─── #116: `null` split into `unrunnable` (continue) vs `missing` (stop) ───────────────────
+// Until #116 an absent base_green was one undifferentiated "unverified" that never stopped the
+// walk — which collapsed "step 8 was disabled", "step 8 could not run", and "the actor forgot",
+// and only the third is a defect. The discriminator is AFFIRMATIVE SILENCE: the actor must state
+// WHY it could not verify; saying nothing is what stops. A slow/under-tooled repo still lands
+// (it says so and continues — the fail-open trade-off at :151 is preserved); a forgetful actor
+// can no longer silently void the guarantee #71 bought. The tests below replace the old
+// "an OMITTED base_green is UNVERIFIED, not red (fail-open)" test, one case per state.
 
-  const silent = await runScript({ args: { prs: [1, 2] } })   // the default stub omits base_green entirely
-  assert.equal(silent.result.landed, 2, 'a missing verdict does NOT stop the walk — unverified ≠ red')
-  assert.equal(silent.result.baseGreen, null, 'and it is reported as unverified, never as green')
-  assert.ok(one(silent.calls, 'cleanup'), 'cleanup still runs')
+test('base_green:true is the GREEN state — the walk lands normally and prunes branches', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2] }, land: (ref) => landed(ref, { base_green: true }) })
+  assert.equal(result.landed, 2)
+  assert.equal(result.baseGreen, true)
+  assert.equal(result.baseVerifyState, 'green', 'the merged base was observed and it is green')
+  assert.equal(result.outcomes[0].base_verify_state, 'green', 'the per-node outcome carries the state too')
+  assert.ok(one(calls, 'cleanup'), 'a green base prunes branches exactly as before')
+})
+
+test('an unset verdict WITH a stated reason is UNRUNNABLE — the walk CONTINUES (the :151 trade-off)', async () => {
+  const reason = 'npm test did not finish before the no-progress watchdog window — the merged base was not run'
+  const { result, calls } = await runScript({
+    args: { prs: [1, 2] },
+    land: (ref) => landedSilent(ref, { post_merge_tests: reason }),
+  })
+  assert.equal(result.landed, 2, 'a suite that could not run does NOT strand a partially-landed stack')
+  assert.equal(result.baseGreen, null, 'unverified is still never reported as green')
+  assert.equal(result.baseVerifyState, 'unrunnable', 'and it is now distinguishable from a silent omission')
+  assert.equal(result.outcomes[0].base_verify_state, 'unrunnable')
+  assert.ok(one(calls, 'cleanup'), 'cleanup still runs — the whole stack landed')
+  assert.ok(calls.logs.some((m) => /UNVERIFIED/i.test(m) && m.includes(reason.slice(0, 30))),
+    'reported LOUDLY: the operator sees the actor’s stated reason, not a bare “unverified”')
+})
+
+test('an unset verdict with NO stated reason is MISSING — affirmative silence STOPS the walk (#116)', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2, 3] }, land: (ref) => landedSilent(ref) })
+  assert.equal(result.landed, 1, 'PR #1 DID land — the squash-merge is irreversible and is still reported')
+  assert.equal(result.baseVerifyState, 'missing')
+  assert.equal(result.outcomes[0].base_verify_state, 'missing')
+  assert.equal(result.baseGreen, null, 'missing is NOT green')
+  assert.equal(byPrefix(calls, 'verify:#2').length, 0, 'the walk stops — #2 is not even verified')
+  assert.equal(byPrefix(calls, 'land:#2').length, 0, 'and never reaches the write land actor')
+  assert.deepEqual(result.outcomes.map((o) => o.status), ['LANDED', 'SKIPPED', 'SKIPPED'])
+  assert.equal(result.complete, false)
+  assert.equal(one(calls, 'cleanup'), undefined, 'no branch pruning while the base state is unknown')
+})
+
+test('a MISSING stop says the base is UNKNOWN — never that it is red or that a human must fix it', async () => {
+  const { result, calls } = await runScript({ args: { prs: [1, 2] }, land: (ref) => landedSilent(ref) })
+  const stopLog = calls.logs.find((m) => /STOPPING/i.test(m)) || ''
+  for (const [what, text] of [['outcome reason', result.outcomes[0].reason || ''], ['stop log', stopLog]]) {
+    assert.ok(text, `the ${what} exists`)
+    assert.ok(/UNKNOWN/i.test(text), `the ${what} says the base state is UNKNOWN: ${text}`)
+    assert.ok(!/\bRED\b/i.test(text), `the ${what} does not call the base RED — we do not know: ${text}`)
+    assert.ok(!/must fix/i.test(text), `nor tell a human to fix a base that may be perfectly fine: ${text}`)
+  }
+  assert.ok(/postMergeVerify/.test(result.outcomes[0].reason || ''), 'and it names the documented opt-out')
+})
+
+test('the five post-merge states are distinguishable on the return, and only red/missing stop (#116)', async () => {
+  const cases = [
+    ['disabled', { postMergeVerify: false }, (ref) => landedSilent(ref), false],
+    ['green', {}, (ref) => landed(ref), false],
+    ['red', {}, (ref) => landed(ref, { base_green: false }), true],
+    ['unrunnable', {}, (ref) => landedSilent(ref, { post_merge_tests: 'no test runner in this repo — not run' }), false],
+    ['missing', {}, (ref) => landedSilent(ref), true],
+  ]
+  const seen = new Set()
+  const nodeTags = new Set()
+  const summaryNotes = new Set()
+  for (const [state, extra, land, stops] of cases) {
+    const { result, calls } = await runScript({ args: { prs: [1, 2], ...extra }, land })
+    assert.equal(result.baseVerifyState, state, `${state} is reported as itself on the return`)
+    assert.equal(result.landed, stops ? 1 : 2, `${state} ${stops ? 'stops' : 'continues'} the walk`)
+    seen.add(result.baseVerifyState)
+    // …and the operator reading the LOG can tell them apart too, per node and in the summary.
+    const nodeLog = calls.logs.find((m) => /^#1: LANDED/.test(m)) || ''
+    const summary = calls.logs.find((m) => /^(Stack LANDED|Walk STOPPED)/.test(m)) || ''
+    assert.ok(nodeLog.includes('[base'), `${state}: the per-node line carries a base tag (${nodeLog})`)
+    nodeTags.add(nodeLog.slice(nodeLog.indexOf('[base')))
+    summaryNotes.add(summary.slice(summary.indexOf('; ')))
+  }
+  assert.equal(seen.size, 5, 'all five states are distinct on the return — none collapses into another')
+  assert.equal(nodeTags.size, 5, 'the per-node log line distinguishes all five')
+  assert.equal(summaryNotes.size, 5, 'and so does the final summary line')
+})
+
+test('the actor is TOLD that an unexplained omission stops the walk (schema + step-8 prompt)', async () => {
+  const { calls } = await runScript({ args: { prs: [1] } })
+  const l = one(calls, 'land:#1')
+  const step = postMergeBlock(l.prompt)
+  const bg = l.opts.schema.properties.base_green.description
+  const pmt = l.opts.schema.properties.post_merge_tests.description
+  assert.ok(/stop/i.test(bg) && /(reason|why)/i.test(bg), 'base_green: omitting it without a reason stops the walk')
+  assert.ok(/stop/i.test(pmt) && /(reason|why)/i.test(pmt), 'post_merge_tests is named as the field the reason goes in')
+  assert.ok(/(reason|why)/i.test(step) && /stop/i.test(step), 'the step-8 branch demands a stated reason, not silence')
+})
+
+test('the design comment documents the five-state post-merge model and links the deciding issue', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const at = src.indexOf('POST-MERGE VERIFICATION')
+  const end = src.indexOf('const POST_MERGE_VERIFY', at)
+  assert.ok(at !== -1 && end > at, 'the design comment sits immediately above POST_MERGE_VERIFY')
+  const block = src.slice(at, end)
+  for (const state of ['disabled', 'green', 'red', 'unrunnable', 'missing']) {
+    assert.ok(new RegExp(`\\b${state}\\b`, 'i').test(block), `the comment names the '${state}' state`)
+  }
+  assert.ok(/#116/.test(block), 'and links the issue that decided it')
+  assert.ok(/#71/.test(block), 'while keeping the #71 provenance that motivated step 8')
 })
 
 test('args.postMergeVerify:false is the escape hatch for a slow suite; the DEFAULT is on', async () => {
-  const off = await runScript({ args: { prs: [1, 2], postMergeVerify: false } })
+  // The opted-out actor is told to leave base_green unset, so the DISABLED run is the silent one —
+  // and silence must never stop a walk the operator explicitly opted out of verifying (#116).
+  const off = await runScript({ args: { prs: [1, 2], postMergeVerify: false }, land: (ref) => landedSilent(ref) })
   const l = one(off.calls, 'land:#1').prompt
   assert.ok(/POST-MERGE VERIFY/i.test(l) && /DISABLED/i.test(l), 'the land prompt says the post-merge verify is disabled for this run')
   assert.ok(!/checkout --detach/.test(l), 'and does not ask for the detached base checkout')
   assert.equal(off.result.postMergeVerify, false, 'the return records that the merged base was NOT verified')
+  assert.equal(off.result.baseVerifyState, 'disabled', 'opting out is its own state — never confused with a forgetful actor')
   assert.equal(off.result.landed, 2, 'the walk still lands the stack')
+  assert.ok(one(off.calls, 'cleanup'), 'and prunes branches — an opt-out never stops the walk')
   const on = await runScript({ args: { prs: [1] } })
   assert.equal(on.result.postMergeVerify, true, 'DEFAULT is ON — correctness first; a slow repo opts out explicitly')
   assert.ok(/checkout --detach/.test(one(on.calls, 'land:#1').prompt), 'and the detached base checkout is asked for by default')
@@ -362,6 +474,7 @@ test('the post-merge fields are ADDITIVE on the return contract in BOTH modes', 
     }
     assert.equal(result.postMergeVerify, true, `postMergeVerify reported (execute=${execute})`)
     assert.ok('baseGreen' in result, `baseGreen reported (execute=${execute})`)
+    assert.ok('baseVerifyState' in result, `baseVerifyState reported (execute=${execute}) — the #116 five-state signal`)
   }
 })
 
