@@ -27,6 +27,10 @@
 //   - args.maxRounds: hard cap on saturation rounds before stopping as `capped` (default 6).
 //   - args.lenses:    optional array of custom threat-model lenses (overrides defaults).
 //   - args.threshold: min severity to report — critical|high|medium|low|info (default "low").
+//   - args.discoveryModel / args.validateModel: model families for the Discovery and
+//                     Validate stages (defaults "opus" / "sonnet"). They must DIFFER —
+//                     passing the same value THROWS, because a same-model validator
+//                     agrees with itself and the disprove-first stage becomes decorative.
 //   - args.tools:     deterministic prefilter tools to run before discovery
 //                     (default ['foxguard']; [] disables Phase 0). Fail-open:
 //                     a missing tool is logged + reported, never fatal.
@@ -65,6 +69,18 @@ const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
 const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
+
+// MODEL INDEPENDENCE (#92, mirroring factory-issue-fix.js). Validate exists to DISAGREE with
+// Discovery, so the two stages are pinned to DIFFERENT model families rather than both inheriting
+// the session model. If the session happened to be the validate model, an inherited default would
+// silently collapse the two — the model that FOUND a candidate would be the model that decides it
+// is real — and "confirmed" would reflect one opinion twice with no visible symptom. Both are
+// overridable; collapsing them THROWS rather than degrading quietly.
+const DISCOVERY_MODEL = (typeof A.discoveryModel === 'string' && A.discoveryModel.trim()) ? A.discoveryModel.trim() : 'opus'
+const VALIDATE_MODEL = (typeof A.validateModel === 'string' && A.validateModel.trim()) ? A.validateModel.trim() : 'sonnet'
+if (DISCOVERY_MODEL === VALIDATE_MODEL) {
+  throw new Error(`deep-security-scan: the Validate stage must run on a DIFFERENT model family from Discovery — a same-model validator agrees with itself and the disprove-first stage becomes decorative. Got discoveryModel="${DISCOVERY_MODEL}" and validateModel="${VALIDATE_MODEL}".`)
+}
 
 // Diverse default lenses — each worker hunts hardest within its lens, which is what makes
 // the independent passes find DIFFERENT things instead of redundantly re-finding the same.
@@ -529,7 +545,7 @@ Do this:
 4. For each candidate give a file, best-guess line, vuln_class, source/sink, and a concrete "why". Do NOT validate or fix here.
 
 You are ONE of several independent workers with different lenses; do not try to cover everything — go DEEP on yours. Report files_reviewed honestly. Return the structured object.`,
-        { label: `discover:r${round}-lens-${w.id}`, phase: 'Discovery', schema: CANDIDATE_SCHEMA }
+        { label: `discover:r${round}-lens-${w.id}`, phase: 'Discovery', model: DISCOVERY_MODEL, schema: CANDIDATE_SCHEMA }
       )
     )
   )
@@ -610,7 +626,7 @@ Try hard to DISPROVE it:
 5. If confirmed, give the attacker story, the evidence, and a concrete fix. Do NOT assign severity here — a dedicated severity / attack-path stage calibrates severity downstream from an attacker-path facts record. Your job is EXPLOITABILITY, not rating.
 
 Return the structured object.`,
-        { label: `validate:${c.id}`, phase: 'Validate', schema: VALIDATION_SCHEMA }
+        { label: `validate:${c.id}`, phase: 'Validate', model: VALIDATE_MODEL, schema: VALIDATION_SCHEMA }
       ).then((v) => (v ? { ...c, ...v } : null))
     )
   )

@@ -892,6 +892,40 @@ test('sev: report consumes calibrated severity + shows suppressed items with the
   assert.ok(/calibrated|attack-path|severity stage/i.test(map.reportPrompt), 'report told severity comes from the calibration stage')
 })
 
+// ---- model independence (#92) ----
+// Validate exists to disagree with Discovery. If both inherit the session model, the model that
+// FOUND a candidate is the model that decides it is real, and "confirmed" reflects one opinion
+// twice. Mirrors the factory guard (factory-issue-fix.js MODEL INDEPENDENCE + its sim tests).
+
+const byLabel = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || "").startsWith(prefix))
+
+test("models: Validate runs on a DIFFERENT model family from Discovery", async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { calls } = await runScript({ args: { target: "/tmp/fake", rounds: 2 }, stubs: stubsFor(map) })
+  const d = byLabel(calls, "discover:")[0]
+  const v = byLabel(calls, "validate:")[0]
+  assert.ok(d.opts.model, "discovery is pinned to an explicit model")
+  assert.ok(v.opts.model, "validation is pinned to an explicit model")
+  assert.notEqual(v.opts.model, d.opts.model, "a same-model validator agrees with itself — the models must differ")
+})
+
+test("models: both are overridable, and a caller that collapses them is rejected", async () => {
+  const { calls } = await runScript({
+    args: { target: "/tmp/fake", rounds: 2, discoveryModel: "opus", validateModel: "haiku" },
+    stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }),
+  })
+  assert.equal(byLabel(calls, "discover:")[0].opts.model, "opus", "discoveryModel is honoured")
+  assert.equal(byLabel(calls, "validate:")[0].opts.model, "haiku", "validateModel is honoured")
+  await assert.rejects(
+    () => runScript({
+      args: { target: "/tmp/fake", rounds: 2, discoveryModel: "opus", validateModel: "opus" },
+      stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }),
+    }),
+    (e) => /DIFFERENT model family/i.test(e.message) && /opus/.test(e.message),
+    "collapsing the two must THROW and name both values, not silently degrade"
+  )
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

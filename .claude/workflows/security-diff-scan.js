@@ -31,6 +31,10 @@
 //   - args.cicdLens: force the gated CI/CD pipeline-abuse lens on (true) or off (false). Default
 //                    (omitted) is AUTO: it runs iff the resolved diff touches CI/CD config
 //                    (.github/workflows, .gitlab-ci.yml, azure pipelines, build/release automation).
+//   - args.discoveryModel / args.validateModel: model families for the Discovery and
+//                     Validate stages (defaults "opus" / "sonnet"). They must DIFFER —
+//                     passing the same value THROWS, because a same-model validator
+//                     agrees with itself and the disprove-first stage becomes decorative.
 //   - args.readonlyAgent: read-only agentType for the resolve/discovery/validation agents
 //                    (default the built-in `Explore`; override with a stricter custom agent).
 //
@@ -94,6 +98,18 @@ const ROUNDS = A.rounds || (HAS_BUDGET ? Math.max(3, Math.min(8, Math.floor(budg
 // override with args.readonlyAgent). The report agent is intentionally NOT restricted — it
 // must write report.html. See the header for the threat model.
 const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
+
+// MODEL INDEPENDENCE (#92, mirroring factory-issue-fix.js). Validate exists to DISAGREE with
+// Discovery, so the two stages are pinned to DIFFERENT model families rather than both inheriting
+// the session model. If the session happened to be the validate model, an inherited default would
+// silently collapse the two — the model that FOUND a candidate would be the model that decides it
+// is real — and "confirmed" would reflect one opinion twice with no visible symptom. Both are
+// overridable; collapsing them THROWS rather than degrading quietly.
+const DISCOVERY_MODEL = (typeof A.discoveryModel === 'string' && A.discoveryModel.trim()) ? A.discoveryModel.trim() : 'opus'
+const VALIDATE_MODEL = (typeof A.validateModel === 'string' && A.validateModel.trim()) ? A.validateModel.trim() : 'sonnet'
+if (DISCOVERY_MODEL === VALIDATE_MODEL) {
+  throw new Error(`security-diff-scan: the Validate stage must run on a DIFFERENT model family from Discovery — a same-model validator agrees with itself and the disprove-first stage becomes decorative. Got discoveryModel="${DISCOVERY_MODEL}" and validateModel="${VALIDATE_MODEL}".`)
+}
 
 // ---- prompt-injection fence + preamble (the diff, and in PR mode the PR title/body, are
 // UNTRUSTED). Inlined so this stays one self-contained file. See pr-triage-fanout.js. ----
@@ -685,7 +701,7 @@ Do this:
 4. For each candidate give file, best-guess line, vuln_class, source/sink, change_ref (the changed hunk/line), introduced (added|removed-guard|modified|exposed-existing), and a concrete "why" that says why the CHANGE is responsible. Do NOT validate or fix here.
 
 You are ONE of several independent workers with different lenses; go DEEP on yours. Report hunks_reviewed honestly. Return the structured object.`,
-      { label: `discover:lens-${w.id}`, phase: 'Discovery', agentType: READONLY_AGENT, schema: CANDIDATE_SCHEMA }
+      { label: `discover:lens-${w.id}`, phase: 'Discovery', agentType: READONLY_AGENT, model: DISCOVERY_MODEL, schema: CANDIDATE_SCHEMA }
     )
   )
 )
@@ -780,7 +796,7 @@ Try hard to DISPROVE it:
 6. If confirmed, give the attacker story, the evidence, and a concrete fix. Do NOT assign severity here — a dedicated severity / attack-path stage calibrates severity downstream from an attacker-path facts record. Your job is EXPLOITABILITY + change-attribution, not rating.
 
 Return the structured object.`,
-        { label: `validate:${c.id}`, phase: 'Validate', agentType: READONLY_AGENT, schema: VALIDATION_SCHEMA }
+        { label: `validate:${c.id}`, phase: 'Validate', agentType: READONLY_AGENT, model: VALIDATE_MODEL, schema: VALIDATION_SCHEMA }
       ).then((v) => (v ? { ...c, ...v } : null))
     )
   )
