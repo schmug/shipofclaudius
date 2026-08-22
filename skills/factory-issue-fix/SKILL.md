@@ -1,6 +1,6 @@
 ---
 name: factory-issue-fix
-description: The software factory engine — turn ONE GitHub issue into a reproduced, diagnosed, independently-verified, fixed DRAFT PR. Reproduce (a bug that will not reproduce is never "fixed") → Diagnose (root cause + narrowest boundary) → Verify (an INDEPENDENT model family decides real bug vs intended behaviour) → Fix (worktree-isolated, fixture-first, draft PR only). Self-bootstraps from the factory queue when given no issue; never merges and never pushes main.
+description: The software factory engine — turn ONE GitHub issue into a reproduced, diagnosed, independently-verified, fixed DRAFT PR. Reproduce (a bug that will not reproduce is never fixed) → Diagnose (root cause + narrowest boundary) → Verify (an INDEPENDENT model family decides real bug vs intended behaviour) → Fix (worktree-isolated, fixture-first, draft PR only). Self-bootstraps from the factory queue when given no issue; never merges and never pushes main. Use when you want one bug driven from unverified report to reviewable draft PR unattended — run the factory on this, fix this issue end to end. Not for choosing which issues to fix (use issue-triage-fanout), not for a straightforward already-diagnosed issue (use implement-issue, or stacked-impl-lanes for a wave of them), and not for landing the PR it produces (use factory-land).
 ---
 
 Run the `factory-issue-fix` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:

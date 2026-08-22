@@ -1,6 +1,6 @@
 ---
 name: track-findings
-description: Deduped, preview-gated bridge that files a scan bundle's confirmed findings into a tracker — by-fingerprint create/reuse/skip, exact payload preview, draft-GHSA (public) vs security-issue (private) routing, serial file + readback. Stage-by-default; pass execute=true to actually file. Use after a scan to turn its findings into tracked work without re-filing duplicates.
+description: Deduped, preview-gated bridge that files a scan bundle's confirmed findings into a tracker — by-fingerprint create/reuse/skip, exact payload preview, draft-GHSA (public) vs security-issue (private) routing, serial file + readback. Stage-by-default; pass execute=true to actually file. Use after a scan to turn its findings into tracked work without re-filing duplicates. Not for producing findings in the first place (use deep-security-scan or security-diff-scan), not for deciding whether an external finding is actionable here (use triage-finding), and not for fixing one (use fix-finding).
 ---
 
 Run the `track-findings` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:

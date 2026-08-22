@@ -1,6 +1,7 @@
 ---
 name: implement-issue
 description: Use when the user asks to implement, build, fix, or start coding an already-filed GitHub issue by number or URL, hand a ticket off to a background agent, or get a just-filed issue picked up for implementation. Accepts an optional issue number or URL; with no argument it targets the most recently filed issue. Not for filing new issues, triaging, or PR review — this skill always needs an existing issue to implement. Not a Workflow wrapper; this is a session-long process skill.
+argument-hint: [issue-number-or-url]
 workflow: none
 ---
 

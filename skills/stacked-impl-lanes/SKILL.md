@@ -1,6 +1,6 @@
 ---
 name: stacked-impl-lanes
-description: Implements issue-lanes into review-only PRs (parallel if file-disjoint, sequential + stacked if hub-coupled); security-hardening review on invariant lanes.
+description: Implements issue-lanes into review-only PRs (parallel if file-disjoint, sequential + stacked if hub-coupled); security-hardening review on invariant lanes. Use when triage has produced a set of buildable issues and you want them implemented as one reviewable chain rather than one at a time — build this wave, implement these lanes. Not for deciding what to build (use issue-triage-fanout, then issue-research-fanout on its RESEARCH bucket), not for a single issue (use implement-issue, or factory-issue-fix for an unreproduced bug), and not for landing the stack it opens (use stacked-merge-walk).
 ---
 
 Run the `stacked-impl-lanes` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
