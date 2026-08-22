@@ -78,6 +78,28 @@ const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
 const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
+
+// SCAN OUTPUT LOCATION (#58 — disclosure risk). Reports used to be created INSIDE the target's
+// working tree (${TARGET}/.security-scans/...). On a public repo that is one `git add -A` + push
+// away from disclosing unpatched findings: a real run on schmug/PhishSOC committed its report and
+// opened PUBLIC PR #565, leaking 12 findings (9 High) with source→sink, file:line and fixes, and
+// partly re-leaking findings already held in private GHSA drafts. The default is now a scratch dir
+// OUTSIDE the tree (factory-land.js's \${TMPDIR:-/tmp} idiom), so a plain `git add -A` in the
+// target cannot stage a report. args.outputDir opts back in explicitly — and if it points inside
+// the tree, the report agent must ensure a .gitignore entry first.
+const OUTPUT_DIR_ARG = (typeof A.outputDir === 'string' && A.outputDir.trim()) ? A.outputDir.trim() : ''
+const OUTPUT_ROOT = OUTPUT_DIR_ARG || '\${TMPDIR:-/tmp}/shipofclaudius-scans'
+// Conservative, in-code (auditable) in-tree detection: a relative path resolves against the target,
+// and an absolute path at/under the target is inside it. Anything else is treated as outside.
+const TARGET_NOSLASH = String(TARGET).replace(/\/+$/, '')
+const OUTPUT_IN_TREE = !!OUTPUT_DIR_ARG && (
+  !OUTPUT_DIR_ARG.startsWith('/') ||
+  OUTPUT_DIR_ARG === TARGET_NOSLASH ||
+  OUTPUT_DIR_ARG.startsWith(TARGET_NOSLASH + '/')
+)
+const OUTPUT_RULE = OUTPUT_IN_TREE
+  ? `The caller explicitly pointed output INSIDE the target repo. BEFORE writing anything: ensure the repo ignores it — if "${TARGET}/.gitignore" lacks a line matching the output path, append one (e.g. ".security-scans/"), and set gitignore_ensured accordingly. NEVER \`git add\`, \`git commit\`, or \`git push\` any scan artifact under any circumstances.`
+  : `Do NOT write any scan artifact into the target repo's working tree, and NEVER \`git add\`, \`git commit\`, or \`git push\` one. The output dir above is deliberately outside the tree so a report can never be staged by a routine \`git add -A\`.`
 const ROUNDS = A.rounds // undefined is fine — deep-security-scan budget-scales its own default
 // Model independence (#92) is enforced INSIDE deep-security-scan; Layer 1 only has to forward the
 // knobs. Omitted rather than passed as undefined so the sub-workflow applies its own defaults.
@@ -545,6 +567,8 @@ const REPORT_SCHEMA = {
     report_html_path: { type: 'string', description: 'Absolute path to the written, verified report.html.' },
     report_md: { type: 'string', description: 'The FULL report.md content as text. Do NOT write it to disk (the subagent guardrail forbids it); the caller persists it from this field.' },
     html_written: { type: 'boolean', description: 'True iff report.html was written and verified present on disk (e.g. via test -f).' },
+    target_visibility: { type: 'string', description: 'Target repo visibility: PUBLIC | PRIVATE | INTERNAL | UNKNOWN. Drives the disclosure warning; UNKNOWN fails closed (warns).' },
+    gitignore_ensured: { type: 'boolean', description: 'True iff output was placed in-tree AND a matching .gitignore entry is now present.' },
   },
 }
 const reportResult = await agent(
@@ -573,18 +597,28 @@ ${isIncremental
     : 'FULL RUN — no prior bundle; every merged finding is reported. Re-run later with args.priorBundle set to this run\'s bundle.json to monitor across releases.'}
 
 Produce:
-1. Output dir: run \`mkdir -p "${TARGET}/.security-scans/$(date -u +%Y%m%dT%H%M%SZ)-defense"\` and use it (capture the absolute path). Use the "-defense" suffix (no Date.now in scripts — stamp via date -u).
-2. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, URL, and any scanned input before inserting it (& -> &amp;  < -> &lt;  > -> &gt;  " -> &quot;) — a scanned file, dependency string, DAST response, or LLM probe payload may contain <script>. Set the verdict border color to the highest severity present. Render the COVERAGE STATEMENT in its own section. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
-3. report.md — compose the SAME report as terminal/PR-friendly markdown: severity counts, each finding (title, severity, layer, location, one-line fix), the supply-chain inventory, and the full per-layer coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the orchestrator's caller persists it).
-4. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html, base64-encoded, inside \`<script type="application/octet-stream" id="report-md-b64">…</script>\` (base64 cannot break out of the script tag, unlike raw text containing </script>), and add a small "Download report.md" button whose click handler does \`atob\` → \`Blob\` → download. This keeps the single HTML file self-contained AND carriers of its own markdown.
-5. The COVERAGE STATEMENT is non-negotiable in both the HTML and report_md. "Found nothing" and "did not run" must read differently — use the bundle's coverage doc, which separates "not observed" (a layer that ran with no findings) from the "not scanned" exclusions (a skipped/disabled/errored layer).
-6. Embed the SEALED BUNDLE for interop: base64-encode bundle.json into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\`, and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` -> \`Blob\` -> download. Do NOT write these to disk yourself — the orchestrator returns them for the caller to persist.
+1. Create an output dir OUTSIDE the target repo's working tree: run \`mkdir -p "${OUTPUT_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-defense"\` and use it (capture the absolute path; no Date.now in scripts — stamp via date -u). ${OUTPUT_RULE}
+2. Report the TARGET's visibility so the orchestrator can warn about disclosure: run \`gh repo view --json visibility\` from "\${TARGET}" (add no other flags). Set target_visibility to PUBLIC, PRIVATE or INTERNAL. If \`gh\` is absent, unauthenticated, or the target is not a GitHub repo, set it to UNKNOWN — do NOT guess and do NOT fail the run.
+3. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, URL, and any scanned input before inserting it (& -> &amp;  < -> &lt;  > -> &gt;  " -> &quot;) — a scanned file, dependency string, DAST response, or LLM probe payload may contain <script>. Set the verdict border color to the highest severity present. Render the COVERAGE STATEMENT in its own section. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
+4. report.md — compose the SAME report as terminal/PR-friendly markdown: severity counts, each finding (title, severity, layer, location, one-line fix), the supply-chain inventory, and the full per-layer coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the orchestrator's caller persists it).
+5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html, base64-encoded, inside \`<script type="application/octet-stream" id="report-md-b64">…</script>\` (base64 cannot break out of the script tag, unlike raw text containing </script>), and add a small "Download report.md" button whose click handler does \`atob\` → \`Blob\` → download. This keeps the single HTML file self-contained AND carriers of its own markdown.
+6. The COVERAGE STATEMENT is non-negotiable in both the HTML and report_md. "Found nothing" and "did not run" must read differently — use the bundle's coverage doc, which separates "not observed" (a layer that ran with no findings) from the "not scanned" exclusions (a skipped/disabled/errored layer).
+7. Embed the SEALED BUNDLE for interop: base64-encode bundle.json into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\`, and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` -> \`Blob\` -> download. Do NOT write these to disk yourself — the orchestrator returns them for the caller to persist.
 
-Return the structured object {output_dir, report_html_path, report_md, html_written}. Do not invent findings beyond those given.`,
+Return the structured object {output_dir, report_html_path, report_md, html_written, target_visibility, gitignore_ensured}. Do not invent findings beyond those given.`,
   { label: 'report', phase: 'Merge + report', schema: REPORT_SCHEMA }
 )
 
 const reportDir = (reportResult && reportResult.output_dir) || null
+
+// Disclosure warning (#58), computed in CODE so it is auditable and testable rather than left to
+// the report agent's prose. FAIL-CLOSED: an unresolved visibility warns exactly like PUBLIC —
+// "we could not tell" must never read as "it is private".
+const TARGET_VISIBILITY = String((reportResult && reportResult.target_visibility) || 'UNKNOWN').toUpperCase()
+const DISCLOSURE_WARNING = (TARGET_VISIBILITY === 'PRIVATE' || TARGET_VISIBILITY === 'INTERNAL')
+  ? ''
+  : `DISCLOSURE RISK: target visibility is ${TARGET_VISIBILITY}. This report describes UNPATCHED findings. Do NOT commit it, open a public PR/issue with it, or paste it anywhere public — route the findings to the PRIVATE advisory intake instead (/ghsa, draft GHSA), or /track-findings which routes public repos to draft GHSA automatically. The report was written to ${reportDir || '<output_dir>'}, outside the repo working tree.`
+if (DISCLOSURE_WARNING) log(DISCLOSURE_WARNING)
 const reportHtml = (reportResult && reportResult.report_html_path) || null
 const reportMd = (reportResult && reportResult.report_md) || null
 if (reportMd) {
@@ -610,6 +644,9 @@ return {
   total_findings: reportable.length,
   // First-class so the caller can persist report.md deterministically (subagents can't write it):
   report_dir: reportDir,
+  // #58: surfaced so a caller/routine can gate on it, not just read the log.
+  target_visibility: TARGET_VISIBILITY,
+  disclosure_warning: DISCLOSURE_WARNING,
   report_html: reportHtml,
   report_md: reportMd,
   report: reportResult,

@@ -926,6 +926,73 @@ test("models: both are overridable, and a caller that collapses them is rejected
   )
 })
 
+// ===================== SCAN OUTPUT LOCATION (#58) =====================
+// A report written into ${TARGET}/.security-scans/ is one `git add -A` + push away from publicly
+// disclosing unpatched findings — how PhishSOC#565 leaked 12 findings (9 High) on a public repo.
+
+const REPORT_OK_DEEP = {
+  output_dir: '/tmp/x/shipofclaudius-scans/T-deep',
+  report_html_path: '/tmp/x/shipofclaudius-scans/T-deep/report.html',
+  report_md: '# Deep Security Audit — merged md',
+  html_written: true,
+}
+const deepMap = (over = {}) => ({ tool: toolMissing, discovery: () => discoveryTwo, ...over })
+const runDeep = (args, over) => runScript({ args: { target: '/tmp/fake', rounds: 2, ...args }, stubs: stubsFor(over) })
+
+test('output: the report dir defaults OUTSIDE the target working tree', async () => {
+  const map = deepMap()
+  await runDeep({}, map)
+  const rp = map.reportPrompt
+  assert.ok(rp, 'the report agent ran')
+  // Assert the CREATE instruction itself — a whole-prompt scan also matches unrelated fixture
+  // paths (e.g. defense-scan interpolates its Layer-1 sub-report dir).
+  const mkdirLine = rp.split('\n').find((l) => /^1\. Create an output dir/.test(l))
+  assert.ok(mkdirLine, 'the report prompt still has a step-1 output-dir instruction')
+  assert.ok(/TMPDIR/.test(mkdirLine), 'the default output root is a scratch dir, not the repo')
+  assert.ok(!mkdirLine.includes('/tmp/fake'), 'the created dir is not inside the target tree')
+  assert.ok(/never/i.test(rp) && /commit/i.test(rp) && /push/i.test(rp), 'the agent is told never to commit/push scan artifacts')
+})
+
+test('output: args.outputDir is honoured', async () => {
+  const map = deepMap()
+  await runDeep({ outputDir: '/var/scans/mine' }, map)
+  assert.ok(map.reportPrompt.includes('/var/scans/mine'), 'the explicit output root reaches the report agent')
+})
+
+test('output: an in-tree outputDir forces a .gitignore guard', async () => {
+  const map = deepMap()
+  await runDeep({ outputDir: '.security-scans' }, map)
+  assert.ok(/gitignore/i.test(map.reportPrompt), 'opting back in-tree requires ensuring a .gitignore entry')
+})
+
+test('output: a PUBLIC target triggers a disclosure warning naming the private intake', async () => {
+  const map = deepMap({ report: { ...REPORT_OK_DEEP, target_visibility: 'PUBLIC' } })
+  const { result, calls } = await runDeep({}, map)
+  const warn = calls.logs.filter((l) => /DISCLOSURE RISK/i.test(l))
+  assert.equal(warn.length, 1, 'exactly one disclosure warning is emitted for a public target')
+  assert.ok(/ghsa/i.test(warn[0]), 'the warning points at the private GHSA intake')
+  assert.ok(result.disclosure_warning, 'the warning is also returned, not only logged')
+})
+
+test('output: unknown visibility fails CLOSED (still warns)', async () => {
+  const map = deepMap({ report: { ...REPORT_OK_DEEP, target_visibility: '' } })
+  const { calls } = await runDeep({}, map)
+  assert.ok(calls.logs.some((l) => /DISCLOSURE RISK/i.test(l)), 'an unresolved visibility must warn, not stay silent')
+})
+
+test('output: a PRIVATE target does not warn', async () => {
+  const map = deepMap({ report: { ...REPORT_OK_DEEP, target_visibility: 'PRIVATE' } })
+  const { result, calls } = await runDeep({}, map)
+  assert.ok(!calls.logs.some((l) => /DISCLOSURE RISK/i.test(l)), 'a private target is not a disclosure risk')
+  assert.ok(!result.disclosure_warning, 'and nothing is returned as a warning')
+})
+
+test('output: the return contract still carries the report dir (unchanged for callers)', async () => {
+  const map = deepMap({ report: REPORT_OK_DEEP })
+  const { result } = await runDeep({}, map)
+  assert.equal(result.report_dir, REPORT_OK_DEEP.output_dir, 'report_dir still resolves for the caller that persists report.md')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

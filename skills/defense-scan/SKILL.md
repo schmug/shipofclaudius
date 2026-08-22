@@ -10,3 +10,5 @@ Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/defense-scan.js"
 ```
 
 Fill `args` from the user's request. Common args: `target`, `rounds`, `threshold`, `supplyChain`, `url`+`authorized`, `repo`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/defense-scan.js`, or the repo README "Arguments" table. Layers 2–6 are opt-in / authorization-gated and fail-open; writes a report.
+
+Reports are written **outside** the target repo's working tree by default (`${TMPDIR:-/tmp}/shipofclaudius-scans/<ts>-<kind>/`) so a routine `git add -A` can never stage unpatched findings; `outputDir` overrides it, and an in-tree override makes the run ensure a `.gitignore` entry first. On a **public** (or unresolved) target the run emits a `DISCLOSURE RISK` warning and returns `disclosure_warning` — route findings to the private intake (`/ghsa`, or `/track-findings` which does it automatically), never a committed report or public PR.
