@@ -486,6 +486,43 @@ test('meta advertises the post-merge base verification that the land prompt impl
   assert.ok(/POST-MERGE VERIFY/i.test(one(calls, 'land:#1').prompt), 'and the land prompt implements what meta advertises')
 })
 
+// #125: the assertion above checked only /post-merge/i, so when #117 made a `missing` verdict a
+// SECOND stopping condition, meta.description and the Land phase detail went on advertising "a RED
+// base stops the walk" and CI stayed green. meta is not an ordinary comment — the harness reads it
+// WITHOUT executing the body and generates the /skill invoke prompt from it, so that string IS the
+// workflow's advertised contract. Bind meta to what the script actually does: drive all five states,
+// collect the ones that stop the walk, and require every meta field describing the gate to name each
+// stopper. Asserted PER FIELD on purpose — fixing only one of the two must still fail.
+test('every state that stops the walk is named in meta.description AND in the Land phase detail (#125)', async () => {
+  const stoppers = []
+  for (const [extra, land] of [
+    [{ postMergeVerify: false }, (ref) => landedSilent(ref)],                                        // disabled
+    [{}, (ref) => landed(ref)],                                                                      // green
+    [{}, (ref) => landed(ref, { base_green: false })],                                               // red
+    [{}, (ref) => landedSilent(ref, { post_merge_tests: 'no test runner in this repo — not run' })],  // unrunnable
+    [{}, (ref) => landedSilent(ref)],                                                                // missing
+  ]) {
+    const { result } = await runScript({ args: { prs: [1, 2], ...extra }, land })
+    if (result.landed < 2) stoppers.push(result.baseVerifyState)
+  }
+  // Guard against a vacuous pass: an empty stopper set would satisfy every assertion below.
+  assert.deepEqual(stoppers.slice().sort(), ['missing', 'red'], 'the shipped gate stops on exactly red + missing (#117)')
+
+  const metaSrc = metaSlice(await readFile(SRC_PATH, 'utf8'))
+  const fields = [
+    ['meta.description', (metaSrc.match(/^\s*description: '(.*?)',$/m) || [])[1]],
+    ['the Land phase detail', (metaSrc.match(/\{ title: 'Land', detail: '(.*?)' \}/) || [])[1]],
+  ]
+  for (const [what, text] of fields) {
+    assert.ok(text, `${what} is extractable from the meta literal — if this fails the literal was reshaped, not that it is correct`)
+    assert.ok(/post-merge/i.test(text), `${what} describes the post-merge base gate`)
+    for (const state of stoppers) {
+      assert.ok(new RegExp(`\\b${state}\\b`, 'i').test(text),
+        `${what} must name '${state}' — it STOPS the walk, so the harness-visible contract cannot claim red is the only stopping condition: ${text}`)
+    }
+  }
+})
+
 // ─────────────────────── cleanup: only after the whole stack lands ───────────────
 test('branches are pruned ONLY after the whole stack lands, and only then', async () => {
   const { result, calls } = await runScript({ args: { prs: [{ pr: 1, branch: 'feat/a' }, { pr: 2, branch: 'feat/b' }] } })
