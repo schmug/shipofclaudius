@@ -10,7 +10,8 @@
 // parent's stale commits or it conflicts/duplicates — (3) resolves MECHANICAL docs /
 // test-type / lockfile conflicts only, ESCALATING real/semantic conflicts to a human
 // instead of force-resolving, (4) gate-verifies locally, (5) squash-merges, and (6) re-runs
-// test+typecheck on a detached `origin/<base>` AFTER the merge — a RED base STOPS the walk.
+// test+typecheck on a detached `origin/<base>` AFTER the merge — a RED base, or a MISSING verdict
+// (no result AND no stated reason it could not run), STOPS the walk.
 // It does NOT --delete-branch until the WHOLE stack lands (deleting a child's base branch
 // auto-closes that child PR); branches are pruned in a final Cleanup step.
 //
@@ -66,11 +67,11 @@
 
 export const meta = {
   name: 'stacked-merge-walk',
-  description: 'Land a chain of stacked PRs onto a moving base: walk base-first, re-verify mergeStateStatus + required-check rollup (UNKNOWN=must-verify), rebase each child’s own commits --onto the base after its parent squash-merges, resolve only mechanical docs/test-type conflicts (escalate real/semantic ones), gate-verify, squash-merge, re-verify the merged base post-merge (a RED base stops the walk), and prune branches only once the whole stack lands. STAGES by default (verifies read-only and returns a ranked land-plan, merging nothing); pass args.execute:true as the explicit one-pass human approval to actually land — kept human because the walk BATCHES merges with force-pushes and branch deletion, not because a single gated merge needs one.',
+  description: 'Land a chain of stacked PRs onto a moving base: walk base-first, re-verify mergeStateStatus + required-check rollup (UNKNOWN=must-verify), rebase each child’s own commits --onto the base after its parent squash-merges, resolve only mechanical docs/test-type conflicts (escalate real/semantic ones), gate-verify, squash-merge, re-verify the merged base post-merge (five states: red and missing stop the walk; green, disabled and unrunnable continue), and prune branches only once the whole stack lands. STAGES by default (verifies read-only and returns a ranked land-plan, merging nothing); pass args.execute:true as the explicit one-pass human approval to actually land — kept human because the walk BATCHES merges with force-pushes and branch deletion, not because a single gated merge needs one.',
   whenToUse: 'After stacked-impl-lanes has opened a chain of stacked PRs (and pr-triage-fanout has classified them) and you want to LAND the whole stack. This is the terminal, WRITE step of the dev-lifecycle pipeline — it merges/rebases, so do NOT run it under the read-only gh token. Give it the ordered, base-first stack (prs / branches / lanes).',
   phases: [
     { title: 'Verify', detail: 'per PR (read-only, in waves): a relay fetches the untrusted PR text, then an agent re-checks mergeStateStatus + the required-check rollup over nonce-fenced data + trusted metadata and returns a land verdict (UNKNOWN=must-verify). DEFAULT (no args.execute): stop here and return the ranked land-plan — merge nothing' },
-    { title: 'Land', detail: 'per landable PR: a write, worktree-isolated agent rebases the child’s own commits --onto the moving base, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges — no --delete-branch yet — then post-merge re-runs test+typecheck on the detached, just-moved base; a RED base stops the walk (it cannot be repaired here)' },
+    { title: 'Land', detail: 'per landable PR: a write, worktree-isolated agent rebases the child’s own commits --onto the moving base, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges — no --delete-branch yet — then post-merge re-runs test+typecheck on the detached, just-moved base; a RED base stops the walk (it cannot be repaired here) and so does a MISSING verdict — no result and no stated reason, so the merged base is UNKNOWN; green, disabled and unrunnable continue' },
     { title: 'Cleanup', detail: 'once the WHOLE stack has landed, prune the now-stale branches (deleting earlier would auto-close a still-open child PR)' },
   ],
 }
@@ -476,9 +477,10 @@ for (let i = 0; i < STACK.length; i++) {
   log(`#${item.ref}: LANDED (${landedCount}/${STACK.length})${L.rebased ? ' [rebased --onto ' + BASE + ']' : ''}${baseTag}.`)
   lastBaseGreen = baseGreen
   lastBaseVerifyState = baseVerifyState
-  // A RED base STOPS the walk. It cannot be repaired here: the land prompt's HARD RULES forbid
-  // pushing to the base, and spine design-decision 2 forbids a workflow auto-executing an
-  // irreversible repair (a revert/re-merge) no matter how confident it is. Report and stop.
+  // A RED base STOPS the walk (so does a MISSING verdict — the branch right below). It cannot be
+  // repaired here: the land prompt's HARD RULES forbid pushing to the base, and spine
+  // design-decision 2 forbids a workflow auto-executing an irreversible repair (a revert/re-merge)
+  // no matter how confident it is. Report and stop.
   if (baseVerifyState === 'red') {
     stopped = true
     log(`#${item.ref}: post-merge ${BASE} is RED → STOPPING the walk. ${BASE} cannot be repaired here (no push to ${BASE}, no auto-revert) — a human must fix it before the rest of the stack lands.${L.post_merge_tests ? ` Post-merge run: ${L.post_merge_tests}` : ''}`)
@@ -494,8 +496,9 @@ for (let i = 0; i < STACK.length; i++) {
 
 // CLEANUP: only when the WHOLE stack landed — deleting a branch before its descendants
 // merge would auto-close their PRs.
-// A RED base on the LAST node leaves complete=true but stopped=true: the stack landed, yet the
-// base is broken — keep the branches so a human can diagnose or revert from them.
+// A RED base (or a MISSING verdict) on the LAST node leaves complete=true but stopped=true: the
+// stack landed, yet the base is broken or unobserved — keep the branches so a human can diagnose,
+// revert from them, or re-run the post-merge check.
 const complete = landedCount === STACK.length
 let cleanup = null
 if (complete && landedCount > 0 && !stopped) {
