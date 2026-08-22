@@ -1,6 +1,7 @@
 ---
 name: pr-review-fanout
-description: Read-only deep review of ONE PR's diff — fan out review dimensions → adversarially verify each finding → one HTML+markdown review traced to file:line.
+description: Read-only deep review of ONE PR diff — fan out review dimensions, adversarially verify each finding (a skeptic tries to refute it, and refuted or low-confidence findings are dropped), and emit one deduped HTML+markdown review traced to file:line. Reviews and reports only — never comments, never merges. Use when you want a specific PR actually read rather than classified — review PR 412, what is wrong with this diff, is this change safe to land. Not for sorting your whole PR queue by mergeability (use pr-triage-fanout, whose COMMENT verdict this sits behind), not for a security-focused pass over a change (use security-diff-scan), and not for merging (use merge-pr-with-gate).
+argument-hint: <pr-number>
 ---
 
 Run the `pr-review-fanout` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
