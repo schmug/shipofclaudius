@@ -677,6 +677,43 @@ test('an out-of-set depends_on is NOT a cycle and still parallelizes', async () 
     'an out-of-set dependency leaves both footprints provably disjoint -> one parallel wave')
 })
 
+// ---------------- TRUST A WELL-FORMED needs-decision BRIEF (issue #131) ----------------
+// The classify agent is the ONLY place that reads the fenced (untrusted) issue text, so
+// "trust the label" cannot be a script-side branch on labels[] — it has to be baked into
+// the fixed classify PROMPT the model reasons over, same as the anti-injection preamble
+// above. These tests assert that guidance is present, not simulated model behavior.
+
+test('the classify prompt instructs trusting a well-formed needs-decision brief and reusing its text verbatim', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
+  assert.ok(/needs-decision/.test(cls.prompt), 'prompt names the needs-decision label')
+  assert.ok(/trust/i.test(cls.prompt), 'prompt instructs trusting an existing well-formed brief')
+  assert.ok(/verbatim/i.test(cls.prompt), 'prompt says to reuse the brief\'s own question/options verbatim, not re-derive them')
+})
+
+test('the classify prompt forbids silently downgrading a labeled brief to RESEARCH', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
+  assert.ok(/never silently reclassify.*RESEARCH|RESEARCH.*never silently reclassify/i.test(cls.prompt) ||
+    (/reclassify/i.test(cls.prompt) && /RESEARCH/.test(cls.prompt)),
+    'prompt forbids silently reclassifying a well-formed needs-decision brief as RESEARCH')
+})
+
+test('the classify prompt states a decision brief is never needs-you material', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
+  assert.ok(/needs-you/.test(cls.prompt), 'prompt names needs-you')
+  assert.ok(/never/i.test(cls.prompt), 'prompt states the needs-you prohibition, not a maybe')
+})
+
+test('the schema descriptions for decision_question/decision_options also point to reusing a brief verbatim', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  const q = src.match(/decision_question:\s*\{[\s\S]*?description:\s*'([^']*)'/)
+  const o = src.match(/decision_options:\s*\{[\s\S]*?description:\s*'([^']*)'/)
+  assert.ok(q && /verbatim/i.test(q[1]), 'decision_question schema description mentions reusing a brief verbatim')
+  assert.ok(o && /verbatim/i.test(o[1]), 'decision_options schema description mentions reusing a brief verbatim')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
