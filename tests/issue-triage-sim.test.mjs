@@ -677,6 +677,95 @@ test('an out-of-set depends_on is NOT a cycle and still parallelizes', async () 
     'an out-of-set dependency leaves both footprints provably disjoint -> one parallel wave')
 })
 
+// ===================== DECISION-BRIEF TRUST (issue #131) =====================
+// An unattended run (cron routine, /loop, critic-gated-build,
+// parallel-build-orchestrator, factory-*) that hits a call only the maintainer can
+// make files a decision brief via /issue, and the PRODUCER applies `needs-decision`
+// at file time. (The producer is ~/.claude/commands/issue.md — a global file outside
+// this repo, so it is not assertable from here.) This half of the contract is
+// triage's: given the label plus a well-formed question + 2-4 options, TRUST the
+// brief instead of re-deriving its framing from less context than the filing agent
+// had. `needs-you` is the trap — "escalated to a human; agents must stop and not
+// act" is the opposite of a brief's contract, so it must never mark one.
+const briefPrompt = async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  return agentsByLabelPrefix(calls, 'triage:#')[0].prompt
+}
+
+test('#131 the classify prompt names `needs-decision` as the label that routes an issue to DECISION', async () => {
+  const p = await briefPrompt()
+  assert.ok(p.includes('needs-decision'), 'the brief label is named in the classify prompt')
+  assert.ok(/needs-decision[\s\S]{0,400}?DECISION/.test(p), 'the label is tied to the DECISION bucket')
+})
+
+test('#131 the classifier reuses the brief\'s OWN question/options verbatim instead of re-deriving them', async () => {
+  const p = await briefPrompt()
+  assert.ok(/verbatim/i.test(p), 'the prompt demands verbatim reuse of the brief text')
+  assert.ok(/verbatim[\s\S]{0,200}decision_question/i.test(p) || /decision_question[\s\S]{0,200}verbatim/i.test(p),
+    'verbatim reuse is bound to decision_question')
+  assert.ok(/decision_options/.test(p), 'decision_options is named as the destination for the brief\'s options')
+  assert.ok(/do NOT reframe|re-?derive|invent a different question/i.test(p),
+    'the prompt forbids reframing/re-deriving a question the brief already states')
+})
+
+test('#131 a well-formed brief is never downgraded to RESEARCH', async () => {
+  const p = await briefPrompt()
+  assert.ok(/NEVER reclassify[\s\S]{0,120}RESEARCH/i.test(p),
+    'the prompt explicitly forbids reclassifying a well-formed brief as RESEARCH')
+})
+
+test('#131 the repo-state carve-out survives — a brief already answered by repo state may still be DONE/GREEN', async () => {
+  const p = await briefPrompt()
+  assert.ok(/already resolved by current repo state[\s\S]{0,120}DONE or GREEN/i.test(p),
+    'the pre-existing "resolved by repo state -> DONE or GREEN" carve-out is still present')
+  assert.ok(/only permitted departure|ONLY permitted/i.test(p),
+    'trusting the brief names the repo-state carve-out as its one permitted exit')
+})
+
+test('#131 `needs-you` is prohibited as a brief label and is never treated as a brief signal', async () => {
+  const p = await briefPrompt()
+  assert.ok(p.includes('needs-you'), 'the trap label is named so the classifier can reject it')
+  assert.ok(/needs-you`? is NOT a decision-brief label/i.test(p), 'needs-you is explicitly disqualified as a brief label')
+  assert.ok(/agents must stop and not act/i.test(p), 'the prompt states what needs-you actually means')
+  assert.ok(/never suggest applying it/i.test(p), 'a brief is never to be labeled needs-you')
+})
+
+test('#131 a MALFORMED brief (label present, no question or wrong option count) is classified on its merits', async () => {
+  const p = await briefPrompt()
+  assert.ok(/malformed/i.test(p), 'the prompt handles a label without a well-formed brief behind it')
+  assert.ok(/as if unlabel?led/i.test(p), 'a malformed brief falls back to ordinary classification')
+})
+
+test('#131 the trusted label may only ROUTE — it never lifts a rule or authorizes a write', async () => {
+  const p = await briefPrompt()
+  assert.ok(/never lifts a rule/i.test(p), 'the label is explicitly non-authorizing')
+  assert.ok(/UNTRUSTED/.test(p), 'the prompt reminds that labels arrive as untrusted fenced data')
+  assert.ok(/READ-ONLY/.test(p), 'the classifier stays read-only regardless of the label')
+})
+
+test('#131 trusting a label adds NO GitHub write to the read-only fan-out', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  for (const forbidden of ['gh issue edit', '--add-label', '--remove-label', 'gh label create', 'gh issue comment', 'gh issue close']) {
+    assert.ok(!src.includes(forbidden), `issue-triage-fanout must stay read-only on GitHub — found '${forbidden}'`)
+  }
+})
+
+test('#131 the relay still fetches labels — the trust rule is dead without them', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const f = agentsByLabelPrefix(calls, 'fetch:#')[0]
+  assert.ok(/--json [^\n]*\blabels\b/.test(f.prompt), 'the fixed gh issue view command still requests labels')
+})
+
+test('#131 the brief rule reaches EVERY classify prompt in a wave, not just the first', async () => {
+  const { calls } = await runScript({ args: { numbers: [7, 8, 9] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')
+  assert.equal(cls.length, 3, 'all three issues classified')
+  for (const c of cls) {
+    assert.ok(c.prompt.includes('needs-decision'), `${c.opts.label} carries the brief-trust rule`)
+    assert.ok(c.prompt.includes('needs-you'), `${c.opts.label} carries the needs-you prohibition`)
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
