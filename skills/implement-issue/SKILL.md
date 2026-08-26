@@ -32,7 +32,7 @@ If you're not in a git repo, `gh` isn't installed, or `gh auth status` fails, st
 You need the real body to build a self-contained handoff. Don't rely on memory of what the issue said:
 
 ```bash
-gh issue view <number-or-url> --json number,title,body,url,state,labels,repository
+gh issue view <number-or-url> --json number,title,body,url,state,labels
 ```
 
 If `state` is `CLOSED`, note it to the user and confirm they still want a chip before proceeding — a closed issue is usually a sign of a stale or wrong target.
@@ -44,7 +44,15 @@ Call `mcp__ccd_session__spawn_task` with:
 - **`title`** — an imperative action phrase under 60 chars, derived from the issue title. Start with a verb. E.g. issue "Drawer doesn't persist scroll position" → `"Fix drawer scroll-position persistence"`. This string also becomes the **spawned session's title**, which is what Step 6 joins on — so make it distinctive, not a phrase you'd plausibly use for a different chip today.
 - **`tldr`** — 1–2 plain-English sentences on what the spawned session will do and why. No file paths or code; this is the hover tooltip.
 - **`prompt`** — the self-contained handoff (see below).
-- **`cwd`** — set this to the issue's repo root **only if** the issue belongs to a different repo than the current working directory (check the `repository` field). When it's the current repo, leave `cwd` unset.
+- **`cwd`** — set this to the issue's repo root whenever the chip shouldn't branch off the current working directory as-is. `repository` is not a real `gh issue view --json` field (that mistake is what broke this step originally); derive owner/repo from the `url` field instead, which always carries it:
+  ```bash
+  gh issue view <number-or-url> --json url --jq '.url | capture("github.com/(?<owner>[^/]+)/(?<repo>[^/]+)/") | .owner+"/"+.repo'
+  ```
+  If that differs from the current repo, set `cwd` to that repo's root. If it matches, still check the **worktree** case: the current directory may be a worktree of the target repo rather than its root, and leaving `cwd` unset would branch the chip off the current feature branch instead of the default branch. Resolve the real root with:
+  ```bash
+  git rev-parse --path-format=absolute --git-common-dir
+  ```
+  and strip the trailing `/.git`; if that differs from the current directory, set `cwd` to it. Only leave `cwd` unset when the repo matches and the current directory already is that root.
 
 ### The prompt must stand alone
 
