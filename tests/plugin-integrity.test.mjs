@@ -86,6 +86,50 @@ test('process skills: declared explicitly, self-consistent, and never Workflow w
   }
 })
 
+// The chip watch in implement-issue hangs on two facts that are invisible at author
+// time and that a well-meaning edit would quietly re-break.
+//
+// (1) ADDRESSING. A locally-clicked chip becomes a session that `ListAgents` lists by
+//     its WORKTREE SLUG (`clever-stonebraker-04a95a-f0`), not by the chip title —
+//     only Remote Control / cloud rows carry titles. That listing also collides names
+//     (seven concurrent rows named "Daily morning podcast") and self-truncates past
+//     the first pages. So a name-addressed channel cannot reliably reach the spawned
+//     session — it reaches SOME session, silently, or none. Only a sessionId addresses
+//     it, and only `ccd_session_mgmt` speaks sessionId.
+// (2) BOUNDEDNESS. A `persistent: true` monitor outlives the work it was watching and
+//     sits armed for the rest of the session.
+test('implement-issue: the chip watch is sessionId-addressed and bounded', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  assert.match(md, /mcp__ccd_session_mgmt__list_sessions/,
+    'discovery must go through list_sessions (sessionId + title + cwd + prState), not ListAgents')
+  assert.match(md, /mcp__ccd_session_mgmt__send_message/,
+    'the handshake must address the spawned session by sessionId, never by name')
+  assert.match(md, /persistent:\s*false/,
+    'the watch Monitor must be bounded — a persistent watch outlives the chip it watches')
+})
+
+// The name-addressed primitives are not banned words: the body documents them as the
+// WRONG channel, and that rationale is the whole reason the watch uses sessionIds. If
+// one ever appears as an instruction rather than as a hazard, the rationale is gone.
+test('implement-issue: name-addressed session channels appear only as prohibitions', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  for (const line of md.split('\n')) {
+    if (!/notify_when_idle|\bListAgents\b|\bSendMessage\b/.test(line)) continue
+    assert.match(line, /never|not\b|do not|don't|cannot|can't|fragile|unreliable|wrong/i,
+      `name-addressed channel cited as usable rather than as a hazard: ${line.trim()}`)
+  }
+})
+
+// `mcp__ccd_session_mgmt__send_message` is documented unavailable in unattended
+// sessions (scheduled-task runs and remote-dispatched sessions). A watch phase that
+// attempts it there fails partway instead of declining up front, so the skip has to be
+// stated in the body rather than discovered at runtime.
+test('implement-issue: the watch phase is skipped, not attempted, in unattended runs', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  assert.ok(/unattended[\s\S]{0,300}skip|skip[\s\S]{0,300}unattended/i.test(md),
+    'the body must tie unattended runs to skipping the watch phase')
+})
+
 test('each wrapper targets its own bundled workflow via scriptPath + has a description', async () => {
   for (const name of await workflowNames()) {
     const md = await read(`skills/${name}/SKILL.md`)
