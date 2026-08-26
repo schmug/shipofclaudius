@@ -130,6 +130,42 @@ test('implement-issue: the watch phase is skipped, not attempted, in unattended 
     'the body must tie unattended runs to skipping the watch phase')
 })
 
+// The pre-plugin copy under ~/.claude/skills/ claimed the bare `/implement-issue` and
+// silently out-triggered the plugin (CLAUDE.md, "This plugin is canonical"). Retiring it
+// is a manual step no test can see, so what IS testable is that its one genuinely better
+// asset — the trigger surface in its `description` — came across before it was deleted.
+// These three phrasings are the ones the plugin's own description never had (#135):
+// casual delegation wording, the /issue companion framing, and the explicit negative list.
+//
+// The description is ALSO deliberately capped: it is a matcher, not a feature list. The
+// watch phase (#134) is machinery the skill runs AFTER it triggers, never a reason to
+// trigger, so naming it here would only dilute the match against unrelated prompts.
+test('implement-issue: the description keeps the recovered casual + /issue-companion triggers', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  // The frontmatter matcher elsewhere in this file is `description:\s*\S.*\n` — one line.
+  // A wrapped description would silently truncate at the newline, so pin the shape too.
+  const line = md.match(/^description:[ \t]*(\S.*)$/m)
+  assert.ok(line, 'description is a single non-empty frontmatter line')
+  const d = line[1]
+
+  for (const trigger of [
+    "the ticket's written, get an agent on it",  // casual phrasing, verbatim
+    'delegate a ticket to an agent',
+    'Companion to the /issue skill',              // the file-then-implement pairing
+  ]) {
+    assert.ok(d.includes(trigger), `description keeps the recovered trigger: ${trigger}`)
+  }
+  assert.match(d, /kick off or spin up an agent/, 'description keeps the spin-up-an-agent phrasing')
+
+  // Negative triggers: the states an existing issue can be in that are NOT "implement it".
+  for (const anti of [/filing/i, /triaging/i, /closing/i, /commenting/i, /status/i, /reviewing a PR/i, /non-issue/i]) {
+    assert.match(d, anti, `description keeps its negative trigger: ${anti}`)
+  }
+
+  assert.doesNotMatch(d, /\bwatch|\bmonitor|handshake/i,
+    'the watch phase is post-trigger machinery — describing it here only dilutes matching')
+})
+
 test('each wrapper targets its own bundled workflow via scriptPath + has a description', async () => {
   for (const name of await workflowNames()) {
     const md = await read(`skills/${name}/SKILL.md`)
