@@ -130,6 +130,40 @@ test('implement-issue: the watch phase is skipped, not attempted, in unattended 
     'the body must tie unattended runs to skipping the watch phase')
 })
 
+// `list_events` returns a transcript MOST RECENT LAST. Intent — what the spawned session
+// understood the brief to be — lives in its FIRST turns, so a small `limit` returns
+// precisely the wrong end. Observed live on the first real chip: `limit: 14` against a
+// 52-message session returned two lines, both the bare `(called Bash)` that tool calls
+// render as, and no intent signal whatsoever; `limit: 45` was needed to reach the opening
+// turn. The instruction shipped in #134 said to use a small limit, which is backwards.
+//
+// This is the one defect class the other assertions in this file structurally cannot
+// catch: addressing, boundedness and the unattended skip are claims about SHAPE, and a
+// shape check cannot notice that a step is simply wrong about how a tool behaves.
+test('implement-issue: intent is read from the EARLIEST turns, not the tail', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  const step6 = md.slice(md.indexOf('## Step 6'), md.indexOf('## Step 7'))
+  assert.ok(step6.length > 0, 'Step 6 section is present')
+
+  // Ban the wrong CLAIM, not the words: the body must still be free to warn that a small
+  // limit lands on the tail. What must never return is the instruction that a small limit
+  // is how you reach the opening moves.
+  assert.doesNotMatch(step6, /small `limit`[^.]{0,80}opening moves/,
+    'a small limit returns the TAIL - it cannot be the route to the opening moves')
+  // The ordering is the fact that makes the correction load-bearing: any rewrite that
+  // still states it cannot coherently re-derive the original mistake.
+  assert.match(step6, /most recent last/i,
+    'Step 6 must state that list_events returns the transcript most recent last')
+  assert.match(step6, /before_uuid/,
+    'Step 6 must name the paging mechanism that actually reaches the start')
+  assert.match(step6, /earliest turns|opening turns|first turns/i,
+    'Step 6 must say intent lives in the session\'s first turns')
+  // Tool calls render as a bare "(called Bash)" line, so a transcript window can look
+  // populated while carrying no intent at all. The body has to warn about that.
+  assert.match(step6, /called Bash|assistant prose|tool-call lines/i,
+    'Step 6 must warn that tool-call lines carry no intent signal')
+})
+
 // The pre-plugin copy under ~/.claude/skills/ claimed the bare `/implement-issue` and
 // silently out-triggered the plugin (CLAUDE.md, "This plugin is canonical"). Retiring it
 // is a manual step no test can see, so what IS testable is that its one genuinely better
