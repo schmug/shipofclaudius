@@ -279,7 +279,12 @@ Expected: PASS, `all 6 passed`
 Append ` && node tests/vent-server.test.mjs` to the end of the `test` script in `package.json`. A suite not in that chain never runs in CI.
 
 Run: `npm test`
-Expected: ends `all 23 passed` (22 existing + this one). Do not write that number into any doc.
+Expected: green, with the chain total exactly **one higher** than a run on the base commit.
+Do not pin the number here or anywhere else — check it by running `npm test` on `origin/main`
+and comparing. The repo's standing rule is that the count only ever goes UP and no total is
+written down, because a suite cannot verify a number about itself. (The first draft of this
+plan hardcoded "23" against a base that had since moved to 24 suites — exactly the drift the
+rule exists to prevent.)
 
 - [ ] **Step 6: THE GATE — verify plugin-bundled stdio end-to-end**
 
