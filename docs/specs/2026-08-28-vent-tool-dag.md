@@ -23,9 +23,9 @@ an identical suite, which is not a second opinion.
 
 | id | issue | scope | files touched | verify (RED now) | deps | invariant |
 |----|-------|-------|---------------|------------------|------|-----------|
-| n1 | to file | Minimal server answering the legacy handshake, registered via `.mcp.json`, suite in the test chain. Proves plugin-bundled stdio surfaces the tool in a real session. | `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `.mcp.json`, `tests/vent-server.test.mjs`, `package.json` | `node tests/vent-server.test.mjs` | — | false |
-| n2 | to file | The vent actually works: contextful record appended to `~/.claude/vents.jsonl`, rate limited 1/90s + 10/session, all four outcomes `isError:false`. | `packages/vent-server/sink.mjs`, `packages/vent-server/context.mjs`, `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `tests/vent-server.test.mjs` | `node tests/vent-server.test.mjs` | n1 | **true** |
-| n3 | to file | Modern 2026-07-28 era (`server/discover`, `_meta` dispatch, `-32022`, `resultType`/`structuredContent`) plus real stdio framing tests. | `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `tests/vent-server.test.mjs` | `node tests/vent-server.test.mjs` | n2 | false |
+| n1 | #141 | Minimal server answering the legacy handshake, registered via `.mcp.json`, suite in the test chain. Proves plugin-bundled stdio surfaces the tool in a real session. | `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `.mcp.json`, `tests/vent-server.test.mjs`, `package.json` | `node tests/vent-server.test.mjs` | — | false |
+| n2 | #142 | The vent actually works: contextful record appended to `~/.claude/vents.jsonl`, rate limited 1/90s + 10/session, all four outcomes `isError:false`. | `packages/vent-server/sink.mjs`, `packages/vent-server/context.mjs`, `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `tests/vent-server.test.mjs` | `node tests/vent-server.test.mjs` | n1 | **true** |
+| n3 | #143 | Modern 2026-07-28 era (`server/discover`, `_meta` dispatch, `-32022`, `resultType`/`structuredContent`) plus real stdio framing tests. | `packages/vent-server/server.mjs`, `packages/vent-server/index.mjs`, `tests/vent-server.test.mjs` | `node tests/vent-server.test.mjs` | n2 | false |
 
 n1 carries impl-plan Task 1; n2 carries Tasks 2–4; n3 carries Tasks 5–6.
 
@@ -81,11 +81,11 @@ Derived from the matrix, not chosen:
 
 ```json
 [
-  { "key": "n1", "branch": "feat/vent-n1-skeleton", "issues": [], "invariant": false,
+  { "key": "n1", "branch": "feat/vent-n1-skeleton", "issues": [141], "invariant": false,
     "brief": "Minimal MCP server answering the legacy 2025-11-25 handshake, .mcp.json at plugin root, suite registered in the package.json test chain. Must end green on: node tests/vent-server.test.mjs" },
-  { "key": "n2", "branch": "feat/vent-n2-record", "issues": [], "invariant": true,
+  { "key": "n2", "branch": "feat/vent-n2-record", "issues": [142], "invariant": true,
     "brief": "Sink, context capture, rate limiting, and the four-outcome calm-failure contract. Must end green on: node tests/vent-server.test.mjs" },
-  { "key": "n3", "branch": "feat/vent-n3-modern", "issues": [], "invariant": false,
+  { "key": "n3", "branch": "feat/vent-n3-modern", "issues": [143], "invariant": false,
     "brief": "Modern 2026-07-28 era and real stdio framing tests. Must end green on: node tests/vent-server.test.mjs" }
 ]
 ```
