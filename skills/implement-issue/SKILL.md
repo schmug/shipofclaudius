@@ -141,9 +141,20 @@ Address the session by its **`sessionId`**, and use the `ccd_session_mgmt` tools
 
 ## Step 7 — On a terminal event: report the outcome
 
-When the monitor reports a terminal PR state, or `list_sessions` shows the session's `isRunning` has gone false, report to the user: issue → session title → branch → `prNumber` and `prState`, all of which come straight off the `list_sessions` row without reading a transcript. Add the CI verdict (`gh pr checks <n>`) if a PR exists. Send a `PushNotification` for this — a terminal outcome is the one event worth interrupting for — and not for the intermediate state changes.
+When the monitor reports a terminal PR state, or `list_sessions` shows the session's `isRunning` has gone false, report to the user: issue → session title → branch → `prNumber` and `prState`, all of which come straight off the `list_sessions` row without reading a transcript. Add the CI verdict (`gh pr checks <n>`) if a PR exists.
+
+**Always send a `PushNotification` on a terminal outcome** — including when the user is plainly present and reading along. This is not a judgement call, and *"they're clearly watching, a push would just be noise"* is not an exception to it. The asymmetry is the reason: a missed push on a spawn-and-leave run is **silent**, and costs the user the outcome entirely; a redundant push to someone already reading costs one notification. Do not push for the intermediate state changes.
 
 If the window ends with nothing observed, say exactly that: the chip was not started within the window. That is not a failure of the spawned session and should not be reported as one.
+
+**When there was no watch at all** — never armed (an unattended run), expired, or the session ended — the outcome is deferred, not lost. The chip's PR closes the originating issue, so GitHub holds the linkage indefinitely and it is recoverable whenever the user next looks:
+
+```bash
+gh issue view <n> --json state,closedByPullRequestsReferences \
+  --jq '{state, prs: [.closedByPullRequestsReferences[]?.number]}'
+```
+
+Tell the user that, rather than letting a dead watch read as "you get nothing".
 
 ## What the watch may and may not do
 

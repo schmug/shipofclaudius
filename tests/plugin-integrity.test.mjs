@@ -174,6 +174,34 @@ test('implement-issue: intent is read from the EARLIEST turns, not the tail', as
 // The description is ALSO deliberately capped: it is a matcher, not a feature list. The
 // watch phase (#134) is machinery the skill runs AFTER it triggers, never a reason to
 // trigger, so naming it here would only dilute the match against unrelated prompts.
+// Two rules in Step 7 that a session will otherwise talk itself out of.
+//
+// (1) THE PUSH IS UNCONDITIONAL. The original wording ("the one event worth interrupting
+//     for") reads as a judgement call, and on the first live run this session used it to
+//     skip the push because the user happened to be watching. The user's call is that the
+//     push always fires on a terminal outcome: a missed push on a spawn-and-leave run is
+//     silent, while a redundant push to a present user is merely noise. So the body must
+//     say so in a way that leaves no room for the "they're clearly here" exception.
+// (2) THE OUTCOME OUTLIVES THE WATCH. The watch dies with the session, but GitHub does
+//     not: the chip's PR closes the originating issue, so the outcome is recoverable on
+//     demand forever after. Step 7 must name that command, or a dead watch reads as "you
+//     get nothing" when it actually means "you get it whenever you next look".
+test('implement-issue: Step 7 pushes unconditionally and names the post-hoc recovery path', async () => {
+  const md = await read('skills/implement-issue/SKILL.md')
+  const step7 = md.slice(md.indexOf('## Step 7'), md.indexOf('## What the watch'))
+  assert.ok(step7.length > 0, 'Step 7 section is present')
+
+  assert.match(step7, /PushNotification/, 'Step 7 still sends a PushNotification')
+  assert.match(step7, /always|unconditional|even (if|when)|regardless/i,
+    'the push must be stated as unconditional - "worth interrupting for" invites a skip')
+  // The specific loophole that was actually used, closed by name.
+  assert.match(step7, /present|watching|attended|in the conversation/i,
+    'Step 7 must close the "the user is clearly here" exception explicitly')
+
+  assert.match(step7, /closedByPullRequestsReferences/,
+    'Step 7 must name the command that recovers the outcome after the watch has died')
+})
+
 test('implement-issue: the description keeps the recovered casual + /issue-companion triggers', async () => {
   const md = await read('skills/implement-issue/SKILL.md')
   // The frontmatter matcher elsewhere in this file is `description:\s*\S.*\n` — one line.
