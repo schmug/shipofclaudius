@@ -92,16 +92,60 @@ format), the triage task (a prompt). The server must not know anything about tri
 
 ## 4. Contract — the vent tool
 
-### 4.1 Server
+### 4.1 Server — dual-era, and this is not optional
 
-One MCP server, bundled in this plugin, speaking JSON-RPC 2.0 over stdio. It must handle
-`initialize`, `tools/list`, and `tools/call`.
+MCP's **current** revision is **2026-07-28**, which **removed the `initialize` handshake
+entirely**. The spec's own terminology:
+
+- **Modern** (`2026-07-28` and later): stateless. There is no handshake. Every request
+  carries its version in `_meta` (`io.modelcontextprotocol/protocolVersion`,
+  `io.modelcontextprotocol/clientInfo`, `io.modelcontextprotocol/clientCapabilities`).
+  `server/discover` is a **mandatory** RPC. A version the server does not support **MUST**
+  be rejected with `UnsupportedProtocolVersionError` (code `-32022`) whose `data.supported`
+  lists what it does speak.
+- **Legacy** (`2025-11-25` and earlier): the session-establishing `initialize` handshake.
+
+**Claude Code 2.1.241 is a legacy client.** Verified empirically 2026-08-28: it sends
+`initialize` with `protocolVersion: "2025-11-25"`, then `notifications/initialized`, then
+`tools/list`.
+
+The spec's compatibility matrix therefore decides the design:
+
+| Server we build | Works with Claude Code today | Survives Claude Code going modern |
+|---|---|---|
+| Legacy-only | yes | **no** |
+| Modern-only | **no** — legacy clients have no fall-forward mechanism | yes |
+| **Dual-era** | **yes** | **yes** |
+
+**Build dual-era.** The spec blesses it: a dual-era server MAY serve both eras concurrently
+in the same process. The selection rule is the client's opening move — a request carrying
+modern `_meta` is served statelessly per 2026-07-28; an `initialize` request selects legacy
+semantics for that stdio process.
 
 **Node built-ins only.** This repo has zero npm dependencies, intentionally no lockfile, and
 CI runs `npm test` with no install step (see `CLAUDE.md`). `@modelcontextprotocol/sdk` is
 therefore **not available** — the JSON-RPC framing is hand-rolled. This is protocol plumbing,
 not a security primitive, so hand-rolling does not conflict with the global rule about using
 vetted libraries for crypto/JWT.
+
+### 4.1.1 Wire contract, verified
+
+Newline-delimited JSON-RPC 2.0 over stdio, both eras.
+
+**Legacy path** (exercised end-to-end against Claude Code 2.1.241 on 2026-08-28):
+
+| in | out |
+|---|---|
+| `initialize` `{protocolVersion:"2025-11-25", capabilities:{roots,elicitation}, clientInfo:{name:"claude-code"}}` | `{protocolVersion:<echo>, capabilities:{tools:{}}, serverInfo:{name,version}}` — echoing the client's version back was **accepted** |
+| `notifications/initialized` — **no `id`** | **do not reply** |
+| `tools/list` | `{tools:[{name, description, inputSchema}]}` |
+| `tools/call` `{name, arguments}` | `{content:[{type:"text", text}]}` |
+
+**Modern path** (per spec; not yet exercisable — no modern client to test against):
+
+- `server/discover` — mandatory; returns supported versions, capabilities, identity.
+- Results additionally carry `resultType: "complete"`; `tools/call` results carry `isError`.
+- Unsupported version → `-32022` with `data.supported`.
 
 ### 4.2 Tool description (verbatim — this text IS the bar)
 
@@ -133,18 +177,20 @@ The agent supplies none of this; the server gathers it:
 |---|---|
 | `ts` | ISO 8601 UTC at write time |
 | `text` | the tool argument |
-| `cwd` | working directory (see §10 — may not be the project dir) |
+| `cwd` | **`CLAUDE_PROJECT_DIR`** env var — set by the host and unambiguous. `process.cwd()` was verified to match it, but prefer the env var. |
 | `repo` | `git config --get remote.origin.url` resolved to `owner/name`, or `null` |
 | `branch` | `git rev-parse --abbrev-ref HEAD`, or `null` |
-| `session` | session id if the runtime exposes one (see §10) — **omit rather than fabricate** |
+| `session` | **`CLAUDE_CODE_SESSION_ID`** — verified present and per-session (a child session carried its own id, distinct from the parent's), not inherited |
 
 Git lookups must be best-effort and time-bounded: a slow or absent git must degrade to `null`,
 never hang the tool call.
 
 ### 4.5 Rate limiting (build this on day one)
 
-Lovable shipped this only after an agent fired 43 vents from one project while spiralling into
-apologies. It is a known failure mode; do not wait to rediscover it.
+Two independent reasons, so this is not negotiable. The MCP spec's Security Considerations
+state that servers **MUST** "rate limit tool invocations" — it is a normative requirement, not
+a nicety. And Lovable shipped theirs only after an agent fired 43 vents from one project while
+spiralling into apologies.
 
 - At most **1 vent per 90 seconds** per session.
 - At most **10 vents per session**, total.
@@ -161,8 +207,17 @@ never fail a turn, block, slow work, or prompt a retry.
 | sink unwritable | `{"recorded": false, "reason": "sink-unavailable"}` |
 | malformed input | `{"recorded": false, "reason": "invalid-input"}` |
 
-`recorded: false` is a calm outcome, not an error. Nothing in the response should suggest the
-agent ought to try again, escalate, or tell the user.
+Carried in a text content block (plus `structuredContent` on the modern path, where it is the
+spec-blessed way to return a JSON value; mirror it in a text block for compatibility).
+
+**All four outcomes set `isError: false`.** The spec reserves `isError: true` for *tool
+execution errors* — actionable feedback a model should self-correct from. A vent that was not
+recorded is none of those; it is information, and flagging it as an error would invite exactly
+the retry behaviour §4.6 exists to prevent. `recorded: false` is a calm outcome. Nothing in the
+response should suggest the agent ought to try again, escalate, or tell the user.
+
+Reserve JSON-RPC errors (`-32602` etc.) for genuine protocol faults — unknown tool, malformed
+request envelope — per the spec's two-mechanism error taxonomy.
 
 ---
 
@@ -205,7 +260,11 @@ filing would move the noise into a tracker that `issue-triage-fanout` actually r
 
 Required cases:
 
-- `initialize` → `tools/list` → `tools/call` round-trip over the real stdio framing.
+- **Legacy era:** `initialize` → `notifications/initialized` (asserting **no reply** is
+  emitted) → `tools/list` → `tools/call`, over the real stdio framing.
+- **Modern era:** `server/discover` returns supported versions; a request bearing modern
+  `_meta` is served without any handshake; an unsupported version yields `-32022` with a
+  populated `data.supported`.
 - A successful vent appends exactly one parseable JSONL line with the §4.4 fields.
 - Rate limit returns `{"recorded": false, "reason": "rate-limited"}` and writes nothing.
 - Malformed / missing `text` returns cleanly and does not crash the server.
@@ -244,22 +303,43 @@ target for, and the `gh discussion` preview CLI returning `{"discussions":[...]}
 
 ---
 
-## 10. UNVERIFIED — check these before relying on them
+## 10. Verified 2026-08-28, and what is still open
 
-Stated plainly rather than assumed, per the global rule that claims about gates you have not
-run are assertions, not observations:
+A throwaway built-ins-only server was run under `--mcp-config --strict-mcp-config` against a
+real session, plus a hand-driven JSON-RPC client. The probe artifacts were deleted; the
+findings are folded into §4.
 
-1. **Plugin-bundled MCP server wiring.** That a plugin `.mcp.json` reliably surfaces a tool
-   into every session's tool list is assumed, not tested. Verify with a scratch install before
-   building the server out.
-2. **`plugin-integrity.test.mjs` interaction.** Whether it enforces anything about `.mcp.json`
-   or a new top-level key is unknown. Read it; extend it if the new artifact should be covered.
-3. **Session id availability.** Whether a plugin-spawned MCP server can see a session
-   identifier (env var or otherwise) is unknown. If it cannot, omit the field — do not
-   fabricate or approximate one.
-4. **Server `cwd`.** A server spawned by the host may not inherit the project directory, which
-   would make `cwd`, `repo`, and `branch` wrong rather than merely absent. Confirm before
-   trusting those fields; if the cwd is not the project dir, find another source or drop them.
-5. **MCP protocol details.** The exact handshake, protocol-version negotiation, and content
-   shape for `tools/call` results must be read from the current MCP specification, not from
-   recollection.
+**Confirmed:**
+
+1. **A `.mcp.json` server is spawned, initialized, and its tools enumerated** into a real
+   session. `MCP_CONNECTION_NONBLOCKING=true` is set by the host, so a slow server does not
+   stall session start — which is what makes §4.6's "never slow a session" guarantee hold.
+2. **`plugin-integrity.test.mjs` has no `.mcp.json` handling**, so adding one breaks nothing.
+   The plugin manifest has no `mcpServers` key; the mechanism is a root-level `.mcp.json`,
+   `{"mcpServers": {...}}`, with `${CLAUDE_PLUGIN_ROOT}` templating (shipped and working in
+   the discord, fakechat, and telegram plugins).
+3. **`CLAUDE_CODE_SESSION_ID` and `CLAUDE_PROJECT_DIR` are both present** in the server's
+   environment. Session id is genuinely per-session, not inherited from a parent.
+4. **The legacy wire contract in §4.1.1 was exercised end-to-end**, including the detail that
+   echoing the client's `protocolVersion` back is accepted, and that
+   `notifications/initialized` carries no `id` and must not be answered.
+
+**Still open — check before relying on these:**
+
+1. **Plugin-bundled stdio, end to end.** The probe used `--mcp-config`, not a plugin-bundled
+   `.mcp.json`. Plugin-bundled is proven only indirectly: `plugin:stripe:stripe` is live in a
+   real session (but is `type: http`), and three shipped plugins use stdio +
+   `${CLAUDE_PLUGIN_ROOT}`. Confirm with a scratch install as the first implementation step —
+   it is now a one-minute check, not an open risk.
+2. **The modern (2026-07-28) path cannot be exercised yet.** No modern client is available to
+   test against; Claude Code 2.1.241 is legacy. The modern half of the dual-era server is
+   therefore written to spec, not to observation, and must be labelled as such until a modern
+   client exists. Do not claim it is verified.
+3. **`server/discover`'s exact result shape** was not read in full during the spike. Read
+   `/specification/2026-07-28/server/discover` before implementing it; it is a MUST for the
+   modern path.
+
+**A note on drift.** This spec pins behaviour against MCP `2026-07-28` (current as of
+2026-08-28) and Claude Code `2.1.241`. The legacy era is on a deprecation path by
+construction. If Claude Code starts sending modern `_meta`, the legacy branch becomes dead
+code — that is the signal to delete it, not to keep both forever.
