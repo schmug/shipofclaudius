@@ -133,10 +133,19 @@ planning and could file duplicates of #141–#143.
 ### Hard prerequisite: run it from a shipofclaudius session
 
 `stacked-impl-lanes` dispatches its implementer with `isolation: 'worktree'`, and an agent worktree
-is created from **the session's own repository** — not from anything in `args`. There is no
-`repoPath` or `cwd` argument, and **`args.repo` is never read by the script** (`grep -o 'args\.[a-zA-Z_]*'`
-over `.claude/workflows/stacked-impl-lanes.js` lists `adversarialReview`, `agentCap`, `base`,
-`batchSize`, `defectClasses`, `dimensions`, `fresh`, `lanes`, `mode`, `readonlyAgent` — and nothing else).
+is created from **the session's own repository**. There is no `repoPath` or `cwd` argument.
+
+`args.repo` does exist, but it governs only the workflow's **reads**. It is aliased at line 74
+(`const A = ...`), so a `grep 'args\.'` misses it, and it reaches exactly two call sites: the issue
+relay's `gh issue view` (line 235) and the idempotency preflight's `gh pr list` (line 273). The
+implementer's worktree and its `gh pr create --draft --base ...` (line 410) carry no repo at all.
+Passing a `repo` that disagrees with the session therefore **reads issues from one repository and
+writes code and PRs to another** — and the read half working is what makes it hard to notice.
+Tracked as #146.
+
+> **Correction.** The first version of this section claimed `args.repo` is never read. That was
+> wrong — it was based on a `grep 'args\.'` that the `A` alias defeats. The prerequisite below is
+> unchanged; the reason is narrower and worse than "the argument is ignored".
 
 Run `wf_f9d3814b-b4a` learned this the expensive way: dispatched from a session whose cwd was an
 `agent-notes` worktree, it built its lane worktree at
