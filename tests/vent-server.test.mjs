@@ -429,6 +429,26 @@ test('EVERY outcome an agent can cause sets isError:false', () => {
   ])
 })
 
+test('a context field can never shadow the clock or the agent text', () => {
+  // The spread-order fix in da3afd3 shipped with NOTHING that could fail on revert: every
+  // context stub returns exactly {cwd, repo, branch, session}, so `{ts, text, ...ctx}` and
+  // `{...ctx, ts, text}` are deepEqual (node:assert/strict ignores key insertion order) and
+  // the ordering was unobservable — while THREAT_MODEL.md §3 claimed it was tested.
+  // This is the case that makes the claim true: a context that actually COLLIDES, which
+  // only the spread-first ordering survives. server.mjs's own comment states the intent —
+  // the guarantee should be structural, not dependent on context.mjs happening to return
+  // exactly four non-colliding keys — so the test must not depend on that shape either.
+  const deps = stubDeps()
+  deps.context = () => ({ ts: 'FORGED-TS', text: 'FORGED-TEXT', cwd: '/p' })
+  call(makeState(), deps, { text: 'the real vent' })
+  assert.equal(deps.writes.length, 1)
+  assert.equal(deps.writes[0].ts, new Date(1_000_000).toISOString(),
+    'the clock wins over a context field named ts')
+  assert.equal(deps.writes[0].text, 'the real vent',
+    "the agent's text wins over a context field named text")
+  assert.equal(deps.writes[0].cwd, '/p', 'other context fields still land')
+})
+
 test('agent-supplied fields other than text never reach the sink record', () => {
   // SECURITY. `text` is the entire input surface (design spec §4.3). A vent able to set
   // `ts`, `session` or `repo` could plant a record blaming another session or another

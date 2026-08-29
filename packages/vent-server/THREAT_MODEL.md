@@ -85,7 +85,9 @@ both closed:
   `deps.context()` — never spread from `args` — so `{text, ts, session, repo}` puts only
   `text` in the file, and the context spread is applied *first* so no context field can
   shadow `ts` or `text`. Tested by `agent-supplied fields other than text never reach the
-  sink record`.
+  sink record` (the input half) and `a context field can never shadow the clock or the
+  agent text` (the ordering half — it feeds a context that actually collides, and goes red
+  if the spread order is reverted).
 
 **Scope of that claim — read this before trusting a record.** What is closed is the
 tool's *input surface*: nothing an agent passes to `vent` can set `ts`, `session`, `repo`
