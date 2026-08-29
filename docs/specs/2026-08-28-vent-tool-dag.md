@@ -1,9 +1,13 @@
 # Build plan: agent vent tool
 
-**Base:** `main` @ `c1945da` · **Repo:** `schmug/shipofclaudius` · **Full suite:** `npm test`
+**Base:** `main` @ `96844bd` · **Repo:** `schmug/shipofclaudius` · **Full suite:** `npm test`
 **Spec:** `docs/specs/2026-08-24-vent-tool-design.md` · **TDD steps:** `docs/specs/2026-08-28-vent-tool-plan.md`
 
 ## Preflight record
+
+*State at planning time, when the base was `c1945da`. Left as recorded rather than rewritten;
+`origin/main` has since advanced through #144, #145, #147, #149 and #148 to `96844bd`, which is the
+base the fan-out below actually runs against.*
 
 - Worktree `feat/vent-tool`, was **3 behind** `origin/main`; rebased onto `c1945da` before any
   pointer was read. Now `0 3`.
@@ -138,34 +142,61 @@ is created from **the session's own repository**. There is no `repoPath` or `cwd
 `args.repo` does exist, but it governs only the workflow's **reads**. It is aliased at line 74
 (`const A = ...`), so a `grep 'args\.'` misses it, and it reaches exactly two call sites: the issue
 relay's `gh issue view` (line 235) and the idempotency preflight's `gh pr list` (line 273). The
-implementer's worktree and its `gh pr create --draft --base ...` (line 410) carry no repo at all.
-Passing a `repo` that disagrees with the session therefore **reads issues from one repository and
-writes code and PRs to another** — and the read half working is what makes it hard to notice.
-Tracked as #146.
+implementer's worktree and its `gh pr create --draft --base ...` (line 410) carry no repo at all, so
+the writes always land in whatever repository the session is checked out in.
 
 > **Correction.** The first version of this section claimed `args.repo` is never read. That was
 > wrong — it was based on a `grep 'args\.'` that the `A` alias defeats. The prerequisite below is
 > unchanged; the reason is narrower and worse than "the argument is ignored".
 
-Run `wf_f9d3814b-b4a` learned this the expensive way: dispatched from a session whose cwd was an
-`agent-notes` worktree, it built its lane worktree at
+**The split-brain half of this is now guarded.** #146 is fixed — PR #148 merged as `96844bd` — so a
+`repo` that disagrees with the session no longer silently reads issues from one repository while
+writing code and PRs to another. When, and only when, `args.repo` is passed (line 449), one
+read-only agent (`resolve-session-repo`, line 450) runs
+`gh repo view --json nameWithOwner -q .nameWithOwner`, and a mismatch `throw`s an error naming
+**both** repos (line 453) — before any lane agent is dispatched, so a wrong `repo` costs one cheap
+read instead of a wave. It fails **open** with a logged warning if the session repo cannot be
+resolved (line 463) rather than blocking the run, and it is a complete no-op when `args.repo` is
+absent. `tests/stacked-impl-sim.test.mjs` pins all four paths (absent, matching, mismatched,
+unresolvable) under the `#146` heading.
+
+Run `wf_f9d3814b-b4a` is why that guard exists, and it learned the lesson the expensive way:
+dispatched from a session whose cwd was an `agent-notes` worktree, it built its lane worktree at
 `/Users/cory/agent-notes/.claude/worktrees/wf_f9d3814b-b4a-3` with origin `schmug/agent-notes`, while
 the lanes targeted `schmug/shipofclaudius`. n1 returned `BLOCKED` with a repository mismatch, n2 and
 n3 correctly returned `BLOCKED_ON_PREDECESSOR` having spent no agents, and ~130k subagent tokens
 bought no code. Nothing was contaminated, but nothing was built either.
 
+**The prerequisite itself has not gone away.** The guard only fires when `args.repo` is passed, and
+the invocation below deliberately omits it — with no `args.repo` there is nothing for the guard to
+compare the session against, and a session started in the wrong repo still builds its lane worktree
+and opens its PRs there, exactly as `wf_f9d3814b-b4a` did. The guard narrows the blast radius of an
+*explicit* mismatch; it does not make the working directory irrelevant.
+
 **So: the session's working directory must be `/Users/cory/shipofclaudius`.** A session pinned to an
 isolated worktree of another repo cannot be moved (`change_directory` refuses), so this needs a
 session started in the right place.
 
-### Resolve the plugin path first
+### Resolve the script path first
 
-The bundled script path is version-pinned and changes on every plugin update. Resolve it rather than
-copying the hash below:
+**Use the repo's own checkout, not the plugin cache.** The prerequisite above already pins the
+session to `/Users/cory/shipofclaudius`, so the script is right there and is `main` by definition
+once you `git pull`:
 
 ```bash
-ls -d ~/.claude/plugins/cache/shipofclaudius/shipofclaudius/*/.claude/workflows/stacked-impl-lanes.js
+git -C /Users/cory/shipofclaudius pull --ff-only && grep -c 'Repo split-brain guard' /Users/cory/shipofclaudius/.claude/workflows/stacked-impl-lanes.js
 ```
+
+That prints `1` when the checkout carries the #148 guard; pass
+`/Users/cory/shipofclaudius/.claude/workflows/stacked-impl-lanes.js` as the `scriptPath`.
+
+Do **not** glob the plugin cache. `ls -d ~/.claude/plugins/cache/shipofclaudius/shipofclaudius/*/…`
+resolves nothing — it currently matches **14** cached versions, not one — and the cache *lags*
+`main`: immediately after #148 merged, the newest entries in it were `27cc74d8eae8` (#149) and
+`a1c03834a31c` (#147), with no `96844bd` directory at all, so the bundled script would have run
+**without** the split-brain guard this document describes as present. If you use the cache anyway,
+pin it to a SHA you have checked rather than a bare `*`, and run the same `grep -c` against that
+copy before trusting it.
 
 ### One more trap
 
