@@ -32,7 +32,34 @@ const err = (id, code, message, data) => ({
 export function handle(msg, state, deps) {
   const { method, id, params } = msg
   const isNotification = id === undefined
+  // Two eras in one process, selected per request (design spec §4.1). Modern
+  // (2026-07-28) removed the handshake: a client is stateless and declares its version
+  // in `_meta` on every request. Legacy (2025-11-25 and earlier) opens with `initialize`
+  // and carries no `_meta`, so the absence of this key IS the legacy signal.
+  const requestedVersion = params?._meta?.[META_VERSION]
 
+  // A version we do not speak MUST be rejected rather than guessed at — the modern spec
+  // is normative on that. The gate sits in front of method dispatch so a rejected call
+  // costs nothing and can never reach the sink. A notification carries no id, so there
+  // is nothing to answer: not even to reject it.
+  if (requestedVersion && !SUPPORTED_VERSIONS.includes(requestedVersion)) {
+    if (isNotification) return null
+    return err(id, -32022, 'Unsupported protocol version', {
+      supported: SUPPORTED_VERSIONS, requested: requestedVersion,
+    })
+  }
+  const modern = Boolean(requestedVersion)
+
+  // Mandatory in the modern era, and answered in either: it is how a client learns what
+  // this server speaks, so gating it behind a version it has not yet learned is circular.
+  if (method === 'server/discover') {
+    return ok(id, {
+      resultType: 'complete',
+      supportedVersions: SUPPORTED_VERSIONS,
+      capabilities: { tools: {} },
+      _meta: { 'io.modelcontextprotocol/serverInfo': SERVER_INFO },
+    })
+  }
   if (method === 'initialize') {
     const requested = params?.protocolVersion
     return ok(id, {
@@ -42,20 +69,29 @@ export function handle(msg, state, deps) {
     })
   }
   if (method === 'notifications/initialized') return null
-  if (method === 'tools/list') return ok(id, { tools: [TOOL] })
+  if (method === 'tools/list') {
+    return ok(id, modern ? { resultType: 'complete', tools: [TOOL] } : { tools: [TOOL] })
+  }
   if (method === 'tools/call') {
     if (params?.name !== TOOL.name) return err(id, -32602, `Unknown tool: ${params?.name}`)
-    return ok(id, callVent(params?.arguments, state, deps))
+    return ok(id, callVent(params?.arguments, state, deps, modern))
   }
   if (isNotification) return null
   return err(id, -32601, `Method not found: ${method}`)
 }
 
-function result(payload) {
-  return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false }
+// The era decides the SHAPE, never the outcome: the same payload goes out either way.
+// A legacy result must carry no modern-only field — Claude Code is the legacy client, so
+// that is the era where a wire-contract slip is a real outage rather than a hypothetical
+// one. Modern additionally mirrors the payload structurally; the text block stays for
+// backwards compatibility, and `structuredContent` needs no `outputSchema` on the tool
+// (the spec only constrains it when one is declared).
+function result(payload, modern) {
+  const body = { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: false }
+  return modern ? { resultType: 'complete', structuredContent: payload, ...body } : body
 }
 
-function callVent(args, state, deps) {
+function callVent(args, state, deps, modern) {
   // Four outcomes, all of them calm (design spec §4.6). The ordering is load-bearing:
   // an invalid-input or rate-limited refusal is decided before anything is built or
   // written, so it costs a clock read and nothing else — no sink touch, no quota
@@ -67,12 +103,12 @@ function callVent(args, state, deps) {
   // `session` or `repo` values that the weekly triage would read as captured fact.
   const text = args?.text
   if (typeof text !== 'string' || text.trim() === '') {
-    return result({ recorded: false, reason: 'invalid-input' })
+    return result({ recorded: false, reason: 'invalid-input' }, modern)
   }
   const now = deps.now()
   state.stamps = state.stamps.filter((t) => now - t < RATE_WINDOW_MS)
   if (state.stamps.length > 0 || state.count >= MAX_PER_SESSION) {
-    return result({ recorded: false, reason: 'rate-limited' })
+    return result({ recorded: false, reason: 'rate-limited' }, modern)
   }
   // The two limits bound DIFFERENT things, so they advance at different points.
   // The window bounds INVOCATIONS, so its stamp lands BEFORE the write can fail:
@@ -93,8 +129,8 @@ function callVent(args, state, deps) {
   if (!written) {
     // The quota, unlike the window, tracks records WRITTEN, not calls attempted, so a
     // broken disk still cannot burn the session's ten vents.
-    return result({ recorded: false, reason: 'sink-unavailable' })
+    return result({ recorded: false, reason: 'sink-unavailable' }, modern)
   }
   state.count += 1
-  return result({ recorded: true })
+  return result({ recorded: true }, modern)
 }

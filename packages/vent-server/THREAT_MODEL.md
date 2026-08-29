@@ -15,7 +15,7 @@ A weekly triage task (out of scope here, spec §6) later reads that file and fil
 | Party | Trust | Reaches |
 |---|---|---|
 | The **agent** calling `vent` | **untrusted** — it is a model, and its text may itself be attacker-influenced | `params.arguments.text`, and the *timing and count* of calls |
-| The **host** spawning the server | trusted | argv, environment (`CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, `VENT_SINK`) |
+| The **host** spawning the server | trusted | argv, environment (`CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, `VENT_SINK`), and the JSON-RPC envelope — the method, and `params._meta` (the protocol era, §6) |
 | The **local filesystem** | trusted | `~/.claude/vents.jsonl` |
 | The **downstream triage reader** | consumer of everything above | every line of the sink |
 
@@ -31,7 +31,12 @@ All four outcomes an agent can cause — `recorded`, `rate-limited`, `sink-unava
 `isError: true` for tool-execution errors a model should self-correct from; a dropped
 vent is information, not a fault to retry, and flagging it invites the retry storm the
 rate limiter exists to stop. JSON-RPC errors stay reserved for genuine protocol faults
-(unknown tool `-32602`, unknown method `-32601`).
+(unknown tool `-32602`, unknown method `-32601`, unsupported protocol version `-32022`).
+
+None of those three is agent-reachable. `-32602` and `-32601` name a method or tool the
+agent does not choose, and `-32022` answers `params._meta`, which the **client** writes
+into the envelope — the agent supplies `arguments.text` and nothing else. So a protocol
+error means the host and this server disagree, never that a vent was rejected.
 
 Availability, not confidentiality, is the property at risk here: a vent that fails loudly
 trains agents to stop calling it, and the tool's whole value is that it gets called.
@@ -130,7 +135,34 @@ point end-to-end without appending to the operator's `~/.claude/vents.jsonl`, an
 — which has no `~/.claude` — exercises the real wiring rather than a permanent
 `sink-unavailable`.
 
+### 6. Serving two eras widens the shape, not the surface
+
+`handle` speaks both the legacy `2025-11-25` handshake and the modern `2026-07-28`
+stateless era (design spec §4.1). The selector is `params._meta`
+(`io.modelcontextprotocol/protocolVersion`): present and supported means modern, absent
+means legacy, present and unsupported means `-32022` with `data.supported`.
+
+- The selector lives in the **envelope**, which the client writes. It is not the tool's
+  input schema — that still has exactly one property, `text` — so nothing an agent
+  passes to `vent` can pick an era, forge a version, or provoke a rejection.
+- The version gate runs **in front of method dispatch**, so a request naming a version
+  we do not speak never reaches `callVent`, never spends a `deps.context()`, and never
+  touches the sink. Pinned by `an unsupported version is refused BEFORE the tool runs`.
+- A rejection is answered only when the request bears an `id`. A notification carrying a
+  bad version draws nothing — replying to one is a protocol violation, and the gate is
+  the one place that could reintroduce it. Pinned by `a version rejection never replies
+  to a notification`.
+- The era changes the result **shape** only: modern adds `resultType: 'complete'` and
+  mirrors the same payload into `structuredContent`, exposing no field the text block
+  did not already carry. Legacy results must stay free of both — Claude Code 2.1.241 is
+  a legacy client, so that is the era carrying real traffic. Pinned by `legacy results
+  carry NO modern-only fields`.
+
+**Written to spec, never observed.** No modern client exists to test against. Everything
+above proves our replies match the published shapes; none of it is evidence that a
+client accepted one. Do not restate it as verified end-to-end.
+
 ## Not in scope here
 
 The weekly triage task and its watermark (spec §6, gated on Cory's approval since it
-lives under `~/.claude/`), and the modern `2026-07-28` protocol era (n3, #143).
+lives under `~/.claude/`).
