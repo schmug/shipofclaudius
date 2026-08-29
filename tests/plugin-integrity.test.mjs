@@ -533,15 +533,30 @@ test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', asyn
   }
 })
 
-test('.mcp.json (if shipped) is valid, plugin-root-templated, and points at a real file', async () => {
+test('.mcp.json registers the vent server, plugin-root-templated, pointing at a real file', async () => {
   // Same trap as hooks/hooks.json above, and the same fix: a plugin-root config whose
   // path is wrong ships a file that never runs. The end-to-end proof that this wiring
   // works (`claude --plugin-dir ... -p`) is a one-time MANUAL run CI cannot repeat, so
   // pin the parts that rot silently — a moved entry point, a typo, an expanded path.
+  //
+  // Deliberately NOT "(if shipped)". This test first shipped copying hooks.json's
+  // `catch { return }`, which made it pass two ways WITHOUT checking anything: with the
+  // file deleted, and with `mcpServers` emptied (the loop below then runs zero times).
+  // hooks.json is genuinely optional; .mcp.json is not — it is the only thing that makes
+  // the plugin surface a tool at all. So absence is a FAILURE, and the vent registration
+  // is asserted by name rather than left to a loop that tolerates an empty object.
   let raw
-  try { raw = await read('.mcp.json') } catch { return }  // not shipping an MCP server: fine
+  try {
+    raw = await read('.mcp.json')
+  } catch (e) {
+    assert.fail('.mcp.json is missing or unreadable (' + (e.code || e.message) + ') — it is a ' +
+      'shipped deliverable registering the vent MCP server; without it the plugin surfaces no tool')
+  }
   const m = JSON.parse(raw)
   assert.ok(m.mcpServers && typeof m.mcpServers === 'object', 'has a top-level "mcpServers" object')
+  const names = Object.keys(m.mcpServers)
+  assert.ok(names.includes('vent'),
+    `.mcp.json must register the "vent" server — found: ${names.join(', ') || '(none)'}`)
   const PREFIX = '${CLAUDE_PLUGIN_ROOT}/'
   for (const [name, srv] of Object.entries(m.mcpServers)) {
     assert.equal(srv.command, 'node', `${name}: launched with node (built-ins only, nothing to install)`)
