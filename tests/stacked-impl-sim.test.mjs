@@ -40,7 +40,7 @@ function implOpened(key, issues) {
   return { key, issues, status: 'PR_OPENED', pr_url: `https://x/pr/${key}`, branch: `feat/${key}`, base: 'main', summary: 's', files_changed: ['a.js'] }
 }
 
-async function runScript({ args, fetch, impl, review, preflight, doc, adversarial } = {}) {
+async function runScript({ args, fetch, impl, review, preflight, doc, adversarial, resolveRepo } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], inflightImpl: 0, peakImpl: 0, inflightAll: 0, peakAll: 0 }
   const agent = async (prompt, opts = {}) => {
@@ -70,6 +70,7 @@ async function runScript({ args, fetch, impl, review, preflight, doc, adversaria
     }
   }
   const dispatch = async (label) => {
+    if (label === 'resolve-session-repo') return resolveRepo ?? { repo: 'schmug/shipofclaudius' }
     if (label.startsWith('preflight')) return preflight ?? { existing: [] }
     if (label.startsWith('fetch:#')) {
       const n = Number(label.slice('fetch:#'.length))
@@ -95,7 +96,13 @@ async function runScript({ args, fetch, impl, review, preflight, doc, adversaria
   const phase = (t) => calls.phases.push(t)
   const log = (m) => calls.logs.push(m)
   const fn = new AsyncFunction('args', 'budget', 'agent', 'parallel', 'pipeline', 'phase', 'log', 'workflow', src)
-  const result = await fn(args, undefined, agent, parallel, null, phase, log, null)
+  let result
+  try {
+    result = await fn(args, undefined, agent, parallel, null, phase, log, null)
+  } catch (e) {
+    e.calls = calls // so a test asserting a thrown error can still inspect what ran before the throw
+    throw e
+  }
   return { result, calls }
 }
 
@@ -285,6 +292,61 @@ test('the additions do not weaken the injection-hardening of the write-capable w
   assert.ok(!/gh issue view/.test(im.prompt), 'impl still does not live-fetch the issue body')
   assert.notEqual(im.opts.agentType, 'Explore', 'impl stays write-capable')
   assert.equal(im.opts.isolation, 'worktree', 'impl stays worktree-isolated')
+})
+
+// ===================== #146: repo split-brain guard =====================
+// args.repo (REPOFLAG) only ever governed this workflow's READS — the issue-text relay and the
+// idempotency preflight. Its WRITES (the impl agent's worktree, `gh pr create`) always target the
+// session's own checked-out repo and cannot be redirected. A caller-passed repo that disagrees
+// with the session repo therefore used to read issue text from repo X while silently committing
+// code and opening a PR in repo Y. The guard resolves the session repo with ONE read-only agent
+// and aborts before any lane work is dispatched when the two disagree.
+
+test('#146: no args.repo means the repo-resolve check never runs at all', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  assert.equal(byPrefix(calls, 'resolve-session-repo').length, 0, 'the guard is a no-op when args.repo is absent')
+})
+
+test('#146: a matching args.repo (case/whitespace-insensitive) proceeds normally', async () => {
+  const { result, calls } = await runScript({
+    args: { lanes: [lane({ issues: [5] })], repo: ' SCHMUG/ShipOfClaudius ' },
+    resolveRepo: { repo: 'schmug/shipofclaudius' },
+  })
+  assert.equal(result.prs_opened, 1, 'the lane still runs to completion')
+  const resolve = byPrefix(calls, 'resolve-session-repo')
+  assert.equal(resolve.length, 1, 'the repo-resolve check ran exactly once')
+  assert.equal(resolve[0].opts.agentType, 'Explore', 'the repo-resolve check is read-only')
+  assert.equal(calls.agents[0].opts.label, 'resolve-session-repo', 'the repo-resolve check runs before any other agent')
+})
+
+test('#146: a mismatched args.repo aborts before ANY lane agent is dispatched, naming both repos', async () => {
+  const lanes = [lane({ issues: [5] })]
+  let caught = null
+  try {
+    await runScript({
+      args: { lanes, repo: 'schmug/some-other-repo' },
+      resolveRepo: { repo: 'schmug/shipofclaudius' },
+    })
+  } catch (e) {
+    caught = e
+  }
+  assert.ok(caught, 'the run throws on a repo mismatch')
+  assert.ok(caught.message.includes('schmug/some-other-repo'), `error names args.repo, got: ${caught.message}`)
+  assert.ok(caught.message.includes('schmug/shipofclaudius'), `error names the session repo, got: ${caught.message}`)
+  assert.equal(caught.calls.agents.length, 1, 'the repo-resolve check is the ONLY agent dispatched before the abort')
+  assert.equal(caught.calls.agents[0].opts.label, 'resolve-session-repo')
+  assert.equal(byPrefix(caught.calls, 'fetch:#').length, 0, 'no issue relay ran')
+  assert.equal(byPrefix(caught.calls, 'preflight').length, 0, 'no idempotency preflight ran')
+  assert.equal(byPrefix(caught.calls, 'impl:').length, 0, 'no impl agent ran')
+})
+
+test('#146: an unresolvable session repo fails OPEN (logs a warning, still runs) rather than blocking the run', async () => {
+  const { result, calls } = await runScript({
+    args: { lanes: [lane({ issues: [5] })], repo: 'schmug/shipofclaudius' },
+    resolveRepo: {},
+  })
+  assert.equal(result.prs_opened, 1, 'the run still proceeds when the check itself could not resolve a repo')
+  assert.ok(calls.logs.some((m) => /could not resolve/i.test(m)), 'a warning is logged so the gap is not silent')
 })
 
 // ===================== N5: verification gates the STACK BASE, not just the bucket =====================

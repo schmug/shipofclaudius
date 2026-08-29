@@ -424,7 +424,45 @@ Steps (read-only; no edit/merge/CI-poll/advisor/WebFetch):
 
 Verdict: start with APPROVE or REQUEST_CHANGES, then concrete findings (file:line, risk, fix). Be adversarial; if nothing real, say so.`
 
+// Repo split-brain guard (#146). REPOFLAG governs only this workflow's READS (the issue-text
+// relay and the idempotency preflight below). Its WRITES — the impl agent's worktree and its
+// `gh pr create` — always target the session's own repository; there is no way to point a
+// worktree or a PR at an arbitrary other repo. So a caller-passed args.repo that disagrees with
+// the session repo would silently read issues from one repo while writing code and opening PRs
+// in another (see #146's own postmortem: the read half succeeded, which is what made it
+// dangerous — nothing looked wrong until the filesystem contradicted the brief). The script has
+// no filesystem/git access of its own, so resolving the session repo costs ONE cheap read-only
+// agent — but it is the ONLY agent dispatched before an outright mismatch aborts the run.
+const REPO_RESOLVE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['repo'],
+  properties: { repo: { type: 'string', description: 'The "owner/name" gh resolves for THIS session\'s working directory, from `gh repo view --json nameWithOwner -q .nameWithOwner`, verbatim.' } },
+}
+const RESOLVE_REPO_PROMPT =
+  `You are READ-ONLY (gh/git/grep/read only — do NOT edit, commit, push, merge, or open anything).\n` +
+  `Run exactly this command and return its trimmed stdout:\n` +
+  `  gh repo view --json nameWithOwner -q .nameWithOwner\n` +
+  `Return { repo } where repo is that output verbatim — the "owner/name" of the repo checked out ` +
+  `in THIS session's working directory. Run NO other command.`
+
 phase('Implement')
+
+if (A.repo) {
+  const resolved = await runAgent(RESOLVE_REPO_PROMPT, { label: 'resolve-session-repo', phase: 'Implement', agentType: READONLY_AGENT, schema: REPO_RESOLVE_SCHEMA })
+  const sessionRepo = (resolved && typeof resolved.repo === 'string') ? resolved.repo.trim() : ''
+  if (sessionRepo && sessionRepo.toLowerCase() !== A.repo.trim().toLowerCase()) {
+    throw new Error(
+      `stacked-impl-lanes: args.repo ("${A.repo}") does not match the session's own repository ` +
+      `("${sessionRepo}"). args.repo only governs this workflow's READS (the issue-text relay and ` +
+      `the idempotency preflight) — its WRITES (the impl agent's worktree and its \`gh pr create\`) ` +
+      `always target the session's own repo, so a mismatch would read issue text from one repo and ` +
+      `commit code / open PRs in another. Aborting before any lane agent runs. Start the session ` +
+      `from a checkout of "${A.repo}" instead, or drop args.repo to operate on "${sessionRepo}".`
+    )
+  }
+  if (!sessionRepo) {
+    log(`⚠️ Could not resolve the session's own repository to validate against args.repo="${A.repo}" — proceeding, but confirm the worktree/PR target matches (writes always go to the session's own repo, regardless of args.repo).`)
+  }
+}
 
 // State-derived write idempotency (spine §2.4): before any write, check GitHub truth — which
 // lane branches ALREADY have an open PR (a prior run shipped them) — and skip those so the
