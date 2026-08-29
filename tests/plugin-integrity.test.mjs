@@ -533,6 +533,27 @@ test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', asyn
   }
 })
 
+test('.mcp.json (if shipped) is valid, plugin-root-templated, and points at a real file', async () => {
+  // Same trap as hooks/hooks.json above, and the same fix: a plugin-root config whose
+  // path is wrong ships a file that never runs. The end-to-end proof that this wiring
+  // works (`claude --plugin-dir ... -p`) is a one-time MANUAL run CI cannot repeat, so
+  // pin the parts that rot silently — a moved entry point, a typo, an expanded path.
+  let raw
+  try { raw = await read('.mcp.json') } catch { return }  // not shipping an MCP server: fine
+  const m = JSON.parse(raw)
+  assert.ok(m.mcpServers && typeof m.mcpServers === 'object', 'has a top-level "mcpServers" object')
+  const PREFIX = '${CLAUDE_PLUGIN_ROOT}/'
+  for (const [name, srv] of Object.entries(m.mcpServers)) {
+    assert.equal(srv.command, 'node', `${name}: launched with node (built-ins only, nothing to install)`)
+    assert.ok(Array.isArray(srv.args) && srv.args.length === 1, `${name}: exactly one arg (the entry point)`)
+    assert.ok(srv.args[0].startsWith(PREFIX),
+      `${name}: the entry path must start with the LITERAL ${PREFIX} — the host expands it at ` +
+      'load time, so a baked-in absolute path works on one machine and breaks every other install')
+    // Throws (failing the test) if the entry point does not exist at that path.
+    await read(srv.args[0].slice(PREFIX.length))
+  }
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `shipofclaudius` is a curated collection of **dynamic workflows** for the Claude Code Workflow tool — deterministic multi-agent orchestration scripts. Each workflow is a self-contained ES-module `.js` file in [`.claude/workflows/`](.claude/workflows/) that exports a `meta` block and drives a body of `agent()` / `parallel()` / `pipeline()` / `phase()` / `workflow()` calls. There is **no application** and **no runtime build** — the deliverables are the workflow scripts themselves, consumed by Claude Code. The repo is also packaged as a Claude Code **plugin**.
 
+**One exception to "no application".** The repo also ships a small MCP stdio server at [`packages/vent-server/`](packages/vent-server/) — Node built-ins only, like everything else here — registered by the root [`.mcp.json`](.mcp.json) and launched by the host in every session where the plugin is installed. Two consequences worth knowing before you touch it:
+
+- Installing the plugin now surfaces a **tool**, not just skills and workflows. Loaded via `--plugin-dir` it appears as `mcp__plugin_shipofclaudius_vent__vent` — plugin MCP servers are namespaced `plugin_<plugin>_<server>`, so the bare `mcp__vent__vent` is *not* the name you get.
+- A session whose cwd is this repo loads `.mcp.json` **twice**: once plugin-scoped, where `${CLAUDE_PLUGIN_ROOT}` expands and the server works, and once *project*-scoped, where that variable is undefined and a bare `vent` server fails `CONNECTION_CLOSED`. That second entry is expected and harmless. Root placement is what the design spec mandates, so do **not** "fix" the noise by relocating the file — that breaks plugin-scope loading instead.
+
 The authoritative description of every workflow, its arguments, and the security model lives in [README.md](README.md) — read it before editing a workflow's contract.
 
 ## Commands
@@ -72,5 +77,6 @@ Nothing in this repo can enforce this: `~/.claude/` is outside the tree, so `plu
 - `.claude/agents/*.md` — subagents the workflows dispatch by `agentType`. Registered via `plugin.json`'s `agents` key (this path is not auto-discovered for plugins).
 - `skills/<name>/SKILL.md` — plugin wrapper skills, one per workflow.
 - `tests/*-sim.test.mjs` — offline simulators (one per workflow) + `plugin-integrity.test.mjs`; `tests/lib/` holds vendored built-ins-only validators. Tests resolve their target via `new URL('../.claude/workflows/<name>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
+- `packages/` — the non-workflow code: `factory-gate` (pure, model-free, unit-tested) and `vent-server` (the MCP stdio server above).
 - `.claude-plugin/{plugin,marketplace}.json` — plugin packaging manifests.
 - `docs/specs/` — design/spec docs for major features (dated filenames).

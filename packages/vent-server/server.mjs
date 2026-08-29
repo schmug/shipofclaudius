@@ -56,7 +56,18 @@ function result(payload) {
 }
 
 function callVent(args, state, deps) {
-  const record = { ts: new Date(deps.now()).toISOString(), text: args.text, ...deps.context() }
-  deps.appendVent(record)
+  // Both guards are the shape docs/specs/2026-08-28-vent-tool-plan.md writes for Task 4,
+  // pulled forward into the task that actually makes the server reachable: n1 ships the
+  // .mcp.json, so any window where the live tool lies about recording is a real window.
+  // Rate limiting stays in n2 (#142) with the real sink — RATE_WINDOW_MS, MAX_PER_SESSION
+  // and `state` remain forward declarations until then.
+  const text = args?.text
+  if (typeof text !== 'string' || text.trim() === '') {
+    return result({ recorded: false, reason: 'invalid-input' })
+  }
+  const record = { ts: new Date(deps.now()).toISOString(), text, ...deps.context() }
+  if (!deps.appendVent(record)) {
+    return result({ recorded: false, reason: 'sink-unavailable' })
+  }
   return result({ recorded: true })
 }
