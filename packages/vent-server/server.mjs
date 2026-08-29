@@ -56,18 +56,29 @@ function result(payload) {
 }
 
 function callVent(args, state, deps) {
-  // Both guards are the shape docs/specs/2026-08-28-vent-tool-plan.md writes for Task 4,
-  // pulled forward into the task that actually makes the server reachable: n1 ships the
-  // .mcp.json, so any window where the live tool lies about recording is a real window.
-  // Rate limiting stays in n2 (#142) with the real sink — RATE_WINDOW_MS, MAX_PER_SESSION
-  // and `state` remain forward declarations until then.
+  // Four outcomes, all of them calm (design spec §4.6). The ordering is load-bearing:
+  // a refusal must be decided before anything is built or written, so a refused vent
+  // costs a clock read and nothing else — no sink touch, no quota consumed.
+  //
+  // `text` is the entire input surface. The record is assembled field by field from the
+  // clock and deps.context(), never spread from `args`, so an agent cannot plant `ts`,
+  // `session` or `repo` values that the weekly triage would read as captured fact.
   const text = args?.text
   if (typeof text !== 'string' || text.trim() === '') {
     return result({ recorded: false, reason: 'invalid-input' })
   }
-  const record = { ts: new Date(deps.now()).toISOString(), text, ...deps.context() }
+  const now = deps.now()
+  state.stamps = state.stamps.filter((t) => now - t < RATE_WINDOW_MS)
+  if (state.stamps.length > 0 || state.count >= MAX_PER_SESSION) {
+    return result({ recorded: false, reason: 'rate-limited' })
+  }
+  const record = { ts: new Date(now).toISOString(), text, ...deps.context() }
   if (!deps.appendVent(record)) {
+    // The sink dropped it, so nothing counts: quota tracks records written, not calls
+    // attempted. An unwritable sink must not also burn the session's ten vents.
     return result({ recorded: false, reason: 'sink-unavailable' })
   }
+  state.stamps.push(now)
+  state.count += 1
   return result({ recorded: true })
 }
