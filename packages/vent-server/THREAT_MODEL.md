@@ -50,10 +50,20 @@ concrete failure is on record: an agent fired 43 vents from one project during a
 apology spiral.
 
 - 1 vent per 90 s (`RATE_WINDOW_MS`) and 10 per session (`MAX_PER_SESSION`).
-- The refusal is decided **before** the record is built and before the sink is touched,
-  so a refused vent costs one clock read. A limiter that still writes is not a limiter.
-- Quota tracks records *written*, not calls *attempted*: a `sink-unavailable` result
-  consumes nothing, so a broken disk cannot also burn the session's ten vents.
+- The two limits bound **different things**, and advance at different points:
+  - The **window** bounds *invocations*. Its stamp is taken before the sink is touched,
+    so a sink that cannot be written still refuses the next 90 s of calls. This matters
+    because a `sink-unavailable` result is the one refusal decided *after* the record is
+    built — it costs a `deps.context()` call, i.e. two `git` subprocesses. Stamping only
+    on a successful write would leave an unwritable sink (full disk, read-only home, bad
+    `VENT_SINK`, CI with no `~/.claude`) completely unbounded; 43 back-to-back vents then
+    cost ~710 ms of real git work and zero refusals. Pinned by `an unwritable sink does
+    not remove the 1-per-window bound on invocations`.
+  - The **per-session quota** bounds *records written*, not calls attempted, so a broken
+    disk still cannot burn the session's ten vents.
+- An `invalid-input` or `rate-limited` refusal is decided before the record is built and
+  before the sink is touched, so it costs one clock read. A limiter that still writes is
+  not a limiter.
 - Per-session state is process-lifetime state because the host spawns one server per
   session. A pooled or reused process would silently widen the cap — check this
   assumption before changing how the server is launched.
@@ -73,8 +83,17 @@ both closed:
   Tested by `a vent text carrying newlines cannot forge a second JSONL record`.
 - **Field forgery.** The record is assembled field by field from the clock and
   `deps.context()` — never spread from `args` — so `{text, ts, session, repo}` puts only
-  `text` in the file. A vent cannot backdate itself or blame another session or repo.
-  Tested by `agent-supplied fields other than text never reach the sink record`.
+  `text` in the file, and the context spread is applied *first* so no context field can
+  shadow `ts` or `text`. Tested by `agent-supplied fields other than text never reach the
+  sink record`.
+
+**Scope of that claim — read this before trusting a record.** What is closed is the
+tool's *input surface*: nothing an agent passes to `vent` can set `ts`, `session`, `repo`
+or `branch`. **No field in the record is authenticated** beyond that. An agent with Bash
+can run `git remote set-url origin …` or `git checkout -b …` before venting, and `repo`
+and `branch` are read straight from that working tree (`context.mjs`); an agent with file
+write can append a fully forged line to `vents.jsonl` without going through this server at
+all. Triage (spec §6) should treat records as *self-reported*, not as attested provenance.
 
 `text` itself is agent-authored and stays untrusted **downstream**: whatever reads
 `vents.jsonl` must treat every `text` as data, never as instructions. That is a
@@ -88,7 +107,14 @@ requirement on the triage task (spec §6), not something this server can enforce
 - The argv is two fixed literal arrays; nothing from `args` is interpolated.
 - `cwd` comes from `CLAUDE_PROJECT_DIR`, set by the trusted host before any agent runs.
 - `timeout: 1000` bounds a hanging git, `stdio: ['ignore','pipe','ignore']` keeps its
-  stderr out of the JSON-RPC stream on stdout, and any failure degrades to `null`.
+  stderr out of the JSON-RPC stream on stdout, and any failure degrades to `null`. Note
+  the two calls are **sequential**, so the worst-case added latency for a recorded vent
+  is ~2 s, not 1 s.
+- **Forward-looking:** the working tree `git` runs in may itself be untrusted (a
+  tarball-shipped `.git/config` is attacker-authored). Safe today because `config --get`
+  and `rev-parse` do not refresh the index, so `core.fsmonitor` never fires and no hook
+  runs. A future context field must not use an index-refreshing subcommand (`status`,
+  `diff`, `add`) — that would hand execution to the tree being inspected.
 
 Do not let a future field derive its command, arguments, or cwd from tool input.
 

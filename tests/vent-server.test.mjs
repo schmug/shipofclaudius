@@ -13,7 +13,7 @@
 // the whole set at once, so a fifth outcome cannot be added quietly.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -254,6 +254,20 @@ test('appendVent returns false rather than throwing when the sink is unwritable'
   assert.equal(appendVent({ text: 'x' }, '/nonexistent-dir-xyz/vents.jsonl'), false)
 })
 
+test('a freshly created sink is not world-readable', async () => {
+  // The record carries cwd, repo, branch, session and free-form text that in practice
+  // quotes paths, command output and error messages. Default creation mode is 0644 and
+  // ~/.claude is 0755, so without an explicit mode this is readable by any local user.
+  const dir = await mkdtemp(join(tmpdir(), 'vent-mode-'))
+  const p = join(dir, 'vents.jsonl')
+  try {
+    assert.equal(appendVent({ text: 'x' }, p), true)
+    assert.equal((await stat(p)).mode & 0o777, 0o600, 'sink is owner-only')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('DEFAULT_SINK is ~/.claude/vents.jsonl', () => {
   assert.ok(DEFAULT_SINK.endsWith('/.claude/vents.jsonl'), DEFAULT_SINK)
 })
@@ -301,6 +315,12 @@ test('parseRepo handles ssh, https, and .git-less remotes', () => {
   assert.equal(parseRepo('git@github.com:schmug/agent-notes.git'), 'schmug/agent-notes')
   assert.equal(parseRepo('https://github.com/schmug/agent-notes.git'), 'schmug/agent-notes')
   assert.equal(parseRepo('https://github.com/schmug/agent-notes'), 'schmug/agent-notes')
+  // Normalized, because the weekly triage groups records by this key: git stores the
+  // clone URL exactly as typed (so a trailing slash is legal) and GitHub URLs are
+  // case-insensitive, so both variants below name the SAME repo.
+  assert.equal(parseRepo('https://github.com/schmug/agent-notes/'), 'schmug/agent-notes')
+  assert.equal(parseRepo('https://github.com/Schmug/Agent-Notes.git'), 'schmug/agent-notes')
+  assert.equal(parseRepo('git@github.com:Schmug/Agent-Notes.git/'), 'schmug/agent-notes')
   assert.equal(parseRepo(null), null)
 })
 
@@ -341,6 +361,40 @@ test('a failed sink write reports sink-unavailable and does not consume quota', 
     { recorded: false, reason: 'sink-unavailable' })
   deps._now += RATE_WINDOW_MS + 1
   assert.equal(state.count, 0, 'a vent that was never written must not count')
+})
+
+test('an unwritable sink does not remove the 1-per-window bound on invocations', () => {
+  // The two limits bound DIFFERENT things: the 90s window bounds INVOCATIONS, the
+  // per-session cap bounds RECORDS WRITTEN. Advancing `stamps` only on a successful
+  // write let a broken sink (full disk, read-only home, bad VENT_SINK, CI with no
+  // ~/.claude) remove the only bound on how often this runs — and every attempt still
+  // pays for deps.context(), which spawns two git subprocesses.
+  const state = makeState(); const deps = stubDeps({ ok: false })
+  const tally = {}
+  for (let i = 0; i < 43; i++) {
+    const p = payloadOf(call(state, deps, { text: `burst ${i}` }))
+    const k = p.recorded ? 'recorded' : p.reason
+    tally[k] = (tally[k] || 0) + 1
+  }
+  assert.deepEqual(tally, { 'sink-unavailable': 1, 'rate-limited': 42 },
+    'one attempt per window, then refused — a broken sink must not uncap invocations')
+  assert.equal(deps.writes.length, 0)
+  assert.equal(state.count, 0, 'and the per-session quota is still untouched by a failed write')
+})
+
+test('a dep that throws is still a calm outcome, never an error in the session', () => {
+  // The invariant rests on callVent being TOTAL. index.mjs's -32603 backstop limits the
+  // blast radius but is itself an error in front of the agent, so the calm contract has
+  // to hold here, one level up, rather than relying on the backstop.
+  const boom = {
+    now: () => 1_000_000,
+    context: () => { throw new Error('git exploded') },
+    appendVent: () => { throw new Error('sink exploded') },
+  }
+  const reply = call(makeState(), boom, { text: 'x' })
+  assert.equal(reply.error, undefined, 'never a JSON-RPC error')
+  assert.equal(reply.result.isError, false)
+  assert.equal(payloadOf(reply).recorded, false)
 })
 
 test('missing or blank text is invalid-input, not a crash', () => {

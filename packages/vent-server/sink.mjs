@@ -15,7 +15,10 @@ export const DEFAULT_SINK = join(homedir(), '.claude', 'vents.jsonl')
 
 export function appendVent(record, path = DEFAULT_SINK) {
   try {
-    appendFileSync(path, JSON.stringify(record) + '\n')
+    // mode applies only at creation. The record carries cwd, repo, branch, session and
+    // free-form text that in practice quotes paths, command output and error messages;
+    // the default 0644 under a 0755 ~/.claude makes all of that world-readable.
+    appendFileSync(path, JSON.stringify(record) + '\n', { mode: 0o600 })
     return true
   } catch {
     return false
