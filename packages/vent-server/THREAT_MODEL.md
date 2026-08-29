@@ -148,15 +148,25 @@ means legacy, present and unsupported means `-32022` with `data.supported`.
 - The version gate runs **in front of method dispatch**, so a request naming a version
   we do not speak never reaches `callVent`, never spends a `deps.context()`, and never
   touches the sink. Pinned by `an unsupported version is refused BEFORE the tool runs`.
-- A rejection is answered only when the request bears an `id`. A notification carrying a
-  bad version draws nothing — replying to one is a protocol violation, and the gate is
-  the one place that could reintroduce it. Pinned by `a version rejection never replies
-  to a notification`.
+- Nothing arriving without an `id` is answered — replying to a notification is a protocol
+  violation, and `index.mjs` would write that reply straight to stdout. This is enforced by
+  a single guard sitting **in front of method dispatch**, so every method inherits it,
+  including ones added later. It has to live there: `server/discover` was first added
+  *above* the old trailing guard and answered notifications with an id-less response until
+  the guard moved. Pinned by `a version rejection never replies to a notification` and by
+  `NO method answers a notification, including ones added later`.
 - The era changes the result **shape** only: modern adds `resultType: 'complete'` and
   mirrors the same payload into `structuredContent`, exposing no field the text block
   did not already carry. Legacy results must stay free of both — Claude Code 2.1.241 is
-  a legacy client, so that is the era carrying real traffic. Pinned by `legacy results
-  carry NO modern-only fields`.
+  a legacy client, so that is the era carrying real traffic. The era is selected off
+  `MODERN_VERSIONS`, **not** off the presence of `_meta`: `server/discover` advertises the
+  whole supported list, so a `_meta`-bearing client can negotiate *down* to 2025-11-25, and
+  that revision defines neither field. Pinned by `legacy results carry NO modern-only
+  fields` and `a LEGACY version declared in _meta is served the LEGACY shape`.
+- A **declared** version we do not speak is rejected on presence, not truthiness: `''` and
+  `null` are declarations, not absences, and get `-32022` rather than a guessed era. Only an
+  absent `_meta` key means "legacy client". Pinned by `a declared-but-empty version is
+  rejected, not guessed at`.
 
 **Written to spec, never observed.** No modern client exists to test against. Everything
 above proves our replies match the published shapes; none of it is evidence that a

@@ -1,6 +1,11 @@
 // Pure protocol dispatch for the vent tool. No I/O: every side effect arrives
 // through `deps`, which is what makes the suite fast and hermetic.
 export const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25']
+// Which of the SUPPORTED_VERSIONS actually use the modern result shape. Kept separate
+// because server/discover advertises the whole supported list, so a _meta-bearing
+// client can negotiate DOWN to 2025-11-25 — and that revision defines neither
+// resultType nor structuredContent. Presence of _meta is NOT the era signal.
+export const MODERN_VERSIONS = ['2026-07-28']
 export const SERVER_INFO = { name: 'vent', version: '1.0.0' }
 export const RATE_WINDOW_MS = 90_000
 export const MAX_PER_SESSION = 10
@@ -42,13 +47,22 @@ export function handle(msg, state, deps) {
   // is normative on that. The gate sits in front of method dispatch so a rejected call
   // costs nothing and can never reach the sink. A notification carries no id, so there
   // is nothing to answer: not even to reject it.
-  if (requestedVersion && !SUPPORTED_VERSIONS.includes(requestedVersion)) {
+  // Presence, not truthiness: a client that declares '' or null has declared a version
+  // we do not speak, and the spec is normative that it MUST be rejected rather than
+  // guessed at. Only an ABSENT key means "legacy client, no _meta at all".
+  if (requestedVersion !== undefined && !SUPPORTED_VERSIONS.includes(requestedVersion)) {
     if (isNotification) return null
     return err(id, -32022, 'Unsupported protocol version', {
       supported: SUPPORTED_VERSIONS, requested: requestedVersion,
     })
   }
-  const modern = Boolean(requestedVersion)
+  const modern = MODERN_VERSIONS.includes(requestedVersion)
+
+  // Nothing arriving without an id may be answered — a reply with no id is a protocol
+  // violation, and index.mjs would write it straight to stdout. This sits in FRONT of
+  // dispatch so EVERY method inherits it, including ones added later: server/discover
+  // was added above the old trailing guard and answered notifications until this moved.
+  if (isNotification) return null
 
   // Mandatory in the modern era, and answered in either: it is how a client learns what
   // this server speaks, so gating it behind a version it has not yet learned is circular.
@@ -68,7 +82,6 @@ export function handle(msg, state, deps) {
       serverInfo: SERVER_INFO,
     })
   }
-  if (method === 'notifications/initialized') return null
   if (method === 'tools/list') {
     return ok(id, modern ? { resultType: 'complete', tools: [TOOL] } : { tools: [TOOL] })
   }
@@ -76,7 +89,6 @@ export function handle(msg, state, deps) {
     if (params?.name !== TOOL.name) return err(id, -32602, `Unknown tool: ${params?.name}`)
     return ok(id, callVent(params?.arguments, state, deps, modern))
   }
-  if (isNotification) return null
   return err(id, -32601, `Method not found: ${method}`)
 }
 

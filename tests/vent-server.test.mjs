@@ -135,7 +135,9 @@ test('through the real stdio entry point, every request bearing an id draws a re
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
   ].map((m) => JSON.stringify(m)).join('\n') + '\n'
-  const proc = spawnSync(process.execPath, [ENTRY], { input, encoding: 'utf8' })
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input, encoding: 'utf8', env: { ...process.env, VENT_SINK: NEVER_SINK },
+  })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const ids = proc.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).id)
   assert.deepEqual(ids, [0, 1, 2],
@@ -260,6 +262,65 @@ test('SUPPORTED_VERSIONS covers both eras, modern first', () => {
 // than maintaining both forever.
 const MV = 'io.modelcontextprotocol/protocolVersion'
 const modernMeta = (v = '2026-07-28') => ({ _meta: { [MV]: v } })
+
+test('a LEGACY version declared in _meta is served the LEGACY shape', () => {
+  // The era must be selected off the MODERN version, not off mere presence of _meta.
+  // server/discover advertises BOTH versions, so a _meta-bearing client can negotiate
+  // DOWN to 2025-11-25 through the server's own published list — and that revision does
+  // not define resultType or structuredContent.
+  const deps = stubDeps()
+  const list = handle(
+    { jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernMeta('2025-11-25') },
+    makeState(), deps)
+  assert.equal(list.result.resultType, undefined, 'legacy _meta must not get resultType')
+  const called = call(makeState(), deps, { text: 'x' }, modernMeta('2025-11-25'))
+  assert.equal(called.result.resultType, undefined)
+  assert.equal(called.result.structuredContent, undefined)
+  assert.equal(called.result.isError, false)
+})
+
+test('a declared-but-empty version is rejected, not guessed at', () => {
+  // The design spec is normative: a version the server does not support MUST be rejected.
+  // Truthiness-gating served '' and null the legacy shape instead of telling the client
+  // which versions we speak — the exact failure -32022 exists to prevent.
+  for (const v of ['', null]) {
+    const r = handle(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernMeta(v) },
+      makeState(), stubDeps())
+    assert.equal(r.error?.code, -32022, `version ${JSON.stringify(v)} must be rejected`)
+    assert.deepEqual(r.error.data.supported, SUPPORTED_VERSIONS)
+    assert.equal(r.error.data.requested, v)
+  }
+})
+
+test('NO method answers a notification, including ones added later', () => {
+  // server/discover was added ABOVE the trailing isNotification guard, so it answered a
+  // notification with an id-less response that index.mjs would write to stdout — a
+  // protocol violation. The guard now sits in FRONT of dispatch so every method inherits
+  // it, including any added after this.
+  for (const method of ['server/discover', 'initialize', 'tools/list', 'tools/call',
+                        'notifications/initialized', 'no/such/method']) {
+    const reply = handle(
+      { jsonrpc: '2.0', method, params: { name: 'vent', arguments: { text: 'x' } } },
+      makeState(), stubDeps())
+    assert.equal(reply, null, `${method} as a notification must draw no reply`)
+  }
+})
+
+test('every spawn in this suite is pinned to a temp VENT_SINK', async () => {
+  // The file-level invariant, ENFORCED rather than asserted in a comment. A spawn with no
+  // explicit env inherits the operator environment, and appendVent then falls back to
+  // DEFAULT_SINK (~/.claude/vents.jsonl). One such spawn shipped: it was harmless only
+  // because its request omitted `arguments` and short-circuited to invalid-input, so
+  // adding a text to that one request would have appended to the real sink for real.
+  const lines = (await readFile(fileURLToPath(import.meta.url), 'utf8')).split('\n')
+  const missing = []
+  lines.forEach((line, i) => {
+    if (!line.includes('spawnSync(process.execPath') && !line.includes('spawn(process.execPath')) return
+    if (!lines.slice(i, i + 6).join(' ').includes('VENT_SINK')) missing.push(i + 1)
+  })
+  assert.deepEqual(missing, [], 'these spawn lines carry no VENT_SINK env')
+})
 
 test('server/discover returns supported versions, capabilities, and serverInfo', () => {
   const reply = handle(
