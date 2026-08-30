@@ -2,17 +2,22 @@
 // Thin stdio entry point. Framing only — all decisions live in server.mjs.
 import { handle, makeState } from './server.mjs'
 import { StringDecoder } from 'node:string_decoder'
+import { captureContext } from './context.mjs'
+import { appendVent } from './sink.mjs'
 
+// The host spawns one server process per session, so process-lifetime state IS
+// session state — which is what makes MAX_PER_SESSION mean what it says.
 const state = makeState()
 const deps = {
   now: () => Date.now(),
-  // n1 ships NO sink — the real appendVent lands with n2 (#142). Until then this
-  // returns false so the live tool says `sink-unavailable` instead of confirming a
-  // write that never happened. .mcp.json makes this tool reachable in real sessions
-  // from the moment n1 merges, and a tool that lies about recording is the exact
-  // failure mode the vent exists to avoid. n2 replaces this stub wholesale.
-  appendVent: () => false,
-  context: () => ({}),
+  // VENT_SINK redirects the sink. It is read from the SERVER's environment, which the
+  // host fixes at spawn time before any agent runs; an agent supplies only `text` and
+  // can never reach it, so this is a test seam and not an escalation (THREAT_MODEL.md).
+  // It exists so the suite can drive this entry point end-to-end without appending to
+  // the operator's own ~/.claude/vents.jsonl, and so CI — which has no ~/.claude —
+  // exercises the real wiring instead of reporting a permanent sink-unavailable.
+  appendVent: (record) => appendVent(record, process.env.VENT_SINK || undefined),
+  context: () => captureContext(),
 }
 
 // Decoding must be STATEFUL. A chunk boundary can fall inside a multi-byte UTF-8
