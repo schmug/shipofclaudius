@@ -17,7 +17,8 @@
 // see the honesty note above its section, and do not upgrade that claim.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { writeSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,8 +26,8 @@ import {
   handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, MODERN_VERSIONS, LEGACY_VERSIONS,
   RATE_WINDOW_MS, MAX_PER_SESSION,
 } from '../packages/vent-server/server.mjs'
-import { appendVent, DEFAULT_SINK } from '../packages/vent-server/sink.mjs'
-import { captureContext, parseRepo } from '../packages/vent-server/context.mjs'
+import { appendVent, defaultSink, DEFAULT_SINK } from '../packages/vent-server/sink.mjs'
+import { captureContext, parseRepo, NULL_CONTEXT } from '../packages/vent-server/context.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -506,6 +507,78 @@ test('DEFAULT_SINK is ~/.claude/vents.jsonl', () => {
   assert.ok(DEFAULT_SINK.endsWith('/.claude/vents.jsonl'), DEFAULT_SINK)
 })
 
+test('a short write cannot corrupt the NEXT record (#159)', async () => {
+  // DURABILITY. The sink is read back line-by-line, so an unterminated fragment is worse
+  // than a lost record: the next append concatenates onto it and BOTH records become one
+  // unparseable line — while the caller only ever reported `sink-unavailable` for the
+  // first. A write can end short without throwing (ENOSPC partway, a signal), so the
+  // returned byte count is the only signal there is, and appendFileSync discards it.
+  const dir = await mkdtemp(join(tmpdir(), 'vent-short-'))
+  const p = join(dir, 'vents.jsonl')
+  try {
+    // The kernel accepting half the bytes, simulated at the one seam that can express it.
+    // Only the FIRST write is short: the terminator that closes the damaged line has to
+    // go through the same seam, so a stub that truncated everything would prove nothing.
+    let n = 0
+    const shortOnce = (fd, buf, off, len) => {
+      n += 1
+      return writeSync(fd, buf, off, n === 1 ? Math.floor(len / 2) : len)
+    }
+    assert.equal(appendVent({ ts: 'T1', text: 'a'.repeat(40) }, p, shortOnce), false,
+      'a short write is a failure, not the silent success appendFileSync would report')
+    assert.equal(appendVent({ ts: 'T2', text: 'b' }, p), true)
+
+    const lines = (await readFile(p, 'utf8')).split('\n').filter((l) => l !== '')
+    assert.equal(lines.length, 2, 'the fragment did not swallow the record that followed it')
+    assert.throws(() => JSON.parse(lines[0]),
+      'the truncated fragment stays unparseable ON ITS OWN — one line lost, not two')
+    assert.deepEqual(JSON.parse(lines[1]), { ts: 'T2', text: 'b' },
+      'and the next record parses independently, unaffected by the damage before it')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a write that throws outright is still a calm false, never an exception', async () => {
+  // The repair path must not become a new way to throw: if the disk is full, the
+  // terminator write fails too, and appendVent's contract is `false` either way.
+  const dir = await mkdtemp(join(tmpdir(), 'vent-throw-'))
+  const p = join(dir, 'vents.jsonl')
+  try {
+    const boom = () => { throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }) }
+    assert.equal(appendVent({ ts: 'T1', text: 'x' }, p, boom), false)
+    assert.equal((await readFile(p, 'utf8')), '', 'a failed write leaves no partial line behind')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an empty homedir() yields NO sink, never a cwd-relative one (#159)', async () => {
+  // os.homedir() can return '' — a container or CI runner with no HOME and no passwd
+  // entry. join('', '.claude', 'vents.jsonl') is '.claude/vents.jsonl', a path relative
+  // to whatever directory the host happened to spawn the server in. That is not a
+  // theoretical miss: it RESOLVES inside any repo with a .claude/ directory, this one
+  // included, so vents would land in the working tree instead of the operator's home.
+  assert.equal(defaultSink(''), null, 'no home means no sink')
+  assert.equal(defaultSink('relative/home'), null, 'a relative home is no home either')
+  assert.notEqual(defaultSink(''), join('.claude', 'vents.jsonl'))
+  assert.equal(defaultSink('/home/someone'), join('/home/someone', '.claude', 'vents.jsonl'))
+
+  // ...and the null sink is a clean refusal, not a write into the process cwd.
+  const dir = await mkdtemp(join(tmpdir(), 'vent-home-'))
+  await mkdir(join(dir, '.claude'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(dir)
+    assert.equal(appendVent({ ts: 'T1', text: 'x' }, defaultSink('')), false)
+    await assert.rejects(() => readFile(join(dir, '.claude', 'vents.jsonl'), 'utf8'), /ENOENT/,
+      'nothing was written into the cwd .claude/ that a relative default would have found')
+  } finally {
+    process.chdir(cwd)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a vent text carrying newlines cannot forge a second JSONL record', async () => {
   // SECURITY. `text` is the one field an agent controls, and the sink is read back
   // line-by-line by the weekly triage. A raw newline reaching the file would let one
@@ -543,6 +616,20 @@ test('a failing git degrades to null instead of propagating', () => {
   const boom = () => { throw new Error('git not found') }
   assert.deepEqual(captureContext(env, boom),
     { cwd: '/proj', repo: null, branch: null, session: 's' })
+})
+
+test('NULL_CONTEXT is exactly the shape captureContext returns, so the two cannot drift', () => {
+  // NULL_CONTEXT is what the server falls back to when deps.context() throws, so it has
+  // to stay the SAME four keys context.mjs actually produces. captureContext builds every
+  // return from it, which is what makes that structural rather than a promise; this pins
+  // it from the outside so a fifth field added to one and not the other goes red.
+  const shape = Object.keys(NULL_CONTEXT).sort()
+  assert.deepEqual(shape, ['branch', 'cwd', 'repo', 'session'], 'the §4.4 context shape')
+  assert.deepEqual(Object.keys(captureContext({}, () => null)).sort(), shape)
+  assert.deepEqual(
+    Object.keys(captureContext({ CLAUDE_PROJECT_DIR: '/p', CLAUDE_CODE_SESSION_ID: 's' }, () => 'x')).sort(),
+    shape)
+  for (const [k, v] of Object.entries(NULL_CONTEXT)) assert.equal(v, null, `${k} defaults to null`)
 })
 
 test('parseRepo handles ssh, https, and .git-less remotes', () => {
@@ -644,6 +731,40 @@ test('a dep that throws is still a calm outcome, never an error in the session',
   assert.equal(reply.error, undefined, 'never a JSON-RPC error')
   assert.equal(reply.result.isError, false)
   assert.equal(payloadOf(reply).recorded, false)
+})
+
+test('a throwing context() records explicit nulls, not a record missing every field (#159)', () => {
+  // The totality guard absorbed the throw into `ctx = {}`, which is right — but the
+  // record that came out carried NO cwd/repo/branch/session key at all, breaking the
+  // §4.4 contract that every context field is string-or-null and never undefined. The
+  // weekly triage reads these line-by-line; a record silently missing the grouping key
+  // is worse than one that says `null`, because only the second is legible as "unknown".
+  const writes = []
+  const deps = {
+    now: () => 1_000_000,
+    context: () => { throw new Error('git exploded') },
+    appendVent: (r) => { writes.push(r); return true },
+  }
+  assert.deepEqual(payloadOf(call(makeState(), deps, { text: 'x' })), { recorded: true })
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0], {
+    cwd: null, repo: null, branch: null, session: null,
+    ts: new Date(1_000_000).toISOString(), text: 'x',
+  })
+})
+
+test('a context() returning only SOME fields is completed to the four-key shape', () => {
+  // Same contract, reached the other way: a context that returns without throwing but
+  // omits a field would otherwise emit a record with that key simply absent. Normalizing
+  // on the way in makes the record shape structural rather than dependent on every
+  // caller of deps.context() being well-behaved.
+  const deps = stubDeps()
+  deps.context = () => ({ cwd: '/p' })
+  call(makeState(), deps, { text: 'partial' })
+  assert.deepEqual(deps.writes[0], {
+    cwd: '/p', repo: null, branch: null, session: null,
+    ts: new Date(1_000_000).toISOString(), text: 'partial',
+  })
 })
 
 test('missing or blank text is invalid-input, not a crash', () => {

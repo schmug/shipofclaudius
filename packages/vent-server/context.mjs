@@ -18,6 +18,13 @@ function realGit(cwd, args) {
   }
 }
 
+// The canonical §4.4 context shape, and the single place it is written down. Every
+// return below is built FROM it, so "every context field is string-or-null, never
+// undefined" is structural rather than four literals that have to agree. server.mjs
+// imports it as the fallback for a deps.context() that throws — a frozen literal, so
+// the pure dispatcher gains a shape, not a side effect.
+export const NULL_CONTEXT = Object.freeze({ cwd: null, repo: null, branch: null, session: null })
+
 export function parseRepo(url) {
   if (!url) return null
   // Normalized, because this is a GROUPING KEY: the weekly triage buckets records by it.
@@ -31,7 +38,7 @@ export function parseRepo(url) {
 export function captureContext(env = process.env, gitFn = realGit) {
   const cwd = env.CLAUDE_PROJECT_DIR || null
   const session = env.CLAUDE_CODE_SESSION_ID || null
-  if (!cwd) return { cwd: null, repo: null, branch: null, session }
+  if (!cwd) return { ...NULL_CONTEXT, session }
   let repo = null
   let branch = null
   try {
@@ -41,5 +48,5 @@ export function captureContext(env = process.env, gitFn = realGit) {
     repo = null
     branch = null
   }
-  return { cwd, repo, branch, session }
+  return { ...NULL_CONTEXT, cwd, repo, branch, session }
 }

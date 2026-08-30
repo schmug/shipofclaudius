@@ -1,5 +1,8 @@
 // Pure protocol dispatch for the vent tool. No I/O: every side effect arrives
-// through `deps`, which is what makes the suite fast and hermetic.
+// through `deps`, which is what makes the suite fast and hermetic. The one import is a
+// frozen shape constant, not a capability — see NULL_CONTEXT's use in callVent.
+import { NULL_CONTEXT } from './context.mjs'
+
 export const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25']
 // Which of the SUPPORTED_VERSIONS actually use the modern result shape. Kept separate
 // because server/discover advertises the whole supported list, so a _meta-bearing
@@ -143,9 +146,16 @@ function callVent(args, state, deps, modern) {
   // Context is spread FIRST so a future context field cannot shadow the clock or the
   // agent's text — "assembled field by field" structural rather than dependent on
   // context.mjs happening to return exactly {cwd, repo, branch, session}.
-  let ctx = {}
-  try { ctx = deps.context() } catch { ctx = {} }
-  const record = { ...ctx, ts: new Date(now).toISOString(), text }
+  //
+  // NULL_CONTEXT first, so the record always carries the full §4.4 shape: `cwd`, `repo`,
+  // `branch` and `session` are string-or-null and NEVER absent. Absorbing a throw into
+  // `{}` alone emitted a record with those keys simply missing, which the weekly triage
+  // reads line-by-line and cannot distinguish from a schema it does not know — a
+  // captured-but-unknown field must say `null` out loud. It normalizes the non-throwing
+  // path too: a context returning three keys is completed rather than trusted.
+  let ctx
+  try { ctx = deps.context() } catch { ctx = null }
+  const record = { ...NULL_CONTEXT, ...ctx, ts: new Date(now).toISOString(), text }
   let written = false
   try { written = deps.appendVent(record) } catch { written = false }
   if (!written) {

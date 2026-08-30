@@ -185,6 +185,10 @@ The agent supplies none of this; the server gathers it:
 Git lookups must be best-effort and time-bounded: a slow or absent git must degrade to `null`,
 never hang the tool call.
 
+Every context field is **string-or-null and never absent** — including when capture itself
+throws. A record missing `repo` entirely is not the same statement as one saying `repo: null`,
+and only the second is legible to the triage reader as "unknown" (#159).
+
 **Normalizing `repo` — decided in #160.** `repo` is a **grouping key**: the weekly triage
 buckets records by it, so it is normalized rather than stored as typed. A trailing slash is
 stripped, and `owner/name` is **case-folded on every host, unconditionally**.
@@ -244,6 +248,19 @@ state lives in `~/.claude` (alongside `scripts/board-audit.py`), never in this r
 
 Append with a single small `O_APPEND` write so concurrent sessions interleave cleanly rather
 than corrupting lines. Never read-modify-write the file from the server.
+
+Two consequences of "the reader is line-by-line", both settled in #159:
+
+- **A write that ends short must not corrupt its successor.** `write(2)` may accept fewer
+  bytes than offered and still report success, leaving a fragment with no terminator that
+  the next append runs onto — one unparseable line, *two* records lost. Compare the returned
+  byte count against the buffer length and, when short, write a lone `\n` through the same
+  fd to close the damaged line before reporting failure. Never truncate back to the
+  pre-write size: under `O_APPEND` those trailing bytes may belong to another session.
+- **The default sink must be absolute or absent.** `os.homedir()` returns `''` where there
+  is no `HOME` and no passwd entry, and `join('', '.claude', 'vents.jsonl')` is a *relative*
+  path that resolves inside any working tree with a `.claude/` directory. With no absolute
+  home there is no default sink: refuse, and let it surface as `sink-unavailable`.
 
 ---
 
