@@ -210,8 +210,10 @@ It closes on its own **only if the filing actually happens** — and that is a w
 than it first appears. If `gh` is unauthenticated, or the agent simply does not comply, the
 condition stays false and the hook blocks again.
 
-Measured: an unsatisfiable condition ran **9 evaluations** before the cap released it, taking
-about two minutes and producing **no session output at all**. That is the real runaway profile,
+Measured three times, on the default cap: an unsatisfiable condition ran **9**, **14**, and
+**13** evaluations before release — the last an independent reviewer's run against the shipped
+hook with tools denied, taking ~5 minutes and producing **no session output at all**. The
+default cap is not a fixed number and must not be encoded as one. That is the real runaway profile,
 and it applies to `prompt` and `agent` alike. `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` is the only hard
 backstop.
 
@@ -221,6 +223,14 @@ Two mitigations, both required:
    `gh` call still terminates the loop on the next evaluation.
 2. The condition must be satisfiable by an agent that has decided there is nothing to file. The
    `Default to satisfied` clause is what makes "I looked and found nothing" a valid exit.
+
+**Mitigation 1 is weakest exactly where the feature is aimed.** Spooling requires Bash, and §2
+notes that unattended runs are both where the capture matters most and where tools may be
+denied. So `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2` is not a nicety — it is the only backstop that
+holds when the agent cannot write. **It is NOT shipped.** A plugin cannot set host environment;
+it belongs in `~/.claude/settings.json` `env`, which is a guardrail edit requiring Cory's
+approval. Until it is set, the runaway profile above is live. Tracked as the one decided
+mitigation this work did not deliver.
 
 ### 4.5 Never fail the turn
 

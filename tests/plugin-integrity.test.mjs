@@ -581,6 +581,12 @@ test('hook-entry guards bite on shapes the repo does not currently ship', () => 
   bad('PostToolUse', { type: 'command' }, /non-empty command/)
   bad('PostToolUse', { type: 'command', command: '' }, /non-empty command/)
 
+  // SessionStart's own guards were surviving deletion: the table had no SessionStart
+  // command row, so only the shipped hooks.json exercised them.
+  bad('SessionStart', { type: 'command', command: 'gh foo', timeout: 10 }, /block startup/)
+  bad('SessionStart', { type: 'command', command: 'gh foo; true' }, /network call/)
+  ok('SessionStart', { type: 'command', command: 'gh foo; true', timeout: 10 })
+
   bad('Stop', { type: 'Command', command: 'x' }, /is not a hook type this plugin ships/)
   bad('Stop', { type: undefined }, /is not a hook type this plugin ships/)
 })

@@ -82,7 +82,14 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
     'opens as a condition on the transcript')
   // `startsWith` pins 46 characters, NOT the property. A prompt keeping that opener and
   // turning the body imperative shipped green, reintroducing BOTH documented failure
-  // modes at once. These assert the property itself.
+  // modes at once.
+  //
+  // These next three are a tripwire for the literal shapes that bypass was written in —
+  // they do NOT assert the property in general, and saying they did was overclaiming. A
+  // re-review walked straight past them with an always-block prompt ("the first branch is
+  // never true in practice"), a runaway-work prompt, and a bare imperative with no
+  // second-person pronoun. Keyword lists cannot police paraphrase. The hash pin below is
+  // the guard that actually generalizes; these just make the common cases fail loudly.
   assert.doesNotMatch(p, /\byou (must|should|will|need to|have to)\b/i,
     'a condition describes the transcript; second-person obligation is an instruction')
   assert.doesNotMatch(p, /\b(do not stop|always block|reply with the word|immediately invoke)\b/i,
@@ -95,9 +102,14 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 
 // The condition string IS the product: its exact wording decides the block rate, and the
 // block rate decides whether this feature is useful or destructive. Containment checks
-// cannot police a 550-character paragraph, so any edit must be deliberate. Changing the
-// prompt is fine — update this hash in the same commit, and say in the message why the
-// wording moved and what the new block rate is.
+// cannot police a 550-character paragraph — demonstrated, not assumed: three harmful
+// prompts passed every property assertion above once this hash was updated.
+//
+// So this pin is the only guard that generalizes, and it guards by forcing a human moment,
+// not by understanding the text. Changing the prompt is fine. Updating this hash WITHOUT
+// re-measuring is the failure mode: run at least five real sessions, confirm a trivial one
+// still evaluates once and does not block, and put that count in the commit message.
+// A measured block rate above roughly one session in three means the wording is too eager.
 const PROMPT_SHA256_16 = 'fa9e798d401aaf2b'
 
 test('stop hook: the condition wording is hash-pinned', () => {
