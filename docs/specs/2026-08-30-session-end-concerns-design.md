@@ -61,7 +61,25 @@ its local sink. Do not merge any of the three.
 | The bar | **None at write time**; triage decides later | Board-style gate (measured 0/965); narrow "unverified claims only" (leaves non-verification concerns homeless) |
 | Locality | **GitHub at session end**, local file only as failure spool | Local JSONL + weekly triage (cluster triage files one issue *per cluster*, and a session-end concern is almost always a singleton — it would be discarded by construction) |
 | Sink | **Issues in `schmug/agent-notes`** | The Q&A board itself (the SessionStart hook injects *open* Q&A into every session; a concern is never "answered", so it would accumulate in every future session's context forever); `shipofclaudius` issues (`issue-triage-fanout` reads that tracker — unfiltered volume poisons it); a new repo (splits agent-side records across two places) |
-| Trigger | **`type: "prompt"` hook on `Stop`**, every stop | Command hook + daily batch pass (reads transcripts cold, without the reasoning that produced the concern); a `CLAUDE.md` rule alone (this is exactly the 0/965 design) |
+| Trigger | **`type: "prompt"` hook on `Stop`**, every stop | Command hook + daily batch pass (reads transcripts cold, without the reasoning that produced the concern); a `CLAUDE.md` rule alone (this is exactly the 0/965 design); **`type: "agent"` hook** (see below) |
+
+**Why not the `agent` hook type.** It was the strongest alternative and was tested, not dismissed
+(§10). An agent hook runs a real agent *with tools*, so it could file the issue itself instead of
+blocking and delegating to the main agent — attractive, because it does not depend on the main
+agent complying. It loses on measured cost and failure profile:
+
+| | `prompt` | `agent` |
+|---|---|---|
+| Per-evaluation latency (observed) | ~2–4s | ~13–16s |
+| Tools | none | yes, but **denied by default in `-p`/"don't ask" mode** |
+| Unsatisfiable condition | loops to the block cap | loops to the block cap, at 4× the cost |
+| Determinism on a one-step task | n/a | took **3** evaluations to do one `echo` |
+
+The tool-permission dependency is the decisive one: unattended runs (cron routines, `/loop`) are
+exactly where this capture matters most, and that is precisely where the hook agent's tools are
+denied unless an allow-rule is pre-granted. Since the main agent needs the same
+`Bash(gh issue create:*)` allow-rule anyway, the agent type buys nothing there and costs 4× per
+stop. Revisit only if main-agent non-compliance shows up in practice.
 | Classification at write time | **None** — one sink, routing happens at triage | Agent picks board-vs-issue-vs-vent at wrap-up (re-introduces the self-assessed gate that failed) |
 
 ---
@@ -101,8 +119,9 @@ its local sink. Do not merge any of the three.
                   else             → close
 ```
 
-The loop is **self-closing**: the condition becomes true once the filing has happened, and the
-transcript is the state. No sentinel file, no counter.
+The loop closes when the condition goes true — the transcript is the state, so there is no
+sentinel file and no counter. It is **not** unconditionally self-closing: if the filing never
+happens the hook blocks again, up to the block cap (§4.4).
 
 Three units, independently testable: the hook (a condition string), the sink (an issue
 format + a spool fallback), the triage task (a prompt). The hook must not know anything about
@@ -187,9 +206,21 @@ first Stop evaluation and `True` on the one following a block. The binary's guid
 > it's true. Set `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` to raise this limit.
 
 A prompt hook does not read the input directly, so it cannot check `stop_hook_active` itself.
-It does not need to: the condition goes true once the filing lands, so the loop closes on its
-own. `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` remains the backstop if it does not — which is the
-failure mode to watch for in the first week.
+It closes on its own **only if the filing actually happens** — and that is a weaker guarantee
+than it first appears. If `gh` is unauthenticated, or the agent simply does not comply, the
+condition stays false and the hook blocks again.
+
+Measured: an unsatisfiable condition ran **9 evaluations** before the cap released it, taking
+about two minutes and producing **no session output at all**. That is the real runaway profile,
+and it applies to `prompt` and `agent` alike. `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` is the only hard
+backstop.
+
+Two mitigations, both required:
+
+1. The condition's escape hatch (§4.1) counts a *spooled* concern as satisfying it, so a failed
+   `gh` call still terminates the loop on the next evaluation.
+2. The condition must be satisfiable by an agent that has decided there is nothing to file. The
+   `Default to satisfied` clause is what makes "I looked and found nothing" a valid exit.
 
 ### 4.5 Never fail the turn
 
@@ -269,7 +300,16 @@ gate, or its hook. No changes to the vent spec or its sink. No changes to
 
 ## 9. Risk and kill criterion
 
-Two failure modes, opposite directions:
+Three failure modes:
+
+- **A block derails the session's closing message.** Observed in *both* probes: with a command
+  hook the final message became *"Understood. I'll reply with BANANA if I'm about to stop"*, and
+  with an agent hook it became *"3. Adjust hook conditions… Which approach would you prefer?"* —
+  in each case the user's actual answer was replaced by hook-loop chatter. This is the cost every
+  time the hook fires, so a hook that blocks often is not merely slow, it is destructive to the
+  session's output. It is the strongest argument for `Default to satisfied`.
+
+The other two point in opposite directions:
 
 - **Nagging.** A per-stop model check that blocks routine sessions gets disabled. The
   `Default to satisfied` clause and the first-week block-rate measurement exist for this.
@@ -304,6 +344,18 @@ harness lives in this session's scratchpad and is disposable.
    single run via `--debug-file`.
 4. **Stop hook input keys** are as listed in §4.3, with no `reason` field.
 5. **`schmug/agent-notes` accepts issues** — `has_issues: true`, `gh issue list` clean.
+6. **`type: "agent"` also runs on `Stop`, and has real tools.** With
+   `permissions.allow: ["Bash(echo:*)","Write"]` the hook agent created a file on disk and the
+   condition then reported met. Without allow-rules it reported *"both Bash and Write tools are
+   blocked in 'don't ask' mode"*.
+7. **The bundled hook documentation is wrong about both LLM types.** It states that `prompt` and
+   `agent` are *"Only available for tool events: PreToolUse, PostToolUse, PermissionRequest."*
+   Both were observed running on `Stop`, and `prompt` has a `Stop`-specific wrapper (§4.1) that a
+   tool-events-only feature would not have.
+8. **The block cap is around 9.** An unsatisfiable agent-hook condition produced exactly 9
+   evaluations over ~2 minutes before the session terminated with no output. Measured once, on
+   the default (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` unset) — treat 9 as the observed value, not a
+   documented constant.
 
 **Still open — check before relying on these:**
 
@@ -320,9 +372,14 @@ harness lives in this session's scratchpad and is disposable.
    showed a second `Hook Stop (Stop) success` emitting a metrics payload
    (`skip_reason`, `diff_strategy_v2`) from something already installed. Multiple Stop hooks
    evidently coexist, but ordering and whether one can suppress another was not established.
-4. **The `"agent"` hook type.** The binary lists it alongside `command` and `prompt`; it is
-   undocumented locally and unexamined. It may be a better fit than `prompt` for this job —
-   worth ten minutes before building.
+4. **The permission rule the filing needs.** The main agent must be able to run
+   `gh issue create` against `agent-notes` in an unattended session. `Bash(echo:*)` and `Write`
+   were verified to work as hook-agent allow-rules, but the exact matcher for the real command —
+   and whether it must live in user settings rather than the plugin — was not tested. This is the
+   first implementation step, ahead of any code.
+5. **Whether the block cap of 9 is configurable downward.** `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` is
+   documented in the binary as raising the limit; whether it can *lower* it was not tested. A cap
+   of 2 would bound the runaway in §4.4 much more tightly than the observed 9.
 
 **A note on drift.** This spec pins behaviour against Claude Code `2.1.251`. The prompt-hook
 wrapper text in §4.1 is an internal implementation detail observed through `--debug-file`, not
