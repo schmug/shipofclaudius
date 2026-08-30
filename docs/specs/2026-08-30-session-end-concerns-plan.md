@@ -335,7 +335,7 @@ node tests/session-end-concerns.test.mjs &&
 node tests/session-end-concerns.test.mjs && npm test
 ```
 
-Expected: the new suite's 3 tests PASS, and the full chain passes with a count 3 higher than the base. The base count is **26** as of `165a6a6` — re-measure on the base commit rather than trusting this number, per CLAUDE.md.
+Expected: the new suite's 3 tests PASS, and the full chain passes with a count 3 higher than the base. The base is **24 suites / 944 assertions** as of `165a6a6`. Note that the trailing `all N passed` line is only the LAST suite's count, not a repo total — sum across suites with `npm test 2>&1 | grep -E '^all [0-9]+ passed'`. Re-measure on the base commit rather than trusting this number, per CLAUDE.md.
 
 - [ ] **Step 6: Commit**
 

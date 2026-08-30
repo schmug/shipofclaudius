@@ -518,8 +518,21 @@ test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', asyn
     assert.ok(EVENTS.has(event), `"${event}" is a real hook event (a typo here silently never fires)`)
     for (const g of [].concat(groups)) {
       for (const entry of [].concat(g.hooks || [])) {
-        assert.ok(entry.type === 'command', `${event}: only command hooks are used here`)
-        assert.ok(typeof entry.command === 'string' && entry.command.length > 0, `${event}: non-empty command`)
+        const TYPES = new Set(['command', 'prompt', 'agent'])
+        assert.ok(TYPES.has(entry.type), `${event}: "${entry.type}" is a real hook type`)
+        // LLM-evaluated hook types (`prompt`, `agent`) cost a model call every time they
+        // fire and can block the turn. On a tool event that is constant; on Stop it is once
+        // per session, which is the only place the cost is defensible. An unsatisfiable
+        // condition also loops — 9 and 14 evaluations observed on the default cap — so the
+        // timeout is not optional either.
+        if (entry.type !== 'command') {
+          assert.equal(event, 'Stop', `${event}: only Stop may use the ${entry.type} hook type`)
+          assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
+            `${event}: an LLM hook sets a timeout (it makes a model call)`)
+        }
+        if (entry.type === 'command') {
+          assert.ok(typeof entry.command === 'string' && entry.command.length > 0, `${event}: non-empty command`)
+        }
         // A session-lifecycle hook that can exit non-zero can wedge startup for every
         // project the plugin is enabled in. Ours must swallow failure explicitly.
         if (event === 'SessionStart') {
