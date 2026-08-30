@@ -1,7 +1,7 @@
 // Contract test for packages/vent-server — the agent vent tool.
 // Node built-ins only; zero token cost. Unit tests drive the pure dispatcher
-// directly; the integration tests spawn the real server, because index.mjs's
-// stdio framing is exactly what a unit test on handle() cannot see.
+// directly; the integration tests spawn the real server, because the wiring in
+// index.mjs is exactly what a unit test on handle() cannot see.
 //   node tests/vent-server.test.mjs
 //
 // The invariant this suite exists to protect: a vent must NEVER error into a
@@ -10,42 +10,146 @@
 // stop calling it, which is the failure mode the question board already had.
 // All four outcomes are live as of n2 (#142) — recorded, rate-limited,
 // sink-unavailable, invalid-input — and one test asserts the contract across
-// the whole set at once, so a fifth outcome cannot be added quietly.
+// the whole set at once. A fifth cannot be added quietly because `a fifth vent
+// outcome cannot be added quietly` reads the refusal reasons back out of
+// server.mjs and fails on any this suite does not exercise (#158 item 2).
 //
 // Two eras are served (n3, #143). The legacy one is observed fact; the modern
 // 2026-07-28 one is written to the published spec and has never met a client —
 // see the honesty note above its section, and do not upgrade that claim.
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { writeSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, MODERN_VERSIONS, LEGACY_VERSIONS,
   RATE_WINDOW_MS, MAX_PER_SESSION,
 } from '../packages/vent-server/server.mjs'
+import { makeFramer } from '../packages/vent-server/framing.mjs'
 import { appendVent, defaultSink, DEFAULT_SINK } from '../packages/vent-server/sink.mjs'
 import { captureContext, parseRepo, NULL_CONTEXT } from '../packages/vent-server/context.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
-// The shipped stdio entry point, spawned for real by every integration test below.
+// The shipped stdio entry point. `launchServer` below is the only thing that names it.
 const ENTRY = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
-// Every spawn in this file must stay OFF the operator's real ~/.claude/vents.jsonl.
-// The framing tests never call the tool, so this points VENT_SINK at a path inside a
-// directory that does not exist: should one ever reach the sink, the write fails into
-// a calm sink-unavailable instead of appending to somebody's real file.
-const NEVER_SINK = join(tmpdir(), 'vent-framing-never-written', 'vents.jsonl')
 
-// A deps stub with a controllable clock and an in-memory sink.
+// ---- suite discipline: sanctioned regions ----
+//
+// Two properties this file has to hold, both made STRUCTURAL rather than asserted in a
+// comment or approximated by a proximity scan:
+//   1. No spawned server can reach the operator's real ~/.claude/vents.jsonl (#156).
+//   2. No test leaves a temp directory behind (#158 item 14).
+// Each is held by making ONE function the only sanctioned way to do the thing, and the
+// SUITE DISCIPLINE tests at the bottom of this file reject any call site that skips it.
+// What this replaces: a two-substring proximity scan over a 6-line window, which a
+// comment, the detector line itself, or a VENT_SINK aimed at the real sink all satisfied
+// without the property holding.
+//
+// Every sanctioned function below takes PLAIN parameters on purpose: the audit finds a
+// region by brace-matching from the first `{` after its name, and a destructured
+// parameter would claim that brace instead of the body.
+
+const tmpDirs = []
+// Every mkdtemp in this file goes through here, so the runner can remove them all — and
+// so every temp path the suite produces is inside SAFE_ROOT, which is what makes the
+// containment check in launchServer a single test.
+let SAFE_ROOT = null
+async function tmpDir(prefix) {
+  const d = await mkdtemp(join(SAFE_ROOT || tmpdir(), prefix))
+  tmpDirs.push(d)
+  return d
+}
+// One unpredictable root per run. mkdtemp gives 0700 and a name nobody can guess, which
+// is what makes NEVER_SINK's "the parent directory does not exist" property un-flippable:
+// the old fixed path under tmpdir() could be pre-created by any local user, after which
+// the framing tests would have started writing real files (#156).
+SAFE_ROOT = await tmpDir('vent-suite-')
+// A sink whose PARENT is absent by construction, for the spawns that never call the tool:
+// should one ever reach the sink, the write fails into a calm sink-unavailable.
+const NEVER_SINK = join(SAFE_ROOT, 'never-written', 'vents.jsonl')
+// Stamped into every vent text this suite sends to a spawned server, so the sentinel test
+// at the bottom can prove none of them landed in the operator's real sink. A fresh uuid
+// per run means a pre-existing file cannot contain it, and a concurrent session's own
+// legitimate vent cannot be mistaken for one of ours.
+const RUN_MARKER = `vent-suite-${randomUUID()}`
+const ventText = (s) => `${s} [${RUN_MARKER}]`
+
+const within = (root, p) => resolve(p) === resolve(root) || resolve(p).startsWith(resolve(root) + sep)
+
+// THE only way this suite starts the server. It decides the child's sink itself — applied
+// AFTER the caller's env, so a caller cannot override it — and refuses any sink outside
+// SAFE_ROOT, which is what makes "a VENT_SINK pointed at the real sink" fail rather than
+// pass. `sink: null` selects the production path (VENT_SINK unset, so the child derives
+// DEFAULT_SINK from HOME) and therefore REQUIRES a redirected HOME inside SAFE_ROOT —
+// that is the same guarantee held one layer further out (#158 item 6).
+function launchServer(mode, opts) {
+  const o = opts || {}
+  const env = { ...process.env, ...(o.env || {}) }
+  delete env.VENT_SINK
+  if (o.sink === null) {
+    assert.ok(o.home && within(SAFE_ROOT, o.home),
+      `sink:null needs a HOME inside the per-run temp root, got ${o.home}`)
+    env.HOME = o.home
+    env.USERPROFILE = o.home
+  } else {
+    const sink = o.sink || NEVER_SINK
+    assert.ok(within(SAFE_ROOT, sink),
+      `VENT_SINK must stay inside the per-run temp root, got ${sink}`)
+    env.VENT_SINK = sink
+  }
+  if (mode === 'async') {
+    return spawn(process.execPath, [ENTRY], { stdio: ['pipe', 'pipe', 'pipe'], env })
+  }
+  if (mode === 'shell') {
+    return spawnSync('sh', ['-c', o.shell, process.execPath, ENTRY],
+      { input: o.input, encoding: 'utf8', env })
+  }
+  return spawnSync(process.execPath, [ENTRY], { input: o.input, encoding: 'utf8', env })
+}
+const runServer = (opts) => launchServer('sync', opts)
+const startServer = () => launchServer('async', {})
+
+// Sanctioned separately from launchServer because it can never start the server: the
+// executable is the literal 'git' and the cwd is always a per-run temp dir. Config is
+// isolated so the operator's own gitconfig (signing, templates, hooks) cannot reach it.
+function runGit(cwd, args) {
+  execFileSync('git', args, {
+    cwd,
+    stdio: 'ignore',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+  })
+}
+
+// A throwaway repo with a known remote and branch, so the SHIPPED realGit can be driven
+// for real instead of always being replaced by a stub (#158 item 4).
+async function probeRepo() {
+  const dir = await tmpDir('vent-git-')
+  runGit(dir, ['init', '-q'])
+  runGit(dir, ['remote', 'add', 'origin', 'git@github.com:schmug/vent-probe.git'])
+  runGit(dir, ['-c', 'user.email=probe@example.invalid', '-c', 'user.name=probe',
+    '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'probe'])
+  runGit(dir, ['branch', '-M', 'probe-branch'])
+  return dir
+}
+
+// A deps stub with a controllable clock, an in-memory sink, and a call tally. The tally is
+// how "a refusal is cheap" and "a rejected version never reaches the tool" become
+// assertions instead of prose: both are claims about deps that were NOT called.
 function stubDeps({ now = 1_000_000, writes = [], ok = true } = {}) {
   const d = {
-    now: () => d._now,
-    appendVent: (r) => { if (!ok) return false; writes.push(r); return true },
-    context: () => ({ cwd: '/p', repo: 'schmug/x', branch: 'main', session: 's1' }),
+    now: () => { d.calls.now++; return d._now },
+    appendVent: (r) => { d.calls.appendVent++; if (!ok) return false; writes.push(r); return true },
+    context: () => {
+      d.calls.context++
+      return { cwd: '/p', repo: 'schmug/x', branch: 'main', session: 's1' }
+    },
+    calls: { now: 0, appendVent: 0, context: 0 },
     _now: now,
     writes,
   }
@@ -137,9 +241,7 @@ test('through the real stdio entry point, every request bearing an id draws a re
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
   ].map((m) => JSON.stringify(m)).join('\n') + '\n'
-  const proc = spawnSync(process.execPath, [ENTRY], {
-    input, encoding: 'utf8', env: { ...process.env, VENT_SINK: NEVER_SINK },
-  })
+  const proc = runServer({ input })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const ids = proc.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).id)
   assert.deepEqual(ids, [0, 1, 2],
@@ -156,16 +258,18 @@ test('the shipped entry point records a real vent, and confirms only what it wro
   // VENT_SINK redirects the sink so the suite never appends to the operator's own
   // ~/.claude/vents.jsonl, and so CI — which has no ~/.claude at all — exercises the
   // same path everyone else does instead of being the one place this looks broken.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-e2e-'))
+  // CLAUDE_PROJECT_DIR points at a REAL git repo with a known remote and branch, so the
+  // context assertions below are facts about what the shipped realGit produced rather
+  // than "every field is present and may well be null" (#158 item 4).
+  const dir = await probeRepo()
   const sink = join(dir, 'vents.jsonl')
+  const text = ventText('real vent')
   const input = JSON.stringify(
-    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent', arguments: { text: 'real vent' } } }) + '\n'
+    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent', arguments: { text } } }) + '\n'
   // Assert the exit status BEFORE parsing: a crashed server otherwise surfaces as a
   // confusing JSON parse failure instead of as the crash it actually is (#155).
-  const proc = spawnSync(process.execPath, [ENTRY], {
-    input,
-    encoding: 'utf8',
-    env: { ...process.env, VENT_SINK: sink, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_SESSION_ID: 'sess-e2e' },
+  const proc = runServer({
+    input, sink, env: { CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_SESSION_ID: 'sess-e2e' },
   })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const reply = JSON.parse(proc.stdout.trim())
@@ -176,15 +280,16 @@ test('the shipped entry point records a real vent, and confirms only what it wro
   const lines = (await readFile(sink, 'utf8')).trim().split('\n')
   assert.equal(lines.length, 1, 'one vent is one line')
   const record = JSON.parse(lines[0])
-  assert.equal(record.text, 'real vent')
+  assert.equal(record.text, text)
   assert.equal(record.cwd, dir, 'cwd comes from CLAUDE_PROJECT_DIR, not process.cwd()')
   assert.equal(record.session, 'sess-e2e')
+  assert.equal(record.repo, 'schmug/vent-probe', 'the remote was read by the real git, not a stub')
+  assert.equal(record.branch, 'probe-branch')
   assert.ok(!Number.isNaN(Date.parse(record.ts)), `ts must be a real timestamp: ${record.ts}`)
-  for (const field of ['cwd', 'repo', 'branch', 'session']) {
-    assert.ok(field in record, `every context field is present: ${field}`)
-    assert.ok(record[field] === null || typeof record[field] === 'string',
-      `${field} is string|null, never undefined`)
-  }
+  assert.ok(Math.abs(Date.parse(record.ts) - Date.now()) < 60_000,
+    `ts comes from the real clock, not a placeholder: ${record.ts}`)
+  assert.deepEqual(Object.keys(record).sort(), ['branch', 'cwd', 'repo', 'session', 'text', 'ts'],
+    'exactly the assembled fields — no more, no fewer')
 })
 
 test('an unknown tool is a protocol error, not a vent outcome', () => {
@@ -210,10 +315,7 @@ test('a multi-byte character split across two stdin writes survives the framer (
   const cut = bytes.findIndex((b, i) => i > 0 && (b & 0xc0) === 0x80)
   assert.ok(cut > 0, 'the payload must contain a multi-byte character to split')
 
-  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
-  const proc = spawn(process.execPath, [entry], {
-    env: { ...process.env, VENT_SINK: '/dev/null' },
-  })
+  const proc = startServer()
   let out = ''
   proc.stdout.setEncoding('utf8')
   proc.stdout.on('data', (c) => { out += c })
@@ -237,18 +339,53 @@ test('an EPIPE on stdout is a quiet exit, not an uncaught exception (#155)', () 
   // server's own status is echoed to stderr because the pipeline's status is head's.
   const input = Array.from({ length: 400 }, (_, i) =>
     JSON.stringify({ jsonrpc: '2.0', id: i, method: 'tools/list' })).join('\n') + '\n'
-  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
-  const proc = spawnSync('sh',
-    ['-c', '{ "$0" "$1"; echo "SERVER_EXIT:$?" >&2; } | head -c 1', process.execPath, entry],
-    { input, encoding: 'utf8', env: { ...process.env, VENT_SINK: '/dev/null' } })
+  const proc = launchServer('shell', {
+    input, shell: '{ "$0" "$1"; echo "SERVER_EXIT:$?" >&2; } | head -c 1',
+  })
   assert.doesNotMatch(proc.stderr, /Unhandled 'error' event/,
     'EPIPE reached the default handler and crashed the process')
   assert.match(proc.stderr, /SERVER_EXIT:0/,
     `server must exit 0 on a closed pipe. stderr was:\n${proc.stderr}`)
 })
 
-test('SUPPORTED_VERSIONS covers both eras, modern first', () => {
-  assert.deepEqual(SUPPORTED_VERSIONS, ['2026-07-28', '2025-11-25'])
+test('every SUPPORTED_VERSION is genuinely served, and its era decides the shape (#158 item 8)', () => {
+  // What this replaces: a bare deepEqual of the constant against its own literal, which
+  // restated the list without proving a single version in it is served, or served the
+  // shape its era implies. Advertising a version through server/discover and then
+  // rejecting it is precisely the drift worth catching.
+  for (const v of SUPPORTED_VERSIONS) {
+    const deps = stubDeps()
+    const list = handle(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernMeta(v) }, makeState(), deps)
+    assert.equal(list.error, undefined, `${v} is advertised by server/discover but rejected`)
+    assert.deepEqual(list.result.tools, [TOOL])
+    const modern = MODERN_VERSIONS.includes(v)
+    assert.equal(list.result.resultType, modern ? 'complete' : undefined)
+    const called = call(makeState(), deps, { text: 'x' }, modernMeta(v))
+    assert.equal(called.result.isError, false)
+    assert.deepEqual(called.result.structuredContent, modern ? { recorded: true } : undefined)
+  }
+  // The ORDER is a wire fact — server/discover advertises this list verbatim, most
+  // preferred first — but derive the pin from the two era lists rather than restating a
+  // literal, so it stays true as versions come and go.
+  assert.deepEqual(SUPPORTED_VERSIONS, [...MODERN_VERSIONS, ...LEGACY_VERSIONS])
+})
+
+test('initialize answers EVERY requested version with a legacy one (#158 item 8)', () => {
+  // The third negotiation path, and the only one a real client walks today. Covered
+  // paths were "modern _meta" and "absent _meta"; what initialize does with each
+  // possible protocolVersion — supported-modern, supported-legacy, unknown, absent —
+  // was asserted for one value at a time and never as the whole space.
+  for (const requested of [...SUPPORTED_VERSIONS, '1900-01-01', undefined]) {
+    const params = requested === undefined ? {} : { protocolVersion: requested }
+    const r = handle({ jsonrpc: '2.0', id: 0, method: 'initialize', params }, makeState(), stubDeps())
+    assert.equal(r.error, undefined, 'initialize is the legacy door and never rejects')
+    assert.ok(LEGACY_VERSIONS.includes(r.result.protocolVersion),
+      `initialize answered ${JSON.stringify(requested)} with ${r.result.protocolVersion}, which is not a legacy version`)
+    if (LEGACY_VERSIONS.includes(requested)) {
+      assert.equal(r.result.protocolVersion, requested, 'a legacy request is echoed, not overridden')
+    }
+  }
 })
 
 test('MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly', () => {
@@ -346,33 +483,33 @@ test('a declared-but-empty version is rejected, not guessed at', () => {
   }
 })
 
-test('NO method answers a notification, including ones added later', () => {
+test('NO method answers a notification, including ones added later (#158 items 9, 11)', async () => {
   // server/discover was added ABOVE the trailing isNotification guard, so it answered a
   // notification with an id-less response that index.mjs would write to stdout — a
   // protocol violation. The guard now sits in FRONT of dispatch so every method inherits
   // it, including any added after this.
-  for (const method of ['server/discover', 'initialize', 'tools/list', 'tools/call',
-                        'notifications/initialized', 'no/such/method']) {
+  //
+  // "including ones added later" used to be enforced by a HARDCODED list — which is
+  // exactly the thing a method added later is absent from. Derive the list from the
+  // dispatcher instead, so a new `method === '...'` branch is covered the moment it is
+  // written rather than the moment somebody remembers to edit this array.
+  const src = await readFile(new URL('../packages/vent-server/server.mjs', import.meta.url), 'utf8')
+  const dispatched = [...new Set([...src.matchAll(/method === '([^']+)'/g)].map((m) => m[1]))]
+  assert.ok(dispatched.length >= 4,
+    `the dispatcher's methods could not be read from server.mjs: ${JSON.stringify(dispatched)}`)
+  for (const known of ['server/discover', 'initialize', 'tools/list', 'tools/call']) {
+    assert.ok(dispatched.includes(known), `${known} vanished from the dispatcher — or the scan broke`)
+  }
+  // Plus the notifications a real client actually sends. notifications/cancelled and
+  // notifications/progress reach the same guard as notifications/initialized, and until
+  // now only the last of the three was ever fed to it.
+  for (const method of [...dispatched, 'notifications/initialized', 'notifications/cancelled',
+                        'notifications/progress', 'no/such/method']) {
     const reply = handle(
       { jsonrpc: '2.0', method, params: { name: 'vent', arguments: { text: 'x' } } },
       makeState(), stubDeps())
     assert.equal(reply, null, `${method} as a notification must draw no reply`)
   }
-})
-
-test('every spawn in this suite is pinned to a temp VENT_SINK', async () => {
-  // The file-level invariant, ENFORCED rather than asserted in a comment. A spawn with no
-  // explicit env inherits the operator environment, and appendVent then falls back to
-  // DEFAULT_SINK (~/.claude/vents.jsonl). One such spawn shipped: it was harmless only
-  // because its request omitted `arguments` and short-circuited to invalid-input, so
-  // adding a text to that one request would have appended to the real sink for real.
-  const lines = (await readFile(fileURLToPath(import.meta.url), 'utf8')).split('\n')
-  const missing = []
-  lines.forEach((line, i) => {
-    if (!line.includes('spawnSync(process.execPath') && !line.includes('spawn(process.execPath')) return
-    if (!lines.slice(i, i + 6).join(' ').includes('VENT_SINK')) missing.push(i + 1)
-  })
-  assert.deepEqual(missing, [], 'these spawn lines carry no VENT_SINK env')
 })
 
 test('server/discover returns supported versions, capabilities, and serverInfo', () => {
@@ -440,9 +577,18 @@ test('an unsupported version is refused BEFORE the tool runs', () => {
   // and — more importantly — a version the server does not speak can never write a
   // record whose shape it does not understand.
   const deps = stubDeps()
-  const reply = call(makeState(), deps, { text: 'should never land' }, modernMeta('1900-01-01'))
+  const state = makeState()
+  const reply = call(state, deps, { text: 'should never land' }, modernMeta('1900-01-01'))
   assert.equal(reply.error.code, -32022)
   assert.equal(deps.writes.length, 0, 'nothing reaches the sink behind a rejected version')
+  // Asserting only "nothing was written" passes just as happily when the gate DOES run
+  // the tool and the write merely fails. What "BEFORE the tool runs" means is that
+  // callVent was never entered at all: no clock read, no context capture (two git
+  // subprocesses), no sink call — and no rate-limit window spent on a request the
+  // server refused, which is the part an unsupported-version flood would exploit.
+  assert.deepEqual(deps.calls, { now: 0, context: 0, appendVent: 0 },
+    'a rejected version reached callVent')
+  assert.deepEqual(state, makeState(), 'a rejected version must not consume the 90s window')
 })
 
 test('a version rejection never replies to a notification', () => {
@@ -474,7 +620,7 @@ test('legacy results carry NO modern-only fields', () => {
 // ---- the sink ----
 
 test('appendVent writes one parseable JSON line per record', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'vent-sink-'))
+  const dir = await tmpDir('vent-sink-')
   const p = join(dir, 'vents.jsonl')
   assert.equal(appendVent({ ts: 'T1', text: 'a' }, p), true)
   assert.equal(appendVent({ ts: 'T2', text: 'b' }, p), true)
@@ -489,17 +635,29 @@ test('appendVent returns false rather than throwing when the sink is unwritable'
   assert.equal(appendVent({ text: 'x' }, '/nonexistent-dir-xyz/vents.jsonl'), false)
 })
 
-test('a freshly created sink is not world-readable', async () => {
+test('a freshly created sink is not world-readable, under a PERMISSIVE umask (#158 item 7)', async () => {
   // The record carries cwd, repo, branch, session and free-form text that in practice
   // quotes paths, command output and error messages. Default creation mode is 0644 and
   // ~/.claude is 0755, so without an explicit mode this is readable by any local user.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-mode-'))
+  //
+  // The umask is the whole difficulty. Creation mode is masked by it, so under a
+  // restrictive one (0077 is common) a file created with NO explicit mode is already
+  // 0600 — the assertion below then passes whether or not appendVent asks for 0600, and
+  // silently stops pinning the fix. Forcing umask 0 makes the mode argument the only
+  // thing that can produce 0600, and the control file proves the umask really is
+  // permissive so this cannot pass for the wrong reason either way.
+  const dir = await tmpDir('vent-mode-')
   const p = join(dir, 'vents.jsonl')
+  const control = join(dir, 'control.txt')
+  const prev = process.umask(0o000)
   try {
+    await writeFile(control, 'x')
+    assert.equal((await stat(control)).mode & 0o777, 0o666,
+      'umask is not permissive here, so the 0600 assertion below would be vacuous')
     assert.equal(appendVent({ text: 'x' }, p), true)
     assert.equal((await stat(p)).mode & 0o777, 0o600, 'sink is owner-only')
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    process.umask(prev)
   }
 })
 
@@ -513,9 +671,9 @@ test('a short write cannot corrupt the NEXT record (#159)', async () => {
   // unparseable line — while the caller only ever reported `sink-unavailable` for the
   // first. A write can end short without throwing (ENOSPC partway, a signal), so the
   // returned byte count is the only signal there is, and appendFileSync discards it.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-short-'))
+  const dir = await tmpDir('vent-short-')
   const p = join(dir, 'vents.jsonl')
-  try {
+  {
     // The kernel accepting half the bytes, simulated at the one seam that can express it.
     // Only the FIRST write is short: the terminator that closes the damaged line has to
     // go through the same seam, so a stub that truncated everything would prove nothing.
@@ -534,22 +692,18 @@ test('a short write cannot corrupt the NEXT record (#159)', async () => {
       'the truncated fragment stays unparseable ON ITS OWN — one line lost, not two')
     assert.deepEqual(JSON.parse(lines[1]), { ts: 'T2', text: 'b' },
       'and the next record parses independently, unaffected by the damage before it')
-  } finally {
-    await rm(dir, { recursive: true, force: true })
   }
 })
 
 test('a write that throws outright is still a calm false, never an exception', async () => {
   // The repair path must not become a new way to throw: if the disk is full, the
   // terminator write fails too, and appendVent's contract is `false` either way.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-throw-'))
+  const dir = await tmpDir('vent-throw-')
   const p = join(dir, 'vents.jsonl')
-  try {
+  {
     const boom = () => { throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }) }
     assert.equal(appendVent({ ts: 'T1', text: 'x' }, p, boom), false)
     assert.equal((await readFile(p, 'utf8')), '', 'a failed write leaves no partial line behind')
-  } finally {
-    await rm(dir, { recursive: true, force: true })
   }
 })
 
@@ -565,7 +719,7 @@ test('an empty homedir() yields NO sink, never a cwd-relative one (#159)', async
   assert.equal(defaultSink('/home/someone'), join('/home/someone', '.claude', 'vents.jsonl'))
 
   // ...and the null sink is a clean refusal, not a write into the process cwd.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-home-'))
+  const dir = await tmpDir('vent-home-')
   await mkdir(join(dir, '.claude'))
   const cwd = process.cwd()
   try {
@@ -575,7 +729,6 @@ test('an empty homedir() yields NO sink, never a cwd-relative one (#159)', async
       'nothing was written into the cwd .claude/ that a relative default would have found')
   } finally {
     process.chdir(cwd)
-    await rm(dir, { recursive: true, force: true })
   }
 })
 
@@ -584,7 +737,7 @@ test('a vent text carrying newlines cannot forge a second JSONL record', async (
   // line-by-line by the weekly triage. A raw newline reaching the file would let one
   // vent plant a whole second record that triage reads as independently reported.
   // JSON.stringify escapes it, so one record is always exactly one line.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-forge-'))
+  const dir = await tmpDir('vent-forge-')
   const p = join(dir, 'vents.jsonl')
   const forged = 'legit\n' + JSON.stringify({ ts: 'T0', text: 'planted through the vent text' })
   assert.equal(appendVent({ ts: 'T1', text: forged }, p), true)
@@ -849,10 +1002,7 @@ test('agent-supplied fields other than text never reach the sink record', () => 
 // `replies` is the CUMULATIVE count expected once that chunk has been processed.
 function feedChunks(steps, { timeoutMs = 10_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [ENTRY], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, VENT_SINK: NEVER_SINK },
-    })
+    const child = startServer()
     let out = ''
     let err = ''
     let settled = false
@@ -919,12 +1069,11 @@ test('FRAMING: one chunk carrying blank lines, junk and several messages answers
     '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
     'not json at all',                                           // unparseable: skipped
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',    // no id: no reply
+    '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}',
     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
     '{"jsonrpc":"2.0","id":3,"method":"nope/nope"}',             // unknown method: still a reply
   ].join('\n') + '\n'
-  const proc = spawnSync(process.execPath, [ENTRY], {
-    input, encoding: 'utf8', env: { ...process.env, VENT_SINK: NEVER_SINK },
-  })
+  const proc = runServer({ input })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const replies = proc.stdout.trim().split('\n').map((l) => JSON.parse(l))
   assert.deepEqual(replies.map((r) => r.id), [1, 2, 3],
@@ -936,11 +1085,7 @@ test('FRAMING: an unparseable first line does not kill the server', () => {
   // Garbage arriving before anything valid is the case that decides whether the process
   // survives to serve the session at all. A throw here would take the server down and
   // every later vent with it.
-  const proc = spawnSync(process.execPath, [ENTRY], {
-    input: 'not json at all\n{"jsonrpc":"2.0","id":7,"method":"tools/list"}\n',
-    encoding: 'utf8',
-    env: { ...process.env, VENT_SINK: NEVER_SINK },
-  })
+  const proc = runServer({ input: 'not json at all\n{"jsonrpc":"2.0","id":7,"method":"tools/list"}\n' })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   assert.deepEqual(idsOf(proc.stdout), [7])
 })
@@ -950,10 +1095,8 @@ test('FRAMING: stdin ending mid-message drops the partial rather than parsing a 
   // incomplete — and the client that sent it has just closed the pipe, so no one is
   // left blocked on a reply. What must NOT happen is a parse of the truncation or a
   // hang: the server answers what it has and exits cleanly.
-  const proc = spawnSync(process.execPath, [ENTRY], {
+  const proc = runServer({
     input: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n{"jsonrpc":"2.0","id":2,"method":"tools/li',
-    encoding: 'utf8',
-    env: { ...process.env, VENT_SINK: NEVER_SINK },
   })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   assert.deepEqual(idsOf(proc.stdout), [1])
@@ -962,27 +1105,393 @@ test('FRAMING: stdin ending mid-message drops the partial rather than parsing a 
 test('FRAMING: the modern era survives the real stdio path, and a rejected version writes nothing', async () => {
   // Still spec-shaped, not client-verified (see the modern section's header): this shows
   // the modern branch is reachable through the framing, not that a client speaks it.
-  const dir = await mkdtemp(join(tmpdir(), 'vent-modern-'))
+  const dir = await tmpDir('vent-modern-')
   const sink = join(dir, 'vents.jsonl')
+  const text = ventText('modern e2e')
   const input = [
     { jsonrpc: '2.0', id: 1, method: 'server/discover', params: modernMeta() },
     {
       jsonrpc: '2.0', id: 2, method: 'tools/call',
-      params: { name: 'vent', arguments: { text: 'modern e2e' }, ...modernMeta('1900-01-01') },
+      params: { name: 'vent', arguments: { text }, ...modernMeta() },
+    },
+    {
+      jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'vent', arguments: { text: ventText('never') }, ...modernMeta('1900-01-01') },
     },
   ].map((m) => JSON.stringify(m)).join('\n') + '\n'
-  const proc = spawnSync(process.execPath, [ENTRY], {
-    input, encoding: 'utf8',
-    env: { ...process.env, VENT_SINK: sink, CLAUDE_PROJECT_DIR: dir },
-  })
+  const proc = runServer({ input, sink, env: { CLAUDE_PROJECT_DIR: dir } })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
-  const [discover, rejected] = proc.stdout.trim().split('\n').map((l) => JSON.parse(l))
+  const [discover, recorded, rejected] = proc.stdout.trim().split('\n').map((l) => JSON.parse(l))
   assert.equal(discover.result.resultType, 'complete')
   assert.deepEqual(discover.result.supportedVersions, SUPPORTED_VERSIONS)
+  // The modern SUCCESS path had never crossed the real entry point: the only modern
+  // tools/call down here was the version-rejected one below, so the modern result shape
+  // was proved by unit tests on handle() and by nothing that framed a reply on stdout
+  // (#158 item 13).
+  assert.equal(recorded.result.resultType, 'complete')
+  assert.deepEqual(recorded.result.structuredContent, { recorded: true })
+  assert.equal(recorded.result.isError, false)
+  assert.deepEqual(JSON.parse(recorded.result.content[0].text), { recorded: true })
   assert.equal(rejected.error.code, -32022)
-  await assert.rejects(() => readFile(sink, 'utf8'), /ENOENT/,
-    'a call behind a rejected version must never reach the sink')
-  await rm(dir, { recursive: true, force: true })
+  const lines = (await readFile(sink, 'utf8')).trim().split('\n')
+  assert.equal(lines.length, 1, 'a call behind a rejected version must never reach the sink')
+  assert.equal(JSON.parse(lines[0]).text, text)
+})
+
+// ---- suite discipline: the audit ----
+//
+// A PURE function over source text, so each of the five documented ways to satisfy the
+// old proximity scan without the property holding can be fed to it as a fixture and shown
+// to fail (#156). It works on source with comments, strings, template literals and regex
+// literals blanked out, which kills three of the five at a stroke: a comment cannot
+// satisfy it, the detector's own patterns cannot match themselves, and the fixtures below
+// cannot flag the very file that holds them.
+//
+// The rule is a WHITELIST, not a proximity heuristic: every call that can start a child
+// process must sit inside a region that is allowed to make it. Distance, call shape and
+// argument spelling are all irrelevant, which is what closes the "line-local 6-line
+// window" and "only two literal call shapes" holes together.
+const SPAWN_FNS = ['spawnSync', 'spawn', 'execFileSync', 'execFile', 'execSync', 'exec', 'fork']
+const MKDTEMP_FNS = ['mkdtempSync', 'mkdtemp']
+const SANCTIONED = [
+  { anchor: 'function launchServer', allows: SPAWN_FNS, requires: ['VENT_SINK'], forbids: ['DEFAULT_SINK'] },
+  { anchor: 'function runGit', allows: ['execFileSync'], requires: [], forbids: [] },
+  { anchor: 'function tmpDir', allows: MKDTEMP_FNS, requires: [], forbids: [] },
+]
+
+// Held as data rather than a character class so the class brackets cannot themselves
+// confuse the stripper when it is run over this very file.
+const REGEX_MAY_FOLLOW = ['(', ',', '=', ':', '[', '!', '&', '|', '?', ';', '+', '\n', '{', '}']
+// Blanks comments and every literal, preserving length and newlines so offsets and line
+// numbers survive. Length preservation is what lets the brace matcher below run on the
+// stripped text and still describe the real file.
+function stripNonCode(src) {
+  const out = src.split('')
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== '\n') out[k] = ' '
+  }
+  let i = 0
+  // A `/` opens a regex literal, rather than a division, only where a value cannot
+  // precede it. Tracking the last significant character is the standard heuristic and is
+  // exact for the constructs this file uses.
+  let prev = '\n'
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && src[i + 1] === '/') {
+      let j = src.indexOf('\n', i)
+      if (j < 0) j = src.length
+      blank(i, j); i = j; continue
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      let j = src.indexOf('*/', i + 2)
+      j = j < 0 ? src.length : j + 2
+      blank(i, j); i = j; continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue }
+        if (src[j] === c) break
+        j++
+      }
+      blank(i, j + 1); i = j + 1; prev = 'x'; continue
+    }
+    if (c === '/' && REGEX_MAY_FOLLOW.includes(prev)) {
+      let j = i + 1
+      let cls = false
+      let end = -1
+      while (j < src.length) {
+        const d = src[j]
+        if (d === '\\') { j += 2; continue }
+        if (d === '\n') break
+        if (d === '[') cls = true
+        else if (d === ']') cls = false
+        else if (d === '/' && !cls) { end = j; break }
+        j++
+      }
+      if (end > 0) { blank(i, end + 1); i = end + 1; prev = 'x'; continue }
+    }
+    if (!/\s/.test(c)) prev = c
+    i++
+  }
+  return out.join('')
+}
+
+// The body of the named function, as [start, end] offsets into the STRIPPED source.
+// Anchored on the name and brace-matched from the first following `{` — which is why
+// every sanctioned function takes plain, un-destructured parameters.
+function bodyRange(code, anchor) {
+  const at = code.indexOf(anchor)
+  if (at < 0) return null
+  const open = code.indexOf('{', at)
+  if (open < 0) return null
+  let depth = 0
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '{') depth++
+    else if (code[i] === '}' && --depth === 0) return [at, i]
+  }
+  return null
+}
+
+function auditSuiteSource(src) {
+  const code = stripNonCode(src)
+  const lineOf = (idx) => code.slice(0, idx).split('\n').length
+  const ranges = SANCTIONED.map((rule) => [rule, bodyRange(code, rule.anchor)])
+  const bad = []
+  for (const [rule, range] of ranges) {
+    if (!range) continue
+    const body = code.slice(range[0], range[1])
+    for (const needle of rule.requires) {
+      if (!body.includes(needle)) bad.push(`${rule.anchor} no longer sets ${needle}`)
+    }
+    for (const needle of rule.forbids) {
+      if (body.includes(needle)) bad.push(`${rule.anchor} references ${needle}`)
+    }
+  }
+  for (const name of [...SPAWN_FNS, ...MKDTEMP_FNS]) {
+    const re = new RegExp(String.raw`\b${name}\s*\(`, 'g')
+    for (const m of code.matchAll(re)) {
+      const home = ranges.find(([rule, range]) =>
+        range && m.index > range[0] && m.index < range[1] && rule.allows.includes(name))
+      if (!home) bad.push(`line ${lineOf(m.index)}: ${name}( outside every sanctioned region`)
+    }
+  }
+  return bad
+}
+
+// A minimal conforming source: a sanctioned region that owns its spawn and sets the sink.
+const CONFORMING = [
+  'function launchServer(mode, opts) {',
+  '  const env = { ...process.env, VENT_SINK: opts.sink }',
+  '  return spawnSync(process.execPath, [ENTRY], { env })',
+  '}',
+].join('\n')
+
+// Each entry is a source the audit MUST reject: the five ways, documented in #156, of
+// satisfying the old two-substring proximity scan while the property does not hold.
+const BYPASSES = [
+  ['1. the detector line matches itself', CONFORMING + '\n' + [
+    'const scan = (l) => l.includes("spawnSync(process.execPath") && l.includes("VENT_SINK")',
+    'const proc = spawnSync(process.execPath, [ENTRY], { input })',
+  ].join('\n')],
+  ['2. a comment inside the window satisfies it', CONFORMING + '\n' + [
+    '// VENT_SINK is surely set somewhere around here',
+    'const proc = spawnSync(process.execPath, [ENTRY], { input })',
+  ].join('\n')],
+  ['3. VENT_SINK pointed at the operator real sink', [
+    'function launchServer(mode, opts) {',
+    '  const env = { ...process.env, VENT_SINK: DEFAULT_SINK }',
+    '  return spawnSync(process.execPath, [ENTRY], { env })',
+    '}',
+  ].join('\n')],
+  ['4. the env sits outside the fixed 6-line window', CONFORMING + '\n' + [
+    'const proc = spawnSync(process.execPath, [ENTRY], {',
+    '  input,', '  encoding: "utf8",', '  //', '  //', '  //', '  //', '  //',
+    '  env: { VENT_SINK: sink },',
+    '})',
+  ].join('\n')],
+  ['5. a spawn form the scan never recognised', CONFORMING + '\n' + [
+    'const proc = execFileSync(process.execPath, [ENTRY], { env: { VENT_SINK: sink } })',
+  ].join('\n')],
+  ['6. a sanctioned region that stopped setting the sink', [
+    'function launchServer(mode, opts) {',
+    '  return spawnSync(process.execPath, [ENTRY], { env: process.env })',
+    '}',
+  ].join('\n')],
+]
+
+test('SUITE DISCIPLINE: this file starts the server only through launchServer (#156)', async () => {
+  const src = await readFile(fileURLToPath(import.meta.url), 'utf8')
+  assert.deepEqual(auditSuiteSource(src), [],
+    'a spawn or a mkdtemp in this file skips its sanctioned region')
+})
+
+test('SUITE DISCIPLINE: the audit rejects every documented bypass of the old scan (#156)', () => {
+  // The negative control comes FIRST and is not optional: an audit that returned a
+  // violation for everything would satisfy the loop below while enforcing nothing, which
+  // is the same "passes for the wrong reason" defect the rest of this work is about.
+  assert.deepEqual(auditSuiteSource(CONFORMING), [], 'a conforming source must be accepted')
+  // ...and distance inside a sanctioned region is irrelevant, where the old scan gave up
+  // after six lines.
+  const farApart = [
+    'function launchServer(mode, opts) {',
+    '  const sink = opts.sink',
+    ...Array.from({ length: 20 }, () => '  //'),
+    '  const env = { ...process.env, VENT_SINK: sink }',
+    '  return spawnSync(process.execPath, [ENTRY], { env })',
+    '}',
+  ].join('\n')
+  assert.deepEqual(auditSuiteSource(farApart), [], 'a sanctioned region is not line-local')
+
+  for (const [name, src] of BYPASSES) {
+    assert.ok(auditSuiteSource(src).length > 0, `bypass was accepted: ${name}`)
+  }
+})
+
+test('SUITE DISCIPLINE: launchServer refuses any sink outside the per-run temp root (#156)', () => {
+  // The runtime half of bypass 3. A source scan can only ever see the SPELLING of a sink;
+  // this rejects the VALUE, before any child is spawned, so no argument about what the
+  // path is called can get a spawn past it.
+  // DEFAULT_SINK is null on a host with no usable home (#159), where there is no real
+  // sink to aim at; name the path it WOULD be so this stays a test either way.
+  const realSink = DEFAULT_SINK || defaultSink('/home/operator')
+  assert.throws(() => launchServer('sync', { sink: realSink }), /temp root/,
+    'the operator real sink must be refused outright')
+  assert.throws(() => launchServer('sync', { sink: join(tmpdir(), 'vents.jsonl') }), /temp root/,
+    'a temp path outside THIS run is still not ours to write')
+  assert.throws(() => launchServer('sync', { sink: null }), /HOME inside/,
+    'the production sink path needs a redirected HOME, or it lands in ~/.claude')
+  assert.throws(() => launchServer('sync', { sink: null, home: tmpdir() }), /HOME inside/)
+})
+
+// ---- the test-strength sweep (#158) ----
+//
+// Each test below replaces a claim that was made in a comment, a doc, or an assertion
+// that could not fail. The bar every one of them had to clear: revert the behaviour it
+// describes and watch it go red. Where a claim was already enforced elsewhere it is NOT
+// restated here — a redundant test is not coverage either.
+
+// Item 1: the -32603 backstop is unreachable from any stdin a test can write, because
+// handle() is total today. The catch could be deleted with the suite staying green while
+// THREAT_MODEL.md §1 listed it as a control. Driving the framer with an INJECTED dispatch
+// is what makes it testable at all — which is why framing.mjs exists.
+
+test('a throwing dispatch answers an id-bearing request with -32603 (#158 item 1)', () => {
+  const out = []
+  const feed = makeFramer({ dispatch: () => { throw new Error('boom') }, write: (l) => out.push(l) })
+  feed(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }) + '\n'))
+  assert.equal(out.length, 1, 'a request bearing an id must ALWAYS draw a reply')
+  assert.deepEqual(JSON.parse(out[0]),
+    { jsonrpc: '2.0', id: 4, error: { code: -32603, message: 'Internal error' } })
+})
+
+test('a throwing dispatch still answers NOTHING to a notification (#158 item 1)', () => {
+  // The backstop must not overcorrect: a reply with no id is a protocol violation, and
+  // index.mjs would write it straight to stdout.
+  const out = []
+  const feed = makeFramer({ dispatch: () => { throw new Error('boom') }, write: (l) => out.push(l) })
+  feed(Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled' }) + '\n'))
+  assert.deepEqual(out, [])
+})
+
+test('a fifth vent outcome cannot be added quietly (#158 item 2)', async () => {
+  // Asserted in three places and enforced by nothing: the four-outcome tests pin the four
+  // they already know, and a FIFTH refusal reason would not have made any of them fail.
+  // Read the reasons out of the dispatcher instead, so the claim is about server.mjs
+  // rather than about this file's memory of it.
+  const src = await readFile(new URL('../packages/vent-server/server.mjs', import.meta.url), 'utf8')
+  const reasons = [...new Set([...src.matchAll(/reason: '([a-z-]+)'/g)].map((m) => m[1]))].sort()
+  assert.deepEqual(reasons, ['invalid-input', 'rate-limited', 'sink-unavailable'],
+    'server.mjs produces a refusal reason this suite never exercises')
+  const state = makeState()
+  const seen = [
+    call(state, stubDeps(), { text: 'ok' }),
+    call(state, stubDeps(), { text: 'again' }),
+    call(makeState(), stubDeps({ ok: false }), { text: 'x' }),
+    call(makeState(), stubDeps(), {}),
+  ].map(payloadOf)
+  assert.equal(seen.filter((o) => o.recorded === true).length, 1, 'exactly one success outcome')
+  assert.deepEqual([...new Set(seen.filter((o) => !o.recorded).map((o) => o.reason))].sort(), reasons,
+    'every refusal reason server.mjs can produce is exercised right here')
+})
+
+test('a refusal never pays for deps.context() (#158 item 3)', () => {
+  // "Refusals are cheap" is an availability control, not a nicety: deps.context() spawns
+  // two git subprocesses, so a refusal that still called it would hand the 43-vent
+  // apology spiral on record roughly 700ms of real work per REJECTED vent. Nothing
+  // asserted the skip, so moving the context capture above the guards stayed green.
+  const invalid = stubDeps()
+  call(makeState(), invalid, { text: '   ' })
+  assert.deepEqual(invalid.calls, { now: 0, context: 0, appendVent: 0 },
+    'invalid-input is decided before the clock is even read')
+
+  const state = makeState()
+  const limited = stubDeps()
+  call(state, limited, { text: 'first' })
+  assert.equal(limited.calls.context, 1, 'the accepted vent does capture context')
+  call(state, limited, { text: 'second' })
+  assert.equal(limited.calls.context, 1, 'the rate-limited refusal captured none')
+  assert.equal(limited.calls.appendVent, 1, 'and never reached the sink')
+})
+
+test('captureContext runs the REAL git against a real repo (#158 item 4)', async () => {
+  // Every other context test replaces realGit with a stub, so the shipped git path was
+  // never executed on a success path and the e2e context assertions could only say
+  // "present, possibly null". This calls captureContext with NO gitFn argument.
+  const dir = await probeRepo()
+  assert.deepEqual(captureContext({ CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_SESSION_ID: 's' }), {
+    cwd: dir, repo: 'schmug/vent-probe', branch: 'probe-branch', session: 's',
+  })
+})
+
+test('session state is process-lifetime, proved in ONE spawned process (#158 item 5)', async () => {
+  // MAX_PER_SESSION means what it says only because the host spawns one server per
+  // session, so process-lifetime state IS session state. Every rate-limit test drove
+  // handle() with a state object the test itself owned, which proves the limiter and
+  // nothing about the wiring: a per-message state in index.mjs would have recorded both
+  // of the vents below and stayed green.
+  //
+  // The 90s window is what makes the per-session CAP unreachable here without waiting it
+  // out ten times over; the cap itself stays a unit test, and this pins the sharing.
+  const dir = await tmpDir('vent-session-')
+  const sink = join(dir, 'vents.jsonl')
+  const input = [1, 2].map((i) => JSON.stringify({
+    jsonrpc: '2.0', id: i, method: 'tools/call',
+    params: { name: 'vent', arguments: { text: ventText(`vent ${i}`) } },
+  })).join('\n') + '\n'
+  const proc = runServer({ input, sink, env: { CLAUDE_PROJECT_DIR: dir } })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  const payloads = proc.stdout.trim().split('\n')
+    .map((l) => JSON.parse(JSON.parse(l).result.content[0].text))
+  assert.deepEqual(payloads, [{ recorded: true }, { recorded: false, reason: 'rate-limited' }],
+    'the second vent saw the first one state; a fresh state per message would record both')
+  const lines = (await readFile(sink, 'utf8')).trim().split('\n')
+  assert.equal(lines.length, 1, 'and only the accepted vent reached the sink')
+})
+
+test('with VENT_SINK unset the server writes to DEFAULT_SINK under HOME (#158 item 6)', async () => {
+  // The PRODUCTION sink path. Every other integration test sets VENT_SINK, so the
+  // `process.env.VENT_SINK || undefined` fallback — the branch every real session takes —
+  // had no coverage at all: appendVent's default parameter could have been dropped and
+  // the suite would not have noticed.
+  //
+  // HOME is redirected into the per-run temp root instead, which is how this exercises
+  // the real fallback without appending to the operator's own ~/.claude/vents.jsonl.
+  const home = await tmpDir('vent-home-')
+  await mkdir(join(home, '.claude'))
+  const text = ventText('production sink path')
+  const input = JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent', arguments: { text } },
+  }) + '\n'
+  const proc = runServer({ input, sink: null, home, env: { CLAUDE_PROJECT_DIR: home } })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  assert.deepEqual(JSON.parse(JSON.parse(proc.stdout.trim()).result.content[0].text), { recorded: true })
+  const written = await readFile(join(home, '.claude', 'vents.jsonl'), 'utf8')
+  assert.equal(JSON.parse(written.trim()).text, text,
+    'the vent landed at homedir()/.claude/vents.jsonl, with no VENT_SINK in sight')
+})
+
+// Registered LAST on purpose: it is the whole-run verdict on the property the sanctioned
+// launcher exists to hold. RUN_MARKER is minted fresh each run, so a pre-existing file
+// cannot contain it and a concurrent session's own legitimate vent cannot be mistaken for
+// one of ours — the check stays exact without being flaky.
+test("SUITE DISCIPLINE: nothing this run wrote reached the operator's real sink (#156)", async () => {
+  const marked = []
+  const walk = async (dir) => {
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name)
+      if (e.isDirectory()) { if (e.name !== '.git') await walk(full); continue }
+      if ((await readFile(full, 'utf8')).includes(RUN_MARKER)) marked.push(full)
+    }
+  }
+  await walk(SAFE_ROOT)
+  // Anti-vacuity: if no sink in this run carries the marker, the assertion below is
+  // asserting nothing at all.
+  assert.ok(marked.length >= 3,
+    `expected several marked sinks under the per-run root, found ${marked.length}`)
+  const real = DEFAULT_SINK ? await readFile(DEFAULT_SINK, 'utf8').catch(() => '') : ''
+  assert.ok(!real.includes(RUN_MARKER),
+    `this suite appended to the operator's real sink at ${DEFAULT_SINK}`)
 })
 
 // ---- runner ----
@@ -991,5 +1500,9 @@ for (const [name, fn] of tests) {
   try { await fn(); console.log('PASS', name) }
   catch (e) { failed++; console.error('FAIL', name, '\n  ', e.message) }
 }
+// #158 item 14: three tests used to leave their mkdtemp directories behind on every run.
+// Removing SAFE_ROOT removes every temp path the suite made, because tmpDir puts them all
+// inside it; the loop is belt-and-braces for the root itself.
+for (const d of tmpDirs) await rm(d, { recursive: true, force: true })
 console.log(failed ? `\n${failed}/${tests.length} FAILED` : `\nall ${tests.length} passed`)
 process.exit(failed ? 1 : 0)
