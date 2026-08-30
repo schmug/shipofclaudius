@@ -322,7 +322,7 @@ node tests/session-end-concerns.test.mjs &&
 node tests/session-end-concerns.test.mjs && npm test
 ```
 
-Expected: the new suite's 3 tests PASS, and the full chain passes with a count 3 higher than before.
+Expected: the new suite's 3 tests PASS, and the full chain passes with a count 3 higher than the base. The base count is **26** as of `165a6a6` — re-measure on the base commit rather than trusting this number, per CLAUDE.md.
 
 - [ ] **Step 6: Commit**
 
@@ -467,7 +467,7 @@ Match its frontmatter and cadence fields exactly — do not invent a schema.
 
 - [ ] **Step 2: Write the triage task**
 
-Body must cover, in order: read open `concern` issues plus any spool backlog; route each item (durable unknown → Q&A board post per the `ask-board` skill; tooling friction → the vent log once it exists; real defect → an issue in the working repo bodied per `/issue`; nothing actionable → close with a one-line reason); close the session issue once every box is routed; truncate drained spool lines. Report counts filed/routed/closed so utilization is self-measuring against the §9 kill criterion.
+Body must cover, in order: read open `concern` issues plus any spool backlog; route each item (durable unknown → Q&A board post per the `ask-board` skill; tooling friction → the vent tool (`mcp__plugin_shipofclaudius_vent__vent`, shipped in #151-#153); real defect → an issue in the working repo bodied per `/issue`; nothing actionable → close with a one-line reason); close the session issue once every box is routed; truncate drained spool lines. Report counts filed/routed/closed so utilization is self-measuring against the §9 kill criterion.
 
 - [ ] **Step 3: Verify it is registered**
 

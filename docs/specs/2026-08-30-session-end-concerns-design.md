@@ -27,7 +27,7 @@ still assumed — do not promote anything across that line without running the c
 | Channel | Bar | Sink | Takes a session-end concern? |
 |---|---|---|---|
 | Question board (`ask-board`) | Three-part gate, self-assessed at write time | Q&A discussions in `schmug/agent-notes` | **No** — fails gate test 3 |
-| Vent tool (specced `2026-08-24`, unbuilt) | None; triage-time gate | `~/.claude/vents.jsonl` → weekly triage | **No** — scoped to tooling friction |
+| Vent tool (**shipped** — #151, #152, #153) | None; triage-time gate | `~/.claude/vents.jsonl` → weekly triage | **No** — scoped to tooling friction |
 
 The board's gate test 3 is "a future session in different context plausibly could answer it."
 A session-end concern fails it by construction: nobody is better positioned than the agent
@@ -114,7 +114,7 @@ stop. Revisit only if main-agent non-compliance shows up in practice.
                               ▼
                   weekly scheduled triage routes onward:
                   durable unknown → Q&A board post
-                  tooling friction → vent log (once built)
+                  tooling friction → the vent tool
                   real defect      → issue in the working repo
                   else             → close
 ```
@@ -258,8 +258,8 @@ category — and therefore every future session's injected context — untouched
 A scheduled task, weekly, following the `board-utilization-audit` pattern.
 
 1. Read open `concern`-labelled issues in `schmug/agent-notes`, plus any spool backlog.
-2. Route each item onward: durable unknown → Q&A board post; tooling friction → vent log
-   (once that exists); real defect → issue in the working repo, bodied per `/issue`; nothing
+2. Route each item onward: durable unknown → Q&A board post; tooling friction → the vent
+   tool; real defect → issue in the working repo, bodied per `/issue`; nothing
    actionable → close with a one-line reason.
 3. Close the session issue when every box is routed or dismissed.
 
