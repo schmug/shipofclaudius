@@ -255,7 +255,14 @@ category — and therefore every future session's injected context — untouched
 
 ## 6. Triage
 
-A scheduled task, weekly, following the `board-utilization-audit` pattern.
+A scheduled task, weekly, following the `board-utilization-audit` pattern. Written to
+`~/.claude/scheduled-tasks/concern-triage/SKILL.md` (runtime state — `~/.claude` is not a git
+repo, so it lives outside this repo by necessity).
+
+**Writing the file does not schedule it.** Registration is a separate step via
+`mcp__scheduled-tasks__create_scheduled_task`; an unregistered directory is inert and several
+already exist in this environment. As of 2026-08-30 this one is **written but unregistered**,
+pending approval — a recurring task is persistent configuration.
 
 1. Read open `concern`-labelled issues in `schmug/agent-notes`, plus any spool backlog.
 2. Route each item onward: durable unknown → Q&A board post; tooling friction → the vent

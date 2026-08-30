@@ -482,11 +482,24 @@ Match its frontmatter and cadence fields exactly — do not invent a schema.
 
 Body must cover, in order: read open `concern` issues plus any spool backlog; route each item (durable unknown → Q&A board post per the `ask-board` skill; tooling friction → the vent tool (`mcp__plugin_shipofclaudius_vent__vent`, shipped in #151-#153); real defect → an issue in the working repo bodied per `/issue`; nothing actionable → close with a one-line reason); close the session issue once every box is routed; truncate drained spool lines. Report counts filed/routed/closed so utilization is self-measuring against the §9 kill criterion.
 
-- [ ] **Step 3: Verify it is registered**
+- [ ] **Step 3: Verify it is registered — `ls` is NOT sufficient**
+
+Creating the directory does **not** register anything. Verified 2026-08-30: after writing
+`~/.claude/scheduled-tasks/concern-triage/SKILL.md`, the task was absent from
+`mcp__scheduled-tasks__list_scheduled_tasks`, and several long-standing directories
+(`branch-prune`, `pr-check`, `sentry-triage`, `worktree-cleanup`, …) are likewise inert —
+present on disk, registered nowhere, never running.
+
+Registration requires `mcp__scheduled-tasks__create_scheduled_task` with a `cronExpression`,
+and it **overwrites** `SKILL.md` with the `prompt` argument, so pass the full body.
 
 ```bash
-ls ~/.claude/scheduled-tasks/concern-triage/
+# verification that actually proves it
+# mcp__scheduled-tasks__list_scheduled_tasks  -> the entry must appear with a nextRunAt
 ```
+
+Creating a recurring task is persistent configuration; get explicit approval before
+registering it.
 
 - [ ] **Step 4: Commit the spec update**
 
