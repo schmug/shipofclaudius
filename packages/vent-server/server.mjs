@@ -6,6 +6,9 @@ export const SUPPORTED_VERSIONS = ['2026-07-28', '2025-11-25']
 // client can negotiate DOWN to 2025-11-25 — and that revision defines neither
 // resultType nor structuredContent. Presence of _meta is NOT the era signal.
 export const MODERN_VERSIONS = ['2026-07-28']
+// The complement, DERIVED rather than written out: a version added to MODERN_VERSIONS
+// leaves the `initialize` door in the same edit, so the two lists cannot drift apart.
+export const LEGACY_VERSIONS = SUPPORTED_VERSIONS.filter((v) => !MODERN_VERSIONS.includes(v))
 export const SERVER_INFO = { name: 'vent', version: '1.0.0' }
 export const RATE_WINDOW_MS = 90_000
 export const MAX_PER_SESSION = 10
@@ -75,9 +78,16 @@ export function handle(msg, state, deps) {
     })
   }
   if (method === 'initialize') {
+    // `initialize` IS the legacy handshake — the modern revision removed it — so a client
+    // arriving here is a legacy-era client and may only negotiate a LEGACY version (design
+    // spec §4.1: "an `initialize` request selects legacy semantics for that stdio process").
+    // Gating on LEGACY_VERSIONS, not SUPPORTED_VERSIONS, is the whole point: the latter let
+    // a client ask for 2026-07-28 through this door and be told yes, after which every
+    // subsequent request — carrying no _meta — was served the LEGACY shape. Answering a
+    // modern request with 2025-11-25 negotiates it DOWN, which is ordinary legacy behaviour.
     const requested = params?.protocolVersion
     return ok(id, {
-      protocolVersion: SUPPORTED_VERSIONS.includes(requested) ? requested : '2025-11-25',
+      protocolVersion: LEGACY_VERSIONS.includes(requested) ? requested : '2025-11-25',
       capabilities: { tools: {} },
       serverInfo: SERVER_INFO,
     })

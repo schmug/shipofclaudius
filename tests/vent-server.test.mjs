@@ -22,7 +22,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, RATE_WINDOW_MS, MAX_PER_SESSION,
+  handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, MODERN_VERSIONS, LEGACY_VERSIONS,
+  RATE_WINDOW_MS, MAX_PER_SESSION,
 } from '../packages/vent-server/server.mjs'
 import { appendVent, DEFAULT_SINK } from '../packages/vent-server/sink.mjs'
 import { captureContext, parseRepo } from '../packages/vent-server/context.mjs'
@@ -247,6 +248,57 @@ test('an EPIPE on stdout is a quiet exit, not an uncaught exception (#155)', () 
 
 test('SUPPORTED_VERSIONS covers both eras, modern first', () => {
   assert.deepEqual(SUPPORTED_VERSIONS, ['2026-07-28', '2025-11-25'])
+})
+
+test('MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly', () => {
+  // The drift this exists to catch (#157): add a version to SUPPORTED_VERSIONS and forget
+  // MODERN_VERSIONS, and it is silently served the LEGACY shape AND silently allowed
+  // through the `initialize` door. Pin the exact partition so either omission fails here.
+  for (const v of MODERN_VERSIONS) {
+    assert.ok(SUPPORTED_VERSIONS.includes(v), `MODERN_VERSIONS lists ${v}, absent from SUPPORTED_VERSIONS`)
+  }
+  assert.deepEqual(MODERN_VERSIONS, ['2026-07-28'])
+  assert.deepEqual(LEGACY_VERSIONS, ['2025-11-25'])
+  assert.deepEqual(
+    [...MODERN_VERSIONS, ...LEGACY_VERSIONS].sort(), [...SUPPORTED_VERSIONS].sort(),
+    'every supported version must be classified into exactly one era',
+  )
+})
+
+test('the legacy `initialize` handshake NEVER negotiates a modern version (#157)', () => {
+  // Decision #157, implementing design spec §4.1 verbatim: "an `initialize` request selects
+  // legacy semantics for that stdio process." `initialize` IS the legacy handshake — the
+  // modern revision removed it outright — so a client arriving through that door is by
+  // definition a legacy-era client and must be answered with a legacy version, even when it
+  // asks for a modern one. Negotiating a client DOWN is ordinary, legal legacy behaviour.
+  //
+  // What this pins: the server used to echo 2026-07-28 straight back and then serve legacy
+  // shapes for the rest of the session — it agreed to an era it never went on to speak.
+  const state = makeState()
+  const init = handle(
+    { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2026-07-28' } },
+    state, stubDeps())
+  assert.equal(init.result.protocolVersion, '2025-11-25')
+  assert.ok(!MODERN_VERSIONS.includes(init.result.protocolVersion),
+    'the legacy handshake must never hand back a version whose shapes it will not serve')
+
+  // ...and what follows must match what was negotiated.
+  const list = handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+    state, stubDeps())
+  assert.deepEqual(Object.keys(list.result), ['tools'])
+  assert.equal(list.result.resultType, undefined)
+})
+
+test('_meta WITHOUT a protocolVersion key is legacy by assertion, not by accident', () => {
+  // The shape a real legacy client actually produces: _meta carrying only a progressToken.
+  // The version key is ABSENT, and absence means "no era declared" => legacy. A declared-
+  // but-empty version ('' or null) is a different case entirely and is refused -32022.
+  const reply = handle(
+    { jsonrpc: '2.0', id: 0, method: 'tools/list',
+      params: { _meta: { 'io.modelcontextprotocol/progressToken': 'abc' } } },
+    makeState(), stubDeps())
+  assert.deepEqual(Object.keys(reply.result), ['tools'])
+  assert.equal(reply.result.resultType, undefined)
 })
 
 // ---- the modern (2026-07-28) era ----

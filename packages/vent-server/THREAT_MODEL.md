@@ -167,6 +167,22 @@ means legacy, present and unsupported means `-32022` with `data.supported`.
   `null` are declarations, not absences, and get `-32022` rather than a guessed era. Only an
   absent `_meta` key means "legacy client". Pinned by `a declared-but-empty version is
   rejected, not guessed at`.
+- The era is selected **per request, never per session** — and `initialize` may only ever
+  negotiate a **legacy** version. Decided in #157, implementing design spec §4.1 as written:
+  "an `initialize` request selects legacy semantics for that stdio process." `initialize` IS
+  the legacy handshake — the modern revision removed it — so a client arriving through that
+  door is a legacy-era client, and answering a modern request with `2025-11-25` negotiates it
+  DOWN, which is ordinary legacy behaviour. The gate reads `LEGACY_VERSIONS`, which is
+  *derived* from `SUPPORTED_VERSIONS` minus `MODERN_VERSIONS` so the lists cannot drift.
+
+  The alternative — letting `initialize` set a session-wide era — was rejected: it
+  contradicts §4.1 and reintroduces exactly the session state the modern era removed. What
+  was actually broken was narrower than either option: the gate read `SUPPORTED_VERSIONS`, so
+  a client could ask for `2026-07-28` through the legacy door, be told **yes**, and then be
+  served legacy shapes for the rest of the session — the server agreed to an era it never
+  went on to speak. Pinned by `the legacy initialize handshake NEVER negotiates a modern
+  version`, by `_meta WITHOUT a protocolVersion key is legacy by assertion, not by accident`,
+  and by `MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly`.
 
 **Written to spec, never observed.** No modern client exists to test against. Everything
 above proves our replies match the published shapes; none of it is evidence that a
