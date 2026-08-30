@@ -220,7 +220,7 @@ The Workflow **runtime** itself — what `agent()` actually grants a subagent, t
 The `tests/` directory holds **offline simulators**. They wrap each workflow's source in an `AsyncFunction` with stubbed runtime globals (`agent()` / `parallel()` / `phase()` / `log()` / `workflow()`), so orchestration logic — dedup precedence, fail-open behavior, layer gating, diff-scoping & mode decision, coverage wiring, author resolution, schema satisfiability, the **sealed-bundle contract** (content-addressed fingerprint stability + line-independence, bundle shape, `priorBundle` dedup + coverage delta, and a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) projection validated by a dependency-free conformance checker), and the **prompt-injection hardening** (untrusted-text fencing + read-only `agentType` call shapes, see **Security model**) — is exercised in milliseconds at **zero token cost**. They use only Node built-ins (`node:fs/promises`, `node:assert/strict`); no dependencies to install.
 
 ```bash
-npm test          # runs all seventeen simulator suites, the gate unit tests, and the plugin-integrity check
+npm test          # runs all seventeen simulator suites, the gate unit tests, the specificity suites, and the plugin-integrity check
 # or individually:
 node tests/sarif-validator.test.mjs
 node tests/dss-sim.test.mjs
@@ -241,10 +241,14 @@ node tests/merge-pr-with-gate.test.mjs
 node tests/factory-gate.test.mjs
 node tests/factory-issue-fix-sim.test.mjs
 node tests/factory-land-sim.test.mjs
+node tests/specificity-fast.test.mjs
+node tests/specificity-render.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
 Requires Node ≥ 18 (developed on Node 22). `npm test` prints the live total and must end `0 failing`; the standing contract is that the count only ever goes **up**. It is deliberately not restated here — a suite cannot run the suites, so a hardcoded total is a claim no check can enforce, and this one had drifted by 18 across four terms before anyone noticed. `tests/plugin-integrity.test.mjs` now fails the build if a total is pinned back into this file.
+
+The two `specificity-*` suites are the other non-simulators, for the same reason — the scorer makes no model calls, so there is nothing to stub. `specificity-fast` drives the real hook process end to end (including its gate-mode `exit 2`), and `specificity-render` runs the real `render.sh` + `render.jq` against temp cache files, so the sh/jq plumbing is exercised rather than reimplemented. Both are skipped gracefully where `jq` is absent.
 
 `tests/factory-gate.test.mjs` is the odd one out: the merge gate is pure, model-free code, so there is nothing to simulate — those are ordinary unit tests, and for every condition there is a case proving that missing, ambiguous, or unknown input **fails closed**. The two factory sims additionally import the **real** gate and assert across the boundary: `factory-issue-fix`'s `evidence` block is fed to the real `checkFixtureEvidence`, and `factory-land`'s in-code condition list is compared against the package's `CONDITION_ORDER` — so the gate and its callers cannot drift apart silently.
 
@@ -276,6 +280,56 @@ L1  GATE        packages/factory-gate (pure code, NO model)     ← runs from ma
 State is the issue label set, so the loop is restartable, inspectable, and interruptible: `needs-repro → repro-ok → diagnosed → fix-proposed →` *(human applies `fix-verified`)* `→ gate → merge`, with `repro-failed` / `not-a-bug` / `needs-you` as terminal escapes and `pipeline-paused` as a repo-wide kill switch checked first on every run. `factory-issue-fix` never writes labels itself — it returns a typed `transition` for the driver to apply with a plain `gh` call, which keeps the state machine deterministic and its model-mediated write surface at exactly one agent.
 
 **Adopting it in another repo:** copy the three templates in [`.factory/templates/`](.factory/templates/) and follow the order in its [README](.factory/templates/README.md). Two things gate the ceiling, not the plumbing: a **reproduction harness** (without one the reproduce phase has no mechanical definition of done, and `requireFixtureEvidence` must stay off) and a **rollback path** (a factory that can land changes unattended in a repo whose deploys cannot be reverted from GitHub is not a factory).
+
+## Prompt specificity scorer
+
+`packages/specificity/` scores each user turn for how much it narrows the space of acceptable outputs **given the context already in the window**, and shows the result in the status line. A prompt string has no specificity on its own: "fix the timeout" is fully grounded when exactly one timeout is in the window and vacuous when none is, so every number here is conditional on the transcript and the repo, and none of them transfer between sessions.
+
+Milestone **M1** is what ships today — the fast path and the status line, **no model calls anywhere**, Node built-ins only. The full design, the remaining milestones, and the open questions live in [`docs/specs/2026-08-30-prompt-specificity.md`](docs/specs/2026-08-30-prompt-specificity.md).
+
+**Installing the plugin does not turn this on.** It ships as scripts you register yourself, for two reasons: a `UserPromptSubmit` hook in `hooks/hooks.json` would fire in every session of every project the plugin is enabled in, and `statusLine` is a user/project setting a plugin cannot claim at all. Wiring it up is a deliberate two-part edit to your own settings:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ {
+        "type": "command",
+        "command": "node",
+        "args": ["${CLAUDE_PROJECT_DIR}/packages/specificity/bin/fast.mjs"],
+        "timeout": 10,
+        "statusMessage": "scoring prompt"
+      } ] }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "${CLAUDE_PROJECT_DIR}/packages/specificity/bin/render.sh",
+    "padding": 0
+  }
+}
+```
+
+The status line renders one field:
+
+```
+spec ▓▓▓▓░░░░ .50 fast ⟂1        # 1 of 2 referents grounded, 1 resolved to nothing
+spec ▓▓▓▓▓▓░░ .74 carried        # (M2) the turn did the work
+spec ░░░░░░░░  ·  sampling       # (M2) async phase in flight
+```
+
+`${CLAUDE_PROJECT_DIR}` expands in both a hook `args` entry and a `statusLine.command`, so the snippet above is correct when **this repo is your project**. For a plugin install the checkout is not the project directory — use an absolute path there, since `${CLAUDE_PLUGIN_ROOT}` is only meaningful inside the plugin's own `hooks/hooks.json`, not in your `settings.json`. §3.4 of the spec is worth heeding on the first run: a mistyped path leaves the hook silently disabled, showing only `Failed with non-blocking status code:` in the transcript.
+
+A plugin cannot ship the main `statusLine` at all — bundled plugin settings support only `agent` and `subagentStatusLine` — which is the other half of why this is a manual edit rather than something the plugin turns on.
+
+`⟂n` counts referents that matched **nothing** in the window — the actionable part, and the reason the output is a list of unresolved referents rather than only a scalar. `jq` is required for the status line; without it the field renders empty rather than erroring.
+
+Two things worth knowing before enabling it:
+
+- **The governing invariant is that no configuration of this tool may break a session.** Every path exits 0 — a missing transcript, an unparseable one, an unwritable cache, a malformed `config.toml`, an unexpected throw. The status line prints nothing rather than an error string.
+- **`mode = "gate"` is the one exception, and it is destructive.** On `UserPromptSubmit`, exit 2 blocks the turn *and erases the prompt the user just typed*. It ships off, with a threshold high enough that turning it on has to be deliberate. Advisory mode is the default and never blocks.
+
+Configuration is `~/.claude/specificity/config.toml` (override the whole directory with `SPECIFICITY_DIR`); the keys and defaults are in §7 of the spec.
 
 ## Process skills
 
@@ -318,10 +372,16 @@ shipofclaudius/
 │       ├── gate.example.json      #   → .factory/gate.json
 │       └── setup-labels.sh        #   → .factory/setup-labels.sh
 ├── packages/
-│   └── factory-gate/              # the deterministic, model-free merge gate (no dependencies)
-│       ├── bin/gate.mjs           #   CLI — exit 0 merge / 2 escalate / 1 the gate broke
-│       ├── bin/build-input.mjs    #   CLI — fetches a PR's gate facts with `gh`
-│       └── src/                   #   glob, extract, config, build-input, gate-core
+│   ├── factory-gate/              # the deterministic, model-free merge gate (no dependencies)
+│   │   ├── bin/gate.mjs           #   CLI — exit 0 merge / 2 escalate / 1 the gate broke
+│   │   ├── bin/build-input.mjs    #   CLI — fetches a PR's gate facts with `gh`
+│   │   └── src/                   #   glob, extract, config, build-input, gate-core
+│   └── specificity/               # prompt-specificity scorer, M1 (no dependencies, no model calls)
+│       ├── bin/fast.mjs           #   UserPromptSubmit hook — scores the turn, writes the cache
+│       ├── bin/render.sh          #   status line — reads the cache, computes nothing
+│       ├── bin/render.jq          #   the one-line render itself
+│       └── src/                   #   config, transcript, files, context-index, referents,
+│                                  #   constraints, record, cache
 └── tests/
     ├── ci-abuse-lens.test.mjs     # pins security-diff-scan.js's gated CI/CD pipeline-abuse lens
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
@@ -338,6 +398,8 @@ shipofclaudius/
     ├── pr-triage-sim.test.mjs      # simulates pr-triage-fanout.js
     ├── routine-anti-noise.test.mjs # simulates routine-anti-noise.js
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
+    ├── specificity-fast.test.mjs   # UNIT-tests the specificity fast path (pure code + end-to-end)
+    ├── specificity-render.test.mjs # runs the REAL render.sh + render.jq over a temp cache
     ├── stacked-impl-sim.test.mjs   # simulates stacked-impl-lanes.js
     ├── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
     ├── triage-finding-sim.test.mjs # simulates triage-finding.js
