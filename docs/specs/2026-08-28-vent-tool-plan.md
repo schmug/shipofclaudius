@@ -230,6 +230,7 @@ Create `packages/vent-server/index.mjs`:
 #!/usr/bin/env node
 // Thin stdio entry point. Framing only — all decisions live in server.mjs.
 import { handle, makeState } from './server.mjs'
+import { StringDecoder } from 'node:string_decoder'
 
 const state = makeState()
 const deps = {
@@ -238,9 +239,12 @@ const deps = {
   context: () => ({}),
 }
 
+// Stateful decode: a chunk boundary inside a multi-byte UTF-8 sequence would otherwise
+// silently become U+FFFD. See #154 — this doc prescribed the defective form.
+const decoder = new StringDecoder('utf8')
 let buf = ''
 process.stdin.on('data', (chunk) => {
-  buf += chunk.toString()
+  buf += decoder.write(chunk)
   let i
   while ((i = buf.indexOf('\n')) >= 0) {
     const line = buf.slice(0, i).trim()

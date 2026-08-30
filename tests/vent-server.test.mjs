@@ -11,7 +11,7 @@
 // Two of those outcomes are live here (invalid-input, sink-unavailable);
 // rate-limited arrives with the real sink in n2 (#142).
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS } from '../packages/vent-server/server.mjs'
 
@@ -130,6 +130,9 @@ test('the shipped entry point never confirms a write it did not make', () => {
     { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent', arguments: { text: 'real vent' } } }) + '\n'
   const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
   const proc = spawnSync(process.execPath, [entry], { input, encoding: 'utf8' })
+  // Assert the exit status BEFORE parsing: a crashed server otherwise surfaces as a
+  // confusing JSON parse failure instead of as the crash it actually is (#155).
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const reply = JSON.parse(proc.stdout.trim())
   assert.equal(reply.result.isError, false)
   assert.deepEqual(JSON.parse(reply.result.content[0].text),
@@ -141,6 +144,59 @@ test('an unknown tool is a protocol error, not a vent outcome', () => {
     { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'nope', arguments: {} } },
     makeState(), stubDeps())
   assert.equal(reply.error.code, -32602)
+})
+
+test('a multi-byte character split across two stdin writes survives the framer (#154)', async () => {
+  // The framer decoded each chunk independently, so a UTF-8 sequence straddling a chunk
+  // boundary became U+FFFD. The corruption is SILENT: 0x0A never appears inside a
+  // multi-byte sequence, so lines still split correctly and JSON.parse still succeeds —
+  // only the characters are wrong, and nothing downstream can tell.
+  //
+  // The id is the probe because JSON-RPC echoes it verbatim and n1 ships no sink, so
+  // vent text has no return path here. Same decode step either way.
+  const marker = 'héllo — 日本語 🎉 naïve café'
+  const bytes = Buffer.from(
+    JSON.stringify({ jsonrpc: '2.0', id: marker, method: 'tools/list' }) + '\n', 'utf8')
+  // Cut ON a UTF-8 continuation byte (0b10xxxxxx), guaranteeing a character straddles
+  // the two writes — precisely the condition the old decode mangled.
+  const cut = bytes.findIndex((b, i) => i > 0 && (b & 0xc0) === 0x80)
+  assert.ok(cut > 0, 'the payload must contain a multi-byte character to split')
+
+  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
+  const proc = spawn(process.execPath, [entry], {
+    env: { ...process.env, VENT_SINK: '/dev/null' },
+  })
+  let out = ''
+  proc.stdout.setEncoding('utf8')
+  proc.stdout.on('data', (c) => { out += c })
+  proc.stdin.write(bytes.subarray(0, cut))
+  // Two SEPARATE data events is the whole point; without a gap Node coalesces the writes
+  // and the boundary never lands mid-character.
+  await new Promise((r) => setTimeout(r, 60))
+  proc.stdin.write(bytes.subarray(cut))
+  proc.stdin.end()
+  await new Promise((r) => proc.on('close', r))
+
+  assert.equal(JSON.parse(out.trim()).id, marker,
+    'id must round-trip byte-identical; U+FFFD here means chunks were decoded independently')
+})
+
+test('an EPIPE on stdout is a quiet exit, not an uncaught exception (#155)', () => {
+  // This server is spawned into EVERY session where the plugin is installed, so a client
+  // that disconnects mid-write must not become a crashed child process with a stack
+  // trace. A vent is a side channel — it must never be the noisy thing in a session.
+  // `head -c 1` reads one byte then exits, closing the read end deterministically; the
+  // server's own status is echoed to stderr because the pipeline's status is head's.
+  const input = Array.from({ length: 400 }, (_, i) =>
+    JSON.stringify({ jsonrpc: '2.0', id: i, method: 'tools/list' })).join('\n') + '\n'
+  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
+  const proc = spawnSync('sh',
+    ['-c', '{ "$0" "$1"; echo "SERVER_EXIT:$?" >&2; } | head -c 1', process.execPath, entry],
+    { input, encoding: 'utf8', env: { ...process.env, VENT_SINK: '/dev/null' } })
+  assert.doesNotMatch(proc.stderr, /Unhandled 'error' event/,
+    'EPIPE reached the default handler and crashed the process')
+  assert.match(proc.stderr, /SERVER_EXIT:0/,
+    `server must exit 0 on a closed pipe. stderr was:\n${proc.stderr}`)
 })
 
 test('SUPPORTED_VERSIONS covers both eras, modern first', () => {
