@@ -1,7 +1,7 @@
 // Contract test for packages/vent-server — the agent vent tool.
 // Node built-ins only; zero token cost. Unit tests drive the pure dispatcher
-// directly; one integration test spawns the real server, pinning the framing
-// defect described below. Full stdio-framing coverage arrives with n3 (#143).
+// directly; the integration tests spawn the real server, because index.mjs's
+// stdio framing is exactly what a unit test on handle() cannot see.
 //   node tests/vent-server.test.mjs
 //
 // The invariant this suite exists to protect: a vent must NEVER error into a
@@ -11,6 +11,10 @@
 // All four outcomes are live as of n2 (#142) — recorded, rate-limited,
 // sink-unavailable, invalid-input — and one test asserts the contract across
 // the whole set at once, so a fifth outcome cannot be added quietly.
+//
+// Two eras are served (n3, #143). The legacy one is observed fact; the modern
+// 2026-07-28 one is written to the published spec and has never met a client —
+// see the honesty note above its section, and do not upgrade that claim.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
@@ -18,13 +22,22 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, RATE_WINDOW_MS, MAX_PER_SESSION,
+  handle, makeState, TOOL, SERVER_INFO, SUPPORTED_VERSIONS, MODERN_VERSIONS, LEGACY_VERSIONS,
+  RATE_WINDOW_MS, MAX_PER_SESSION,
 } from '../packages/vent-server/server.mjs'
 import { appendVent, DEFAULT_SINK } from '../packages/vent-server/sink.mjs'
 import { captureContext, parseRepo } from '../packages/vent-server/context.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+// The shipped stdio entry point, spawned for real by every integration test below.
+const ENTRY = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
+// Every spawn in this file must stay OFF the operator's real ~/.claude/vents.jsonl.
+// The framing tests never call the tool, so this points VENT_SINK at a path inside a
+// directory that does not exist: should one ever reach the sink, the write fails into
+// a calm sink-unavailable instead of appending to somebody's real file.
+const NEVER_SINK = join(tmpdir(), 'vent-framing-never-written', 'vents.jsonl')
 
 // A deps stub with a controllable clock and an in-memory sink.
 function stubDeps({ now = 1_000_000, writes = [], ok = true } = {}) {
@@ -115,15 +128,17 @@ test('a sink failure is a calm outcome, not a silent success', () => {
 test('through the real stdio entry point, every request bearing an id draws a reply', () => {
   // The silent drop was only ever visible HERE: server.mjs threw, and index.mjs — not
   // server.mjs — is what swallowed it. A unit test on handle() cannot see that, so this
-  // pins the one framing shape that shipped broken. n3 (#143) owns full framing coverage.
+  // pins the one framing shape that shipped broken. The rest of the framing — chunk
+  // boundaries, blank lines, junk, batched messages — is under "framing" below.
   const input = [
     { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
     { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent' } },
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     { jsonrpc: '2.0', id: 2, method: 'tools/list' },
   ].map((m) => JSON.stringify(m)).join('\n') + '\n'
-  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
-  const proc = spawnSync(process.execPath, [entry], { input, encoding: 'utf8' })
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input, encoding: 'utf8', env: { ...process.env, VENT_SINK: NEVER_SINK },
+  })
   assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
   const ids = proc.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).id)
   assert.deepEqual(ids, [0, 1, 2],
@@ -144,10 +159,9 @@ test('the shipped entry point records a real vent, and confirms only what it wro
   const sink = join(dir, 'vents.jsonl')
   const input = JSON.stringify(
     { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vent', arguments: { text: 'real vent' } } }) + '\n'
-  const entry = fileURLToPath(new URL('../packages/vent-server/index.mjs', import.meta.url))
   // Assert the exit status BEFORE parsing: a crashed server otherwise surfaces as a
   // confusing JSON parse failure instead of as the crash it actually is (#155).
-  const proc = spawnSync(process.execPath, [entry], {
+  const proc = spawnSync(process.execPath, [ENTRY], {
     input,
     encoding: 'utf8',
     env: { ...process.env, VENT_SINK: sink, CLAUDE_PROJECT_DIR: dir, CLAUDE_CODE_SESSION_ID: 'sess-e2e' },
@@ -234,6 +248,226 @@ test('an EPIPE on stdout is a quiet exit, not an uncaught exception (#155)', () 
 
 test('SUPPORTED_VERSIONS covers both eras, modern first', () => {
   assert.deepEqual(SUPPORTED_VERSIONS, ['2026-07-28', '2025-11-25'])
+})
+
+test('MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly', () => {
+  // The drift this exists to catch (#157): add a version to SUPPORTED_VERSIONS and forget
+  // MODERN_VERSIONS, and it is silently served the LEGACY shape AND silently allowed
+  // through the `initialize` door. Pin the exact partition so either omission fails here.
+  for (const v of MODERN_VERSIONS) {
+    assert.ok(SUPPORTED_VERSIONS.includes(v), `MODERN_VERSIONS lists ${v}, absent from SUPPORTED_VERSIONS`)
+  }
+  assert.deepEqual(MODERN_VERSIONS, ['2026-07-28'])
+  assert.deepEqual(LEGACY_VERSIONS, ['2025-11-25'])
+  assert.deepEqual(
+    [...MODERN_VERSIONS, ...LEGACY_VERSIONS].sort(), [...SUPPORTED_VERSIONS].sort(),
+    'every supported version must be classified into exactly one era',
+  )
+})
+
+test('the legacy `initialize` handshake NEVER negotiates a modern version (#157)', () => {
+  // Decision #157, implementing design spec §4.1 verbatim: "an `initialize` request selects
+  // legacy semantics for that stdio process." `initialize` IS the legacy handshake — the
+  // modern revision removed it outright — so a client arriving through that door is by
+  // definition a legacy-era client and must be answered with a legacy version, even when it
+  // asks for a modern one. Negotiating a client DOWN is ordinary, legal legacy behaviour.
+  //
+  // What this pins: the server used to echo 2026-07-28 straight back and then serve legacy
+  // shapes for the rest of the session — it agreed to an era it never went on to speak.
+  const state = makeState()
+  const init = handle(
+    { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2026-07-28' } },
+    state, stubDeps())
+  assert.equal(init.result.protocolVersion, '2025-11-25')
+  assert.ok(!MODERN_VERSIONS.includes(init.result.protocolVersion),
+    'the legacy handshake must never hand back a version whose shapes it will not serve')
+
+  // ...and what follows must match what was negotiated.
+  const list = handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+    state, stubDeps())
+  assert.deepEqual(Object.keys(list.result), ['tools'])
+  assert.equal(list.result.resultType, undefined)
+})
+
+test('_meta WITHOUT a protocolVersion key is legacy by assertion, not by accident', () => {
+  // The shape a real legacy client actually produces: _meta carrying only a progressToken.
+  // The version key is ABSENT, and absence means "no era declared" => legacy. A declared-
+  // but-empty version ('' or null) is a different case entirely and is refused -32022.
+  const reply = handle(
+    { jsonrpc: '2.0', id: 0, method: 'tools/list',
+      params: { _meta: { 'io.modelcontextprotocol/progressToken': 'abc' } } },
+    makeState(), stubDeps())
+  assert.deepEqual(Object.keys(reply.result), ['tools'])
+  assert.equal(reply.result.resultType, undefined)
+})
+
+// ---- the modern (2026-07-28) era ----
+//
+// WRITTEN TO SPEC, NOT TO OBSERVATION (design spec §4.1.1). No modern client exists to
+// test against, so every assertion below proves only that our replies match the
+// published shapes — never that any client accepted one. Do not upgrade that claim in a
+// commit message, a PR body, or a doc.
+//
+// Claude Code 2.1.241 is a LEGACY client — verified 2026-08-28: it opens with
+// `initialize` carrying protocolVersion 2025-11-25. So legacy carries every real call
+// today and modern is insurance. When that inverts, delete the legacy branch rather
+// than maintaining both forever.
+const MV = 'io.modelcontextprotocol/protocolVersion'
+const modernMeta = (v = '2026-07-28') => ({ _meta: { [MV]: v } })
+
+test('a LEGACY version declared in _meta is served the LEGACY shape', () => {
+  // The era must be selected off the MODERN version, not off mere presence of _meta.
+  // server/discover advertises BOTH versions, so a _meta-bearing client can negotiate
+  // DOWN to 2025-11-25 through the server's own published list — and that revision does
+  // not define resultType or structuredContent.
+  const deps = stubDeps()
+  const list = handle(
+    { jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernMeta('2025-11-25') },
+    makeState(), deps)
+  assert.equal(list.result.resultType, undefined, 'legacy _meta must not get resultType')
+  const called = call(makeState(), deps, { text: 'x' }, modernMeta('2025-11-25'))
+  assert.equal(called.result.resultType, undefined)
+  assert.equal(called.result.structuredContent, undefined)
+  assert.equal(called.result.isError, false)
+})
+
+test('a declared-but-empty version is rejected, not guessed at', () => {
+  // The design spec is normative: a version the server does not support MUST be rejected.
+  // Truthiness-gating served '' and null the legacy shape instead of telling the client
+  // which versions we speak — the exact failure -32022 exists to prevent.
+  for (const v of ['', null]) {
+    const r = handle(
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernMeta(v) },
+      makeState(), stubDeps())
+    assert.equal(r.error?.code, -32022, `version ${JSON.stringify(v)} must be rejected`)
+    assert.deepEqual(r.error.data.supported, SUPPORTED_VERSIONS)
+    assert.equal(r.error.data.requested, v)
+  }
+})
+
+test('NO method answers a notification, including ones added later', () => {
+  // server/discover was added ABOVE the trailing isNotification guard, so it answered a
+  // notification with an id-less response that index.mjs would write to stdout — a
+  // protocol violation. The guard now sits in FRONT of dispatch so every method inherits
+  // it, including any added after this.
+  for (const method of ['server/discover', 'initialize', 'tools/list', 'tools/call',
+                        'notifications/initialized', 'no/such/method']) {
+    const reply = handle(
+      { jsonrpc: '2.0', method, params: { name: 'vent', arguments: { text: 'x' } } },
+      makeState(), stubDeps())
+    assert.equal(reply, null, `${method} as a notification must draw no reply`)
+  }
+})
+
+test('every spawn in this suite is pinned to a temp VENT_SINK', async () => {
+  // The file-level invariant, ENFORCED rather than asserted in a comment. A spawn with no
+  // explicit env inherits the operator environment, and appendVent then falls back to
+  // DEFAULT_SINK (~/.claude/vents.jsonl). One such spawn shipped: it was harmless only
+  // because its request omitted `arguments` and short-circuited to invalid-input, so
+  // adding a text to that one request would have appended to the real sink for real.
+  const lines = (await readFile(fileURLToPath(import.meta.url), 'utf8')).split('\n')
+  const missing = []
+  lines.forEach((line, i) => {
+    if (!line.includes('spawnSync(process.execPath') && !line.includes('spawn(process.execPath')) return
+    if (!lines.slice(i, i + 6).join(' ').includes('VENT_SINK')) missing.push(i + 1)
+  })
+  assert.deepEqual(missing, [], 'these spawn lines carry no VENT_SINK env')
+})
+
+test('server/discover returns supported versions, capabilities, and serverInfo', () => {
+  const reply = handle(
+    { jsonrpc: '2.0', id: 'd1', method: 'server/discover', params: modernMeta() },
+    makeState(), stubDeps())
+  assert.equal(reply.result.resultType, 'complete')
+  assert.deepEqual(reply.result.supportedVersions, SUPPORTED_VERSIONS)
+  assert.deepEqual(reply.result.capabilities, { tools: {} })
+  assert.deepEqual(reply.result._meta['io.modelcontextprotocol/serverInfo'], SERVER_INFO)
+})
+
+test('an unsupported requested version is rejected with -32022 and a supported list', () => {
+  const reply = handle(
+    { jsonrpc: '2.0', id: 3, method: 'tools/list', params: modernMeta('1900-01-01') },
+    makeState(), stubDeps())
+  assert.equal(reply.error.code, -32022)
+  assert.deepEqual(reply.error.data.supported, SUPPORTED_VERSIONS)
+  assert.equal(reply.error.data.requested, '1900-01-01')
+})
+
+test('modern results carry resultType complete', () => {
+  const reply = handle(
+    { jsonrpc: '2.0', id: 4, method: 'tools/list', params: modernMeta() }, makeState(), stubDeps())
+  assert.equal(reply.result.resultType, 'complete')
+  assert.deepEqual(reply.result.tools, [TOOL])
+})
+
+test('modern tools/call mirrors the payload into structuredContent', () => {
+  const reply = call(makeState(), stubDeps(), { text: 'modern' }, modernMeta())
+  assert.equal(reply.result.resultType, 'complete')
+  assert.deepEqual(reply.result.structuredContent, { recorded: true })
+  assert.deepEqual(payloadOf(reply), { recorded: true },
+    'the text mirror stays, for backwards compatibility')
+  assert.equal(reply.result.isError, false)
+})
+
+test('EVERY modern outcome mirrors its payload into structuredContent', () => {
+  // `result(payload, modern)` has four call sites inside callVent. A missed one hands a
+  // modern client a refusal it cannot read structurally — and refusals are the majority
+  // of a rate-limited tool's replies — so assert across the whole set, not the happy
+  // path alone. The calm contract is unchanged by the era: still isError:false.
+  const state = makeState()
+  const good = call(state, stubDeps(), { text: 'ok' }, modernMeta())
+  const limited = call(state, stubDeps(), { text: 'again' }, modernMeta())
+  const bad = call(makeState(), stubDeps({ ok: false }), { text: 'x' }, modernMeta())
+  const invalid = call(makeState(), stubDeps(), {}, modernMeta())
+  for (const r of [good, limited, bad, invalid]) {
+    assert.equal(r.result.resultType, 'complete')
+    assert.equal(r.result.isError, false, 'a modern refusal is still not an error')
+    assert.equal(r.error, undefined)
+    assert.deepEqual(r.result.structuredContent, payloadOf(r),
+      'the structured mirror and the text block must never disagree')
+  }
+  assert.deepEqual([good, limited, bad, invalid].map((r) => r.result.structuredContent), [
+    { recorded: true },
+    { recorded: false, reason: 'rate-limited' },
+    { recorded: false, reason: 'sink-unavailable' },
+    { recorded: false, reason: 'invalid-input' },
+  ])
+})
+
+test('an unsupported version is refused BEFORE the tool runs', () => {
+  // The version gate sits in front of method dispatch, so a rejected call costs nothing
+  // and — more importantly — a version the server does not speak can never write a
+  // record whose shape it does not understand.
+  const deps = stubDeps()
+  const reply = call(makeState(), deps, { text: 'should never land' }, modernMeta('1900-01-01'))
+  assert.equal(reply.error.code, -32022)
+  assert.equal(deps.writes.length, 0, 'nothing reaches the sink behind a rejected version')
+})
+
+test('a version rejection never replies to a notification', () => {
+  // A notification carries no id, so there is nothing to answer — not even to reject.
+  // The gate runs in front of every method, which is exactly where a stray reply to a
+  // notification (a protocol violation) would be introduced.
+  const reply = handle(
+    { jsonrpc: '2.0', method: 'notifications/initialized', params: modernMeta('1900-01-01') },
+    makeState(), stubDeps())
+  assert.equal(reply, null)
+})
+
+test('legacy results carry NO modern-only fields', () => {
+  // Claude Code is the legacy client, so this is the path that actually ships today. A
+  // modern-only field leaking onto it is a wire-contract violation on the one era we
+  // can observe — the era where a regression is a real outage, not a hypothetical one.
+  const deps = stubDeps()
+  const list = handle({ jsonrpc: '2.0', id: 5, method: 'tools/list' }, makeState(), deps)
+  const init = handle(
+    { jsonrpc: '2.0', id: 6, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+    makeState(), deps)
+  const called = call(makeState(), deps, { text: 'legacy' })
+  for (const reply of [list, init, called]) {
+    assert.equal(reply.result.resultType, undefined)
+    assert.equal(reply.result.structuredContent, undefined)
+  }
 })
 
 // ---- the sink ----
@@ -478,6 +712,156 @@ test('agent-supplied fields other than text never reach the sink record', () => 
     text: 'real',
     cwd: '/p', repo: 'schmug/x', branch: 'main', session: 's1',
   })
+})
+
+// ---- framing: the real stdio entry point ----
+//
+// index.mjs owns one job — newline-delimited JSON in, newline-delimited JSON out — and
+// every defect it has shipped so far lived there rather than in handle(). These tests
+// spawn the real server, because the buffer, the chunk boundaries and the "skip, never
+// die" rules simply do not exist at the handle() level.
+
+// Feeds the spawned server one chunk at a time, waiting for the replies each chunk was
+// supposed to draw before writing the next. Waiting on OUTPUT rather than on a timer is
+// what makes a chunk boundary real: two back-to-back writes coalesce into a single
+// 'data' event, and a coalesced write would prove nothing about the buffer. Each step's
+// `replies` is the CUMULATIVE count expected once that chunk has been processed.
+function feedChunks(steps, { timeoutMs = 10_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [ENTRY], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, VENT_SINK: NEVER_SINK },
+    })
+    let out = ''
+    let err = ''
+    let settled = false
+    let pending = null
+    // A hung server would otherwise hang the whole suite with no output at all.
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill('SIGKILL')
+      reject(new Error(`server did not answer within ${timeoutMs}ms; stdout so far: ${JSON.stringify(out)}`))
+    }, timeoutMs)
+    // Count only COMPLETED lines: a half-written reply is not a reply.
+    const complete = () => out.split('\n').length - 1
+    child.stdout.on('data', (d) => {
+      out += d.toString()
+      if (pending && complete() >= pending.want) {
+        const go = pending.go
+        pending = null
+        go()
+      }
+    })
+    child.stderr.on('data', (d) => { err += d.toString() })
+    child.on('error', (e) => { if (!settled) { settled = true; clearTimeout(timer); reject(e) } })
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, out, err })
+    })
+    const step = (i) => {
+      if (i >= steps.length) { child.stdin.end(); return }
+      const { chunk, replies = 0 } = steps[i]
+      child.stdin.write(chunk)
+      if (replies === 0 || complete() >= replies) { step(i + 1); return }
+      pending = { want: replies, go: () => step(i + 1) }
+    }
+    step(0)
+  })
+}
+
+const idsOf = (stdout) => stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).id)
+
+test('FRAMING: a message split across chunk boundaries is buffered, not dropped', async () => {
+  // The chunk boundary falls mid-key, inside a JSON string. stdin delivers whatever the
+  // pipe happened to hand over, so a reader that parsed per-chunk instead of per-line
+  // would drop request 2 entirely — the silent-drop failure mode again, one layer down.
+  // Waiting for reply 1 before sending the tail is what guarantees the halves arrive in
+  // two separate 'data' events rather than being coalesced into one.
+  const { code, out, err } = await feedChunks([
+    { chunk: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n{"jsonrpc":"2.0","id":2,"met', replies: 1 },
+    { chunk: 'hod":"tools/list"}\n', replies: 2 },
+  ])
+  assert.equal(code, 0, `server exited non-zero: ${err}`)
+  assert.deepEqual(idsOf(out), [1, 2], 'the half-line survived the data-event boundary')
+})
+
+test('FRAMING: one chunk carrying blank lines, junk and several messages answers each request in order', () => {
+  // Everything a client can legally (or illegally) put in a single write, at once:
+  // blank and whitespace-only lines, an unparseable line, a notification, and three
+  // requests. The rule is skip-and-continue — never die, never reorder, never merge.
+  const input = [
+    '',                                                          // a bare newline
+    '   ',                                                       // whitespace only
+    '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    'not json at all',                                           // unparseable: skipped
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',    // no id: no reply
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+    '{"jsonrpc":"2.0","id":3,"method":"nope/nope"}',             // unknown method: still a reply
+  ].join('\n') + '\n'
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input, encoding: 'utf8', env: { ...process.env, VENT_SINK: NEVER_SINK },
+  })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  const replies = proc.stdout.trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(replies.map((r) => r.id), [1, 2, 3],
+    'three requests, three replies, in order — the junk and the notification drew none')
+  assert.equal(replies[2].error.code, -32601, 'an unknown method is a protocol error, and is answered')
+})
+
+test('FRAMING: an unparseable first line does not kill the server', () => {
+  // Garbage arriving before anything valid is the case that decides whether the process
+  // survives to serve the session at all. A throw here would take the server down and
+  // every later vent with it.
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input: 'not json at all\n{"jsonrpc":"2.0","id":7,"method":"tools/list"}\n',
+    encoding: 'utf8',
+    env: { ...process.env, VENT_SINK: NEVER_SINK },
+  })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  assert.deepEqual(idsOf(proc.stdout), [7])
+})
+
+test('FRAMING: stdin ending mid-message drops the partial rather than parsing a truncation', () => {
+  // Framing is newline-delimited, so an unterminated trailing message is by definition
+  // incomplete — and the client that sent it has just closed the pipe, so no one is
+  // left blocked on a reply. What must NOT happen is a parse of the truncation or a
+  // hang: the server answers what it has and exits cleanly.
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n{"jsonrpc":"2.0","id":2,"method":"tools/li',
+    encoding: 'utf8',
+    env: { ...process.env, VENT_SINK: NEVER_SINK },
+  })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  assert.deepEqual(idsOf(proc.stdout), [1])
+})
+
+test('FRAMING: the modern era survives the real stdio path, and a rejected version writes nothing', async () => {
+  // Still spec-shaped, not client-verified (see the modern section's header): this shows
+  // the modern branch is reachable through the framing, not that a client speaks it.
+  const dir = await mkdtemp(join(tmpdir(), 'vent-modern-'))
+  const sink = join(dir, 'vents.jsonl')
+  const input = [
+    { jsonrpc: '2.0', id: 1, method: 'server/discover', params: modernMeta() },
+    {
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'vent', arguments: { text: 'modern e2e' }, ...modernMeta('1900-01-01') },
+    },
+  ].map((m) => JSON.stringify(m)).join('\n') + '\n'
+  const proc = spawnSync(process.execPath, [ENTRY], {
+    input, encoding: 'utf8',
+    env: { ...process.env, VENT_SINK: sink, CLAUDE_PROJECT_DIR: dir },
+  })
+  assert.equal(proc.status, 0, `server exited non-zero: ${proc.stderr}`)
+  const [discover, rejected] = proc.stdout.trim().split('\n').map((l) => JSON.parse(l))
+  assert.equal(discover.result.resultType, 'complete')
+  assert.deepEqual(discover.result.supportedVersions, SUPPORTED_VERSIONS)
+  assert.equal(rejected.error.code, -32022)
+  await assert.rejects(() => readFile(sink, 'utf8'), /ENOENT/,
+    'a call behind a rejected version must never reach the sink')
+  await rm(dir, { recursive: true, force: true })
 })
 
 // ---- runner ----

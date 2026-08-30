@@ -15,7 +15,7 @@ A weekly triage task (out of scope here, spec §6) later reads that file and fil
 | Party | Trust | Reaches |
 |---|---|---|
 | The **agent** calling `vent` | **untrusted** — it is a model, and its text may itself be attacker-influenced | `params.arguments.text`, and the *timing and count* of calls |
-| The **host** spawning the server | trusted | argv, environment (`CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, `VENT_SINK`) |
+| The **host** spawning the server | trusted | argv, environment (`CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, `VENT_SINK`), and the JSON-RPC envelope — the method, and `params._meta` (the protocol era, §6) |
 | The **local filesystem** | trusted | `~/.claude/vents.jsonl` |
 | The **downstream triage reader** | consumer of everything above | every line of the sink |
 
@@ -31,7 +31,12 @@ All four outcomes an agent can cause — `recorded`, `rate-limited`, `sink-unava
 `isError: true` for tool-execution errors a model should self-correct from; a dropped
 vent is information, not a fault to retry, and flagging it invites the retry storm the
 rate limiter exists to stop. JSON-RPC errors stay reserved for genuine protocol faults
-(unknown tool `-32602`, unknown method `-32601`).
+(unknown tool `-32602`, unknown method `-32601`, unsupported protocol version `-32022`).
+
+None of those three is agent-reachable. `-32602` and `-32601` name a method or tool the
+agent does not choose, and `-32022` answers `params._meta`, which the **client** writes
+into the envelope — the agent supplies `arguments.text` and nothing else. So a protocol
+error means the host and this server disagree, never that a vent was rejected.
 
 Availability, not confidentiality, is the property at risk here: a vent that fails loudly
 trains agents to stop calling it, and the tool's whole value is that it gets called.
@@ -130,7 +135,60 @@ point end-to-end without appending to the operator's `~/.claude/vents.jsonl`, an
 — which has no `~/.claude` — exercises the real wiring rather than a permanent
 `sink-unavailable`.
 
+### 6. Serving two eras widens the shape, not the surface
+
+`handle` speaks both the legacy `2025-11-25` handshake and the modern `2026-07-28`
+stateless era (design spec §4.1). The selector is `params._meta`
+(`io.modelcontextprotocol/protocolVersion`): present and supported means modern, absent
+means legacy, present and unsupported means `-32022` with `data.supported`.
+
+- The selector lives in the **envelope**, which the client writes. It is not the tool's
+  input schema — that still has exactly one property, `text` — so nothing an agent
+  passes to `vent` can pick an era, forge a version, or provoke a rejection.
+- The version gate runs **in front of method dispatch**, so a request naming a version
+  we do not speak never reaches `callVent`, never spends a `deps.context()`, and never
+  touches the sink. Pinned by `an unsupported version is refused BEFORE the tool runs`.
+- Nothing arriving without an `id` is answered — replying to a notification is a protocol
+  violation, and `index.mjs` would write that reply straight to stdout. This is enforced by
+  a single guard sitting **in front of method dispatch**, so every method inherits it,
+  including ones added later. It has to live there: `server/discover` was first added
+  *above* the old trailing guard and answered notifications with an id-less response until
+  the guard moved. Pinned by `a version rejection never replies to a notification` and by
+  `NO method answers a notification, including ones added later`.
+- The era changes the result **shape** only: modern adds `resultType: 'complete'` and
+  mirrors the same payload into `structuredContent`, exposing no field the text block
+  did not already carry. Legacy results must stay free of both — Claude Code 2.1.241 is
+  a legacy client, so that is the era carrying real traffic. The era is selected off
+  `MODERN_VERSIONS`, **not** off the presence of `_meta`: `server/discover` advertises the
+  whole supported list, so a `_meta`-bearing client can negotiate *down* to 2025-11-25, and
+  that revision defines neither field. Pinned by `legacy results carry NO modern-only
+  fields` and `a LEGACY version declared in _meta is served the LEGACY shape`.
+- A **declared** version we do not speak is rejected on presence, not truthiness: `''` and
+  `null` are declarations, not absences, and get `-32022` rather than a guessed era. Only an
+  absent `_meta` key means "legacy client". Pinned by `a declared-but-empty version is
+  rejected, not guessed at`.
+- The era is selected **per request, never per session** — and `initialize` may only ever
+  negotiate a **legacy** version. Decided in #157, implementing design spec §4.1 as written:
+  "an `initialize` request selects legacy semantics for that stdio process." `initialize` IS
+  the legacy handshake — the modern revision removed it — so a client arriving through that
+  door is a legacy-era client, and answering a modern request with `2025-11-25` negotiates it
+  DOWN, which is ordinary legacy behaviour. The gate reads `LEGACY_VERSIONS`, which is
+  *derived* from `SUPPORTED_VERSIONS` minus `MODERN_VERSIONS` so the lists cannot drift.
+
+  The alternative — letting `initialize` set a session-wide era — was rejected: it
+  contradicts §4.1 and reintroduces exactly the session state the modern era removed. What
+  was actually broken was narrower than either option: the gate read `SUPPORTED_VERSIONS`, so
+  a client could ask for `2026-07-28` through the legacy door, be told **yes**, and then be
+  served legacy shapes for the rest of the session — the server agreed to an era it never
+  went on to speak. Pinned by `the legacy initialize handshake NEVER negotiates a modern
+  version`, by `_meta WITHOUT a protocolVersion key is legacy by assertion, not by accident`,
+  and by `MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly`.
+
+**Written to spec, never observed.** No modern client exists to test against. Everything
+above proves our replies match the published shapes; none of it is evidence that a
+client accepted one. Do not restate it as verified end-to-end.
+
 ## Not in scope here
 
 The weekly triage task and its watermark (spec §6, gated on Cory's approval since it
-lives under `~/.claude/`), and the modern `2026-07-28` protocol era (n3, #143).
+lives under `~/.claude/`).
