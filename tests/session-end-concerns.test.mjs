@@ -13,6 +13,7 @@
 // the evaluator, not authored here, so without the name it has no procedure to
 // point at.
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 
 const ROOT = new URL('../', import.meta.url)
@@ -24,7 +25,10 @@ const test = (name, fn) => tests.push([name, fn])
 test('file-concerns: exists as a process skill', async () => {
   const md = await read('skills/file-concerns/SKILL.md')
   assert.ok(/^---[\s\S]*?\ndescription:\s*\S.*\n[\s\S]*?---/m.test(md), 'frontmatter has a non-empty description')
-  assert.ok(md.includes('name: file-concerns'), 'frontmatter name matches the directory')
+  // Anchored: `name: file-concerns-v2` in skills/file-concerns/ satisfied a bare
+  // substring check, so the assertion passed on the exact name/directory mismatch that
+  // breaks `shipofclaudius:file-concerns` resolution from the hook.
+  assert.match(md, /^name: file-concerns$/m, 'frontmatter name matches the directory')
   // Without this the skill is classified as a Workflow wrapper and breaks the
   // 1:1 workflow<->skill invariant in plugin-integrity.
   assert.ok(/^workflow:\s*none$/m.test(md), 'declares workflow: none (process skill, not a wrapper)')
@@ -33,19 +37,26 @@ test('file-concerns: exists as a process skill', async () => {
 
 test('file-concerns: files one issue per session to the agreed sink', async () => {
   const md = await read('skills/file-concerns/SKILL.md')
-  assert.ok(md.includes('gh issue create -R schmug/agent-notes'), 'names the exact sink command')
-  assert.ok(md.includes('--label concern'), 'labels the issue so triage can find it')
-  assert.match(md, /one issue per session/i, 'states the one-issue-per-session rule')
-  // Five issues out of one session is what the question board produced on
-  // 2026-08-29 and it is the wrong shape for review.
-  assert.ok(!/one issue per concern/i.test(md), 'must not file per concern')
+  // Flag long/short forms both accepted — a rewrite to `--repo` or `-l` is not a defect.
+  assert.match(md, /gh issue create[\s\S]{0,160}(-R|--repo) schmug\/agent-notes/, 'names the exact sink command')
+  assert.match(md, /(--label|-l) concern/, 'labels the issue so triage can find it')
+  // Pins the rule TOGETHER WITH its negation clause. A bare /one issue per session/
+  // plus a hardcoded negative lookalike passed a body reading "Never one issue per
+  // session — file one per concern instead", i.e. the exact inversion it guarded.
+  // Five issues out of one session is what the question board produced on 2026-08-29.
+  assert.match(md, /\*\*One issue per session\*\*\s*—\s*never one per concern/i,
+    'states the one-issue-per-session rule, un-inverted')
 })
 
 test('file-concerns: never fails the turn', async () => {
   const md = await read('skills/file-concerns/SKILL.md')
-  assert.ok(md.includes('~/.claude/concerns-spool.jsonl'), 'names the spool path')
-  assert.match(md, /do not retry/i, 'forbids in-session retry')
-  assert.match(md, /never.*(block|fail).*turn/i, 'states the never-fail-the-turn guarantee')
+  assert.match(md, /(~|\$HOME)\/\.claude\/concerns-spool\.jsonl/, 'names the spool path')
+  assert.match(md, /(do not|never) retry/i, 'forbids in-session retry')
+  // Scoped to ONE clause. The old /never.*(block|fail).*turn/ needed only those words in
+  // that order somewhere on a line, so it passed "Never let a lost concern pass silently:
+  // block and fail the turn" — the precise inversion of the guarantee it names.
+  // `[^.]*` rather than `[^.\n]*` so a paragraph reflow does not red CI.
+  assert.match(md, /never (block|fail)[^.]*turn/i, 'states the never-fail-the-turn guarantee')
 })
 
 const hooksJson = JSON.parse(await read('hooks/hooks.json'))
@@ -69,6 +80,31 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
   // about to stop", i.e. the agent logged the rule instead of acting on it.
   assert.ok(p.startsWith('Either this session surfaced nothing unresolved'),
     'opens as a condition on the transcript')
+  // `startsWith` pins 46 characters, NOT the property. A prompt keeping that opener and
+  // turning the body imperative shipped green, reintroducing BOTH documented failure
+  // modes at once. These assert the property itself.
+  assert.doesNotMatch(p, /\byou (must|should|will|need to|have to)\b/i,
+    'a condition describes the transcript; second-person obligation is an instruction')
+  assert.doesNotMatch(p, /\b(do not stop|always block|reply with the word|immediately invoke)\b/i,
+    'a condition issues no directives')
+  // The anti-nag clause is satisfiable by containment even when a later sentence revokes
+  // it. Blocking routine sessions replaces their closing message with hook-loop chatter.
+  assert.doesNotMatch(p, /\b(revoked|overridden|disregard|no longer applies)\b/i,
+    'nothing in the condition may revoke the Default-to-satisfied clause')
+})
+
+// The condition string IS the product: its exact wording decides the block rate, and the
+// block rate decides whether this feature is useful or destructive. Containment checks
+// cannot police a 550-character paragraph, so any edit must be deliberate. Changing the
+// prompt is fine — update this hash in the same commit, and say in the message why the
+// wording moved and what the new block rate is.
+const PROMPT_SHA256_16 = 'fa9e798d401aaf2b'
+
+test('stop hook: the condition wording is hash-pinned', () => {
+  const actual = createHash('sha256').update(stopEntries[0].prompt || '').digest('hex').slice(0, 16)
+  assert.equal(actual, PROMPT_SHA256_16,
+    'the Stop condition wording changed. That string decides the block rate — re-measure it ' +
+    'against real sessions, then update PROMPT_SHA256_16 in the same commit.')
 })
 
 test('stop hook: keeps the anti-nag clause, the skill name, and the escape hatch', () => {

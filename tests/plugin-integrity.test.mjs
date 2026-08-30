@@ -77,7 +77,7 @@ test('process skills: declared explicitly, self-consistent, and never Workflow w
   for (const name of process) {
     const md = await read(`skills/${name}/SKILL.md`)
     assert.ok(/^---[\s\S]*?\ndescription:\s*\S.*\n[\s\S]*?---/m.test(md), `${name}: frontmatter has a non-empty description`)
-    assert.ok(md.includes(`name: ${name}`), `${name}: frontmatter name matches the directory`)
+    assert.match(md, new RegExp(`^name: ${name}$`, 'm'), `${name}: frontmatter name matches the directory`)
     assert.ok(!md.includes('scriptPath'), `${name}: a process skill must not masquerade as a Workflow wrapper`)
     // every bundled reference the body mentions must exist
     for (const m of md.matchAll(/references\/([\w.-]+)/g)) {
@@ -505,6 +505,43 @@ test('every workflow has a suite, and every suite is in the package.json test ch
   }
 })
 
+// Per-entry hook validation, extracted so a fixture table can exercise it directly.
+// Left inline, these guards are enforced only by whatever hooks.json happens to contain
+// today: a future edit deleting one would land green, which is exactly what mutation
+// testing of the first version showed.
+const HOOK_TYPES = new Set(['command', 'prompt', 'agent'])
+const assertHookEntry = (event, entry) => {
+  // Deliberately STRICTER than the runtime, which also accepts `function`, `http` and
+  // `mcp_tool`. We allow only the three actually exercised here, and the message says
+  // that rather than claiming the others are not real.
+  assert.ok(HOOK_TYPES.has(entry.type),
+    `${event}: "${entry.type}" is not a hook type this plugin ships (command|prompt|agent)`)
+  if (entry.type === 'command') {
+    assert.ok(typeof entry.command === 'string' && entry.command.length > 0, `${event}: non-empty command`)
+  } else {
+    // LLM-evaluated types cost a model call every time they fire and can block the turn.
+    // On a tool event that is constant; on Stop it is once per session, which is the only
+    // place the cost is defensible.
+    assert.equal(event, 'Stop', `${event}: only Stop may use the ${entry.type} hook type`)
+    // An entry with no condition body ships a hook that can never be satisfied. The old
+    // blanket command check caught this by accident; splitting on type lost it.
+    assert.ok(typeof entry.prompt === 'string' && entry.prompt.length > 0,
+      `${event}: a ${entry.type} hook needs a non-empty prompt`)
+    // An unsatisfiable condition loops — 9 and 14 evaluations observed on the default cap,
+    // each ending with no session output at all.
+    assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
+      `${event}: an LLM hook sets a timeout (it makes a model call)`)
+  }
+  // A session-lifecycle hook that can exit non-zero can wedge startup for every project
+  // the plugin is enabled in. Ours must swallow failure explicitly.
+  if (event === 'SessionStart') {
+    assert.ok(/(\|\|\s*true|;\s*true)\s*$/.test(entry.command.trim()),
+      'SessionStart hook must end in `|| true` or `; true` so a broken/absent CLI cannot block startup')
+    assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
+      'SessionStart hook sets a timeout (it makes a network call)')
+  }
+}
+
 test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', async () => {
   // Hooks auto-discover at the PLUGIN ROOT (`hooks/hooks.json`) — unlike `.claude/agents/`,
   // no plugin.json key is needed. Getting the path wrong ships a file that never runs.
@@ -517,33 +554,35 @@ test('hooks/hooks.json (if shipped) is valid, plugin-root, and fails open', asyn
   for (const [event, groups] of Object.entries(h.hooks)) {
     assert.ok(EVENTS.has(event), `"${event}" is a real hook event (a typo here silently never fires)`)
     for (const g of [].concat(groups)) {
-      for (const entry of [].concat(g.hooks || [])) {
-        const TYPES = new Set(['command', 'prompt', 'agent'])
-        assert.ok(TYPES.has(entry.type), `${event}: "${entry.type}" is a real hook type`)
-        // LLM-evaluated hook types (`prompt`, `agent`) cost a model call every time they
-        // fire and can block the turn. On a tool event that is constant; on Stop it is once
-        // per session, which is the only place the cost is defensible. An unsatisfiable
-        // condition also loops — 9 and 14 evaluations observed on the default cap — so the
-        // timeout is not optional either.
-        if (entry.type !== 'command') {
-          assert.equal(event, 'Stop', `${event}: only Stop may use the ${entry.type} hook type`)
-          assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
-            `${event}: an LLM hook sets a timeout (it makes a model call)`)
-        }
-        if (entry.type === 'command') {
-          assert.ok(typeof entry.command === 'string' && entry.command.length > 0, `${event}: non-empty command`)
-        }
-        // A session-lifecycle hook that can exit non-zero can wedge startup for every
-        // project the plugin is enabled in. Ours must swallow failure explicitly.
-        if (event === 'SessionStart') {
-          assert.ok(/(\|\|\s*true|;\s*true)\s*$/.test(entry.command.trim()),
-            'SessionStart hook must end in `|| true` or `; true` so a broken/absent CLI cannot block startup')
-          assert.ok(typeof entry.timeout === 'number' && entry.timeout > 0,
-            'SessionStart hook sets a timeout (it makes a network call)')
-        }
-      }
+      for (const entry of [].concat(g.hooks || [])) assertHookEntry(event, entry)
     }
   }
+})
+
+test('hook-entry guards bite on shapes the repo does not currently ship', () => {
+  const ok = (event, entry) => assert.doesNotThrow(() => assertHookEntry(event, entry))
+  const bad = (event, entry, re) => assert.throws(() => assertHookEntry(event, entry), re)
+
+  ok('Stop', { type: 'prompt', prompt: 'a condition on the transcript', timeout: 30 })
+  ok('PostToolUse', { type: 'command', command: 'echo hi' })
+
+  // The hole this table exists to close: a non-command entry carrying no condition body
+  // shipped a hook that can never be satisfied, and the suite called the file valid.
+  bad('Stop', { type: 'prompt', timeout: 30 }, /non-empty prompt/)
+  bad('Stop', { type: 'prompt', prompt: '', timeout: 30 }, /non-empty prompt/)
+  bad('Stop', { type: 'agent', timeout: 30 }, /non-empty prompt/)
+
+  bad('PostToolUse', { type: 'prompt', prompt: 'x', timeout: 30 }, /only Stop may use/)
+  bad('SessionStart', { type: 'agent', prompt: 'x', timeout: 30 }, /only Stop may use/)
+
+  bad('Stop', { type: 'prompt', prompt: 'x' }, /sets a timeout/)
+  bad('Stop', { type: 'prompt', prompt: 'x', timeout: 0 }, /sets a timeout/)
+
+  bad('PostToolUse', { type: 'command' }, /non-empty command/)
+  bad('PostToolUse', { type: 'command', command: '' }, /non-empty command/)
+
+  bad('Stop', { type: 'Command', command: 'x' }, /is not a hook type this plugin ships/)
+  bad('Stop', { type: undefined }, /is not a hook type this plugin ships/)
 })
 
 test('.mcp.json registers the vent server, plugin-root-templated, pointing at a real file', async () => {

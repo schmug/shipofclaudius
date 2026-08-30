@@ -307,10 +307,9 @@ session: say what was claimed, what was not checked, and where the code is.
 line to `~/.claude/concerns-spool.jsonl` and carry on:
 
 ```bash
-printf '%s\n' "$(jq -nc \
-  --arg ts "$(date -u +%FT%TZ)" --arg cwd "$PWD" \
-  --argjson concerns "$(jq -nc '$ARGS.positional' --args "first concern" "second concern")" \
-  '{ts:$ts,cwd:$cwd,concerns:$concerns}')" >> ~/.claude/concerns-spool.jsonl
+jq -nc --arg ts "$(date -u +%FT%TZ)" --arg cwd "$PWD" \
+   --args '{ts:$ts,cwd:$cwd,concerns:$ARGS.positional}' \
+   "first concern" "second concern" >> ~/.claude/concerns-spool.jsonl
 ```
 
 **Do not retry in this session.** Do not escalate, do not surface it as an

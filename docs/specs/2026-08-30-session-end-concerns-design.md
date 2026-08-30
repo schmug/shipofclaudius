@@ -387,6 +387,16 @@ harness lives in this session's scratchpad and is disposable.
    evidently coexist, but ordering and whether one can suppress another was not established.
 3. **Where the allow-rule must live** — user settings vs the plugin. The matcher is verified;
    its required scope for an unattended run is not.
+4. **Cloud / remote-served sessions almost certainly do NOT run this hook.** The binary
+   contains `Prompt stop hooks are not yet supported outside REPL` and the matching
+   `Agent stop hooks…`, both returned from `executeHooksOutsideREPL` with a
+   `hook_type_unsupported` metric, alongside `hook skipped for a call served to a cloud
+   session`. **Local headless `claude -p` is NOT affected** — prompt Stop hooks were
+   observed firing under `-p` three times, with the configured condition text in the debug
+   log, so `-p` evidently runs the REPL path. What is unverified is any session served
+   remotely (cloud routines, `CLAUDE_CODE_REMOTE`), which cannot be tested from here.
+   Local `~/.claude/scheduled-tasks/` runs are local and unaffected; `/schedule` cloud
+   routines may silently capture nothing. **Do not claim coverage for cloud sessions.**
 
 **A note on drift.** This spec pins behaviour against Claude Code `2.1.251`. The prompt-hook
 wrapper text in §4.1 is an internal implementation detail observed through `--debug-file`, not
