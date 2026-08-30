@@ -44,11 +44,19 @@ trains agents to stop calling it, and the tool's whole value is that it gets cal
 - Held by: `callVent` in `server.mjs` (total: a throwing `deps.context()` or `appendVent`
   is absorbed, never propagated); `appendVent` never throwing (`sink.mjs`) — including the
   short-write repair path, whose own write is best-effort and swallowed;
-  `captureContext` degrading to `null` (`context.mjs`); `index.mjs` answering a thrown
+  `captureContext` degrading to `null` (`context.mjs`); the framer answering a thrown
   handler on an id-bearing request with `-32603` rather than dropping the request.
-- Tested by: `EVERY outcome an agent can cause sets isError:false` (asserts all four
-  outcomes are distinct, so a fifth cannot be added without updating it), plus
+- Tested by: `EVERY outcome an agent can cause sets isError:false` and
   `a malformed tools/call always draws a reply, never a silent drop`.
+- The **four**-ness is itself enforced, not just asserted: `a fifth vent outcome cannot be
+  added quietly` reads the refusal reasons back out of `server.mjs` and fails on any this
+  suite does not exercise. Adding a fifth `reason:` goes red without touching the test.
+- The `-32603` backstop is **unreachable from stdin**, because `handle` is total today: no
+  bytes a test can write make it throw, so the catch could once be deleted with the suite
+  staying green. The framing loop therefore lives in `framing.mjs` with an injectable
+  `dispatch`, and `a throwing dispatch answers an id-bearing request with -32603` (plus
+  its notification counterpart) is what now fails when the catch goes. `index.mjs` keeps
+  only the wiring.
 
 ### 2. Resource exhaustion is bounded — and refusing is cheap
 
@@ -69,11 +77,16 @@ apology spiral.
   - The **per-session quota** bounds *records written*, not calls attempted, so a broken
     disk still cannot burn the session's ten vents.
 - An `invalid-input` or `rate-limited` refusal is decided before the record is built and
-  before the sink is touched, so it costs one clock read. A limiter that still writes is
-  not a limiter.
+  before the sink is touched, so it costs one clock read — no `deps.context()`, i.e. no
+  git. A limiter that still writes is not a limiter, and one that still shells out to git
+  is not cheap. Pinned by `a refusal never pays for deps.context()`, which counts the dep
+  calls a refusal made rather than only the records it failed to write.
 - Per-session state is process-lifetime state because the host spawns one server per
   session. A pooled or reused process would silently widen the cap — check this
-  assumption before changing how the server is launched.
+  assumption before changing how the server is launched. That the state really is shared
+  across requests in one process is pinned by `session state is process-lifetime, proved
+  in ONE spawned process`; the CAP itself stays a unit test, because reaching it through
+  a real process would mean waiting out the 90 s window ten times.
 
 Residual: `text` length is uncapped, so the worst case is 10 large writes per session.
 Bounded by the per-session cap and deliberately not capped further here — the design spec
@@ -100,7 +113,7 @@ reader, all closed — the first and third by a vent, the second by the filesyst
   file may already belong to another session. Tested by `a short write cannot corrupt the
   NEXT record (#159)`, which goes red if either the byte-count check or the terminator is
   removed.
-- **Field forgery.** The record is assembled field by field from the clock and
+- **Field forgery.** The record is assembled field by field from the real clock and
   `deps.context()` — never spread from `args` — so `{text, ts, session, repo}` puts only
   `text` in the file, and the context spread is applied *first* so no context field can
   shadow `ts` or `text`. Tested by `agent-supplied fields other than text never reach the
@@ -142,6 +155,10 @@ requirement on the triage task (spec §6), not something this server can enforce
   stderr out of the JSON-RPC stream on stdout, and any failure degrades to `null`. Note
   the two calls are **sequential**, so the worst-case added latency for a recorded vent
   is ~2 s, not 1 s.
+- The shipped `realGit` is exercised for real by `captureContext runs the REAL git against
+  a real repo`, against a throwaway repo with a known remote and branch. Every other
+  context test substitutes a `gitFn` stub, which left the success path — and therefore the
+  end-to-end `repo`/`branch` assertions — proving only that the fields were present.
 - **Forward-looking:** the working tree `git` runs in may itself be untrusted (a
   tarball-shipped `.git/config` is attacker-authored). Safe today because `config --get`
   and `rev-parse` do not refresh the index, so `core.fsmonitor` never fires and no hook
@@ -169,6 +186,27 @@ point end-to-end without appending to the operator's `~/.claude/vents.jsonl`, an
 — which has no `~/.claude` — exercises the real wiring rather than a permanent
 `sink-unavailable`.
 
+**How the suite is kept off the real sink** (#156). Not by a source scan: the previous
+guard read its own text and looked for `VENT_SINK` within six lines of a spawn, which a
+comment, the detector line itself, an eighth-line `env`, an unrecognised call shape, or a
+`VENT_SINK` aimed straight at `~/.claude/vents.jsonl` all satisfied without the property
+holding. It is structural instead:
+
+- One function, `launchServer`, is the only thing in the suite that starts the server. It
+  applies its sink decision **after** the caller's env, so a caller cannot override it, and
+  refuses any sink outside that run's `mkdtemp` root — including `DEFAULT_SINK` — before
+  any child exists.
+- The production path (`VENT_SINK` unset, so the child derives `DEFAULT_SINK` from
+  `homedir()`) is reachable only with a `HOME` redirected into the same root, which is what
+  lets that branch be tested at all rather than skipped.
+- `SUITE DISCIPLINE: this file starts the server only through launchServer` rejects any
+  spawn-family or `mkdtemp` call outside its sanctioned region, over source with comments
+  and literals blanked — and each of the five documented bypasses is carried as a fixture
+  the audit must reject, alongside a conforming fixture it must accept.
+- `SUITE DISCIPLINE: nothing this run wrote reached the operator's real sink` is the
+  whole-run verdict: every vent the suite sends to a spawned server carries a per-run
+  uuid, and the real sink must not contain it.
+
 ### 6. Serving two eras widens the shape, not the surface
 
 `handle` speaks both the legacy `2025-11-25` handshake and the modern `2026-07-28`
@@ -181,14 +219,20 @@ means legacy, present and unsupported means `-32022` with `data.supported`.
   passes to `vent` can pick an era, forge a version, or provoke a rejection.
 - The version gate runs **in front of method dispatch**, so a request naming a version
   we do not speak never reaches `callVent`, never spends a `deps.context()`, and never
-  touches the sink. Pinned by `an unsupported version is refused BEFORE the tool runs`.
+  touches the sink — and, because the window stamp lives inside `callVent`, never spends
+  a rate-limit slot either. Pinned by `an unsupported version is refused BEFORE the tool
+  runs`, which asserts the dep-call tally is all zeroes and the state untouched; asserting
+  only "nothing was written" passed just as happily when the gate let the tool run and the
+  write merely failed.
 - Nothing arriving without an `id` is answered — replying to a notification is a protocol
   violation, and `index.mjs` would write that reply straight to stdout. This is enforced by
   a single guard sitting **in front of method dispatch**, so every method inherits it,
   including ones added later. It has to live there: `server/discover` was first added
   *above* the old trailing guard and answered notifications with an id-less response until
   the guard moved. Pinned by `a version rejection never replies to a notification` and by
-  `NO method answers a notification, including ones added later`.
+  `NO method answers a notification, including ones added later` — which derives its method
+  list by reading the `method === '…'` branches out of `server.mjs`, so "ones added later"
+  is a fact about the dispatcher rather than about somebody remembering to edit an array.
 - The era changes the result **shape** only: modern adds `resultType: 'complete'` and
   mirrors the same payload into `structuredContent`, exposing no field the text block
   did not already carry. Legacy results must stay free of both — Claude Code 2.1.241 is
@@ -216,11 +260,20 @@ means legacy, present and unsupported means `-32022` with `data.supported`.
   served legacy shapes for the rest of the session — the server agreed to an era it never
   went on to speak. Pinned by `the legacy initialize handshake NEVER negotiates a modern
   version`, by `_meta WITHOUT a protocolVersion key is legacy by assertion, not by accident`,
-  and by `MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly`.
+  by `MODERN_VERSIONS and LEGACY_VERSIONS partition SUPPORTED_VERSIONS exactly`, and by
+  `initialize answers EVERY requested version with a legacy one`, which walks the whole
+  space that door can be handed — supported-modern, supported-legacy, unknown, absent —
+  rather than one value at a time. `every SUPPORTED_VERSION is genuinely served, and its
+  era decides the shape` covers the other direction: a version this server advertises
+  through `server/discover` and then rejects, or serves the wrong era's shape, fails there.
 
 **Written to spec, never observed.** No modern client exists to test against. Everything
 above proves our replies match the published shapes; none of it is evidence that a
-client accepted one. Do not restate it as verified end-to-end.
+client accepted one. Do not restate it as verified end-to-end. The modern `tools/call`
+**success** path does at least cross the real stdio entry point now (`FRAMING: the modern
+era survives the real stdio path`) — previously the only modern `tools/call` down there
+was the version-rejected one, so the modern result shape had never been framed onto
+stdout at all. That is still shape conformance, not client verification.
 
 ## Not in scope here
 
