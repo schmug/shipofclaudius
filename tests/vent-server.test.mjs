@@ -324,6 +324,21 @@ test('parseRepo handles ssh, https, and .git-less remotes', () => {
   assert.equal(parseRepo(null), null)
 })
 
+test('parseRepo folds case on EVERY host — a knowing trade, not an oversight (#160)', () => {
+  // Decision recorded in design spec §4.4: fold case unconditionally rather than per-host.
+  // This key only groups a personal vent digest, and every real remote is GitHub, where
+  // owner/name IS case-insensitive. The price is that a case-sensitive host's two distinct
+  // repos collapse into one bucket. That price is accepted deliberately — asserted here so
+  // the trade cannot be reverted, or re-litigated, without a test going red.
+  assert.equal(parseRepo('git@self-hosted.example:Foo/bar.git'), 'foo/bar')
+  assert.equal(parseRepo('git@self-hosted.example:foo/bar.git'), 'foo/bar')
+  assert.equal(
+    parseRepo('git@self-hosted.example:Foo/bar.git'),
+    parseRepo('git@self-hosted.example:foo/bar.git'),
+    'case-distinct repos on a case-sensitive host share one grouping key BY DESIGN',
+  )
+})
+
 // ---- rate limiting and the calm-failure contract ----
 
 test('a second vent inside the window is refused and writes nothing', () => {

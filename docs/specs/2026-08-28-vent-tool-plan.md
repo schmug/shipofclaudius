@@ -449,6 +449,10 @@ test('parseRepo handles ssh, https, and .git-less remotes', () => {
   assert.equal(parseRepo('git@github.com:schmug/agent-notes.git'), 'schmug/agent-notes')
   assert.equal(parseRepo('https://github.com/schmug/agent-notes.git'), 'schmug/agent-notes')
   assert.equal(parseRepo('https://github.com/schmug/agent-notes'), 'schmug/agent-notes')
+  // Normalization (design spec §4.4): trailing slash stripped, case folded on every host.
+  assert.equal(parseRepo('https://github.com/schmug/agent-notes/'), 'schmug/agent-notes')
+  assert.equal(parseRepo('https://github.com/Schmug/Agent-Notes.git'), 'schmug/agent-notes')
+  assert.equal(parseRepo('git@self-hosted.example:Foo/bar.git'), 'foo/bar')
   assert.equal(parseRepo(null), null)
 })
 ```
@@ -480,8 +484,10 @@ function realGit(cwd, args) {
 
 export function parseRepo(url) {
   if (!url) return null
-  const m = String(url).match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/)
-  return m ? `${m[1]}/${m[2]}` : null
+  // Normalized, because this is a GROUPING KEY: trailing slash stripped and case folded on
+  // every host. Unconditional folding is a decided trade — see design spec §4.4 (#160).
+  const m = String(url).replace(/\/+$/, '').match(/[:/]([^/:]+)\/([^/]+?)(?:\.git)?$/)
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null
 }
 
 export function captureContext(env = process.env, gitFn = realGit) {

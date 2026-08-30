@@ -178,12 +178,28 @@ The agent supplies none of this; the server gathers it:
 | `ts` | ISO 8601 UTC at write time |
 | `text` | the tool argument |
 | `cwd` | **`CLAUDE_PROJECT_DIR`** env var — set by the host and unambiguous. `process.cwd()` was verified to match it, but prefer the env var. |
-| `repo` | `git config --get remote.origin.url` resolved to `owner/name`, or `null` |
+| `repo` | `git config --get remote.origin.url` resolved to `owner/name`, **normalized** (below), or `null` |
 | `branch` | `git rev-parse --abbrev-ref HEAD`, or `null` |
 | `session` | **`CLAUDE_CODE_SESSION_ID`** — verified present and per-session (a child session carried its own id, distinct from the parent's), not inherited |
 
 Git lookups must be best-effort and time-bounded: a slow or absent git must degrade to `null`,
 never hang the tool call.
+
+**Normalizing `repo` — decided in #160.** `repo` is a **grouping key**: the weekly triage
+buckets records by it, so it is normalized rather than stored as typed. A trailing slash is
+stripped, and `owner/name` is **case-folded on every host, unconditionally**.
+
+Host-dependent case sensitivity is the deciding factor, and it cuts both ways. GitHub — where
+every real remote here points — treats `owner/name` case-insensitively, so `schmug/x`,
+`schmug/x/` and `Schmug/X.git` are one repo and must not become three buckets. A
+case-sensitive host (a self-hosted forge, or a bare remote on a case-sensitive filesystem)
+can genuinely serve `Foo/bar` and `foo/bar` as two repositories, and folding merges them.
+
+Unconditional folding accepts that second error to eliminate the first. The trade is
+deliberate: this key groups a personal digest and carries no security weight, so one
+mis-grouped row is the entire downside — whereas per-host folding would need a
+known-case-insensitive hostname allowlist that rots silently every time a forge is added.
+Pinned by `parseRepo folds case on EVERY host` in `tests/vent-server.test.mjs`.
 
 ### 4.5 Rate limiting (build this on day one)
 
