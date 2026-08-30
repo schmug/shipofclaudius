@@ -41,7 +41,9 @@ error means the host and this server disagree, never that a vent was rejected.
 Availability, not confidentiality, is the property at risk here: a vent that fails loudly
 trains agents to stop calling it, and the tool's whole value is that it gets called.
 
-- Held by: `callVent` in `server.mjs`; `appendVent` never throwing (`sink.mjs`);
+- Held by: `callVent` in `server.mjs` (total: a throwing `deps.context()` or `appendVent`
+  is absorbed, never propagated); `appendVent` never throwing (`sink.mjs`) — including the
+  short-write repair path, whose own write is best-effort and swallowed;
   `captureContext` degrading to `null` (`context.mjs`); `index.mjs` answering a thrown
   handler on an id-bearing request with `-32603` rather than dropping the request.
 - Tested by: `EVERY outcome an agent can cause sets isError:false` (asserts all four
@@ -80,12 +82,24 @@ sink ever grows unreasonably, cap it in the spec first.
 
 ### 3. An agent cannot forge a sink record
 
-The sink is machine-read line-by-line by triage. Two ways a vent could lie to that reader,
-both closed:
+The sink is machine-read line-by-line by triage. Three ways a record could lie to that
+reader, all closed — the first and third by a vent, the second by the filesystem:
 
 - **Line injection.** A newline inside `text` would let one call plant a second, fully
   formed "vent". `JSON.stringify` escapes it, so one record is always exactly one line.
   Tested by `a vent text carrying newlines cannot forge a second JSONL record`.
+- **Truncation splicing.** Not agent-caused, but the same harm to the same reader. `write(2)`
+  may accept fewer bytes than offered and still report success (ENOSPC partway, an
+  interrupting signal), so a record can land on disk as a fragment with no terminator — and
+  the next append, from this process or a concurrent one, then runs onto the end of it. One
+  line, two records, neither recoverable, and the caller was told only `sink-unavailable`.
+  `appendVent` compares the returned byte count against the buffer length and, on a short
+  write, writes a lone `\n` through the same fd to close the damaged line before returning
+  `false`. That confines the loss to one unparseable line the reader skips. It must **not**
+  truncate back to the pre-write size instead: under `O_APPEND` the bytes at the end of the
+  file may already belong to another session. Tested by `a short write cannot corrupt the
+  NEXT record (#159)`, which goes red if either the byte-count check or the terminator is
+  removed.
 - **Field forgery.** The record is assembled field by field from the clock and
   `deps.context()` — never spread from `args` — so `{text, ts, session, repo}` puts only
   `text` in the file, and the context spread is applied *first* so no context field can
@@ -93,6 +107,17 @@ both closed:
   sink record` (the input half) and `a context field can never shadow the clock or the
   agent text` (the ordering half — it feeds a context that actually collides, and goes red
   if the spread order is reverted).
+
+Separately, every record carries the full §4.4 context shape whether or not capture
+worked: `callVent` builds it as `{...NULL_CONTEXT, ...ctx, ts, text}`, so `cwd`, `repo`,
+`branch` and `session` are string-or-null and never *absent*. Absorbing a throwing
+`deps.context()` into `{}` alone emitted a record with those keys simply missing, which a
+line-by-line reader cannot distinguish from a schema it does not know — captured-but-unknown
+has to say `null` out loud. `NULL_CONTEXT` lives in `context.mjs` and every `captureContext`
+return is built from it, so the two cannot drift. Tested by `a throwing context() records
+explicit nulls, not a record missing every field (#159)`, `a context() returning only SOME
+fields is completed to the four-key shape`, and `NULL_CONTEXT is exactly the shape
+captureContext returns, so the two cannot drift`.
 
 **Scope of that claim — read this before trusting a record.** What is closed is the
 tool's *input surface*: nothing an agent passes to `vent` can set `ts`, `session`, `repo`
@@ -126,6 +151,15 @@ requirement on the triage task (spec §6), not something this server can enforce
 Do not let a future field derive its command, arguments, or cwd from tool input.
 
 ### 5. The sink path is host-controlled, not agent-controlled
+
+The default is `~/.claude/vents.jsonl`, and `defaultSink()` returns **`null`** rather than
+that path when `os.homedir()` gives no absolute directory — it returns `''` on a host with no
+`HOME` and no passwd entry (containers, some CI runners). `join('', '.claude', 'vents.jsonl')`
+is `.claude/vents.jsonl`, resolved against whatever directory the host spawned the server in,
+which *resolves* inside any repo that has a `.claude/` directory — this one included. Vents
+would land in a working tree, be read by no triage, and possibly be committed. A `null` sink
+is refused up front and becomes an ordinary `sink-unavailable`. Tested by `an empty homedir()
+yields NO sink, never a cwd-relative one (#159)`.
 
 `VENT_SINK` overrides the sink. It is read from the **server's own environment**, which
 the host fixes at spawn time; the tool's input schema has exactly one property and the
