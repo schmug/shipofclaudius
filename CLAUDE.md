@@ -33,6 +33,14 @@ The `.claude/workflows/*.js` scripts use **top-level `return` and `await`** beca
 
 After editing a workflow, run `npm test`; it must end `0 failing`, and the standing contract is that the count only ever goes **UP** — compare against a run on the base commit, not against a number written down somewhere. No total is pinned in README or here, deliberately: a suite cannot run the suites, so a hardcoded count is a claim no check can enforce, and the last one had drifted by 18 across four terms before anyone noticed. `tests/plugin-integrity.test.mjs` fails the build if a total is pinned back into README **or into this file**, in any wrapper (bolded, quoted, or bare).
 
+**`packages/specificity` is not a workflow either, and is not wired to anything by default.** It is the M1 fast path of the prompt-specificity scorer (design: `docs/specs/2026-08-30-prompt-specificity.md`): a `UserPromptSubmit` command hook (`bin/fast.mjs`) plus a status-line renderer (`bin/render.sh` + `render.jq`). Three things to know before touching it:
+
+- **Nothing here is registered.** It is deliberately absent from `hooks/hooks.json`, because an entry there fires in every session of every project with the plugin enabled, and `statusLine` is a user setting a plugin cannot claim regardless. Registering it is M5's decision and needs explicit approval — it is a change to the session's own guardrails.
+- **The one invariant is that no configuration may break a session** (spec §8). Every path exits 0. The single exception is `mode = "gate"`, which exits 2 — and on `UserPromptSubmit` exit 2 *erases the user's prompt*, so it ships off behind a high threshold. Never signal an ordinary failure with a non-zero exit here.
+- **`session_id` becomes a filesystem path**, so it is validated in two places that must stay in step: `isSafeSessionId()` in `src/cache.mjs` and the `case` guard in `bin/render.sh`. Both reject rather than sanitize.
+
+Like `factory-gate` it is model-free, so `tests/specificity-fast.test.mjs` and `tests/specificity-render.test.mjs` are ordinary unit + end-to-end suites, not sims. The render suite shells out to the real `sh`/`jq`, and skips when `jq` is absent.
+
 **`packages/factory-gate` is not a workflow and has no sim.** It is pure, model-free code, so `tests/factory-gate.test.mjs` is an ordinary unit suite. Because it is imported (not `AsyncFunction`-wrapped), `tests/` must stay a sibling of `packages/` as well as of `.claude/workflows/`. The two factory sims import the real gate to assert across the boundary — if you change `CONDITION_ORDER` or the `fixture_evidence` shape, those sims are what catch the caller drift.
 
 ## Conventions that the test suite enforces
@@ -79,6 +87,6 @@ Nothing in this repo can enforce this: `~/.claude/` is outside the tree, so `plu
 - `.claude/agents/*.md` — subagents the workflows dispatch by `agentType`. Registered via `plugin.json`'s `agents` key (this path is not auto-discovered for plugins).
 - `skills/<name>/SKILL.md` — plugin wrapper skills, one per workflow.
 - `tests/*-sim.test.mjs` — offline simulators (one per workflow) + `plugin-integrity.test.mjs`; `tests/lib/` holds vendored built-ins-only validators. Tests resolve their target via `new URL('../.claude/workflows/<name>.js', import.meta.url)`, so `tests/` must stay a sibling of `.claude/workflows/`.
-- `packages/` — the non-workflow code: `factory-gate` (pure, model-free, unit-tested) and `vent-server` (the MCP stdio server above).
+- `packages/` — the non-workflow code: `factory-gate` (pure, model-free, unit-tested), `vent-server` (the MCP stdio server above), and `specificity` (the prompt-specificity scorer's hook + status line — see below).
 - `.claude-plugin/{plugin,marketplace}.json` — plugin packaging manifests.
 - `docs/specs/` — design/spec docs for major features (dated filenames).
