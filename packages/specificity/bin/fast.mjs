@@ -22,6 +22,7 @@ import { buildIndex } from '../src/context-index.mjs'
 import { extractReferents } from '../src/referents.mjs'
 import { buildFastBlock, buildRecord, summarize, ambiguityContext } from '../src/record.mjs'
 import { writeRecord } from '../src/cache.mjs'
+import { buildOutcomeRecord, appendOutcome } from '../src/outcome-log.mjs'
 
 // Synchronous drain of fd 0. The hook is a short-lived process whose entire job is
 // bounded by a timeout, so blocking here is simpler and more predictable than the async
@@ -68,10 +69,25 @@ export function decide(event, config) {
   const sessionId = typeof event.session_id === 'string' ? event.session_id : ''
   const record = buildRecord({ session_id: sessionId, prompt_id: event.prompt_id, fast, phase })
 
+  // The M4 validation log (§9.1). Opt-in and default off, so a session that never sets
+  // `outcome_log` never creates the file — this is instrumentation switched on for an
+  // experiment, not a thing that accumulates because a milestone needed it. Built here,
+  // in the pure layer, so what gets written is testable without spawning a process.
+  //
+  // `phase === "error"` is excluded even though a fast block usually survives it: an
+  // unparseable transcript means the context index was built from nothing, so every
+  // referent resolves to "unresolved" and the counts describe the failure rather than the
+  // prompt. Logging them would put rows in the dataset that look like maximally vague
+  // turns and are not.
+  const outcome = config.outcome_log && phase !== 'error'
+    ? buildOutcomeRecord({ prompt_id: event.prompt_id, fast })
+    : null
+
   if (config.mode === 'gate' && fast && fast.unresolved >= config.gate_threshold) {
     const listed = fast.referents.filter((r) => r.status === 'unresolved').map((r) => `  - "${r.text}"`)
     return {
       record,
+      outcome,  // a blocked turn is still a scored turn, and dropping it would bias the log
       exitCode: 2,  // the ONLY blocking path in this program
       stderr: `Blocked: ${fast.unresolved} unresolved referents (gate_threshold=${config.gate_threshold}).\n${listed.join('\n')}\n`,
     }
@@ -84,7 +100,7 @@ export function decide(event, config) {
       payload.hookSpecificOutput = { hookEventName: 'UserPromptSubmit', additionalContext }
     }
   }
-  return { record, exitCode: 0, stdout: `${JSON.stringify(payload)}\n` }
+  return { record, outcome, exitCode: 0, stdout: `${JSON.stringify(payload)}\n` }
 }
 
 function main() {
@@ -93,10 +109,13 @@ function main() {
 
   const dir = configDir()
   const config = loadConfig(dir)
-  const { record, exitCode, stdout, stderr } = decide(event, config)
+  const { record, outcome, exitCode, stdout, stderr } = decide(event, config)
 
   // A cache the status line cannot read is a cosmetic failure, never a session failure.
   try { writeRecord(dir, record.session_id, record) } catch { /* fail open */ }
+  // Neither is a validation log that cannot be appended to. An unwritable path, a full
+  // disk or a read-only home must not be able to reach the user's turn.
+  try { if (outcome) appendOutcome(dir, outcome) } catch { /* fail open */ }
 
   if (stderr) process.stderr.write(stderr)
   if (stdout) process.stdout.write(stdout)
