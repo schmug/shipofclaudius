@@ -352,34 +352,34 @@ harness lives in this session's scratchpad and is disposable.
    `agent` are *"Only available for tool events: PreToolUse, PostToolUse, PermissionRequest."*
    Both were observed running on `Stop`, and `prompt` has a `Stop`-specific wrapper (§4.1) that a
    tool-events-only feature would not have.
-8. **The block cap is around 9.** An unsatisfiable agent-hook condition produced exactly 9
-   evaluations over ~2 minutes before the session terminated with no output. Measured once, on
-   the default (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` unset) — treat 9 as the observed value, not a
-   documented constant.
+8. **The default block cap is NOT a fixed number.** Two unsatisfiable-condition runs on the
+   default produced **9** and **14** evaluations. Do not encode either as a constant.
+9. **The cap CAN be lowered.** `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2` produced 3 evaluations
+   against the same unsatisfiable condition that ran to 14 unset. The binary documents the
+   variable as raising the limit; it lowers it too. **This is the runaway mitigation** — it
+   bounds §4.4 far more tightly than the condition wording alone.
+10. **Prompt hooks load from a plugin-bundled `hooks/hooks.json`.** Probed with a throwaway
+    plugin under `--plugin-dir`: 14 evaluations fired. This was the one genuinely unproven
+    mechanism and it holds.
+11. **`Bash(gh issue create:*)` is a valid allow-rule matcher.** Verified by running
+    `gh issue create --help` under it in `-p` with no prompt.
+12. **The `concern` label does not exist on `schmug/agent-notes`.** The repo carries only the
+    nine GitHub defaults, so `gh issue create --label concern` **fails until the label is
+    created**. Creating it is a prerequisite step, not an assumption.
 
 **Still open — check before relying on these:**
 
-1. **`type: "prompt"` loaded from a plugin `hooks/hooks.json`.** Verified only via
-   `--settings`. Plugin load is a different path; confirm with a scratch install as the first
-   implementation step. Every shipped example of a prompt hook in this repo's ecosystem is
-   `type: "command"`, so this is the one genuinely unproven mechanism.
-2. **Whether the prompt hook sees the full transcript or a window of it.** The wrapper says
+1. **Whether the prompt hook sees the full transcript or a window of it.** The wrapper says
    "the conversation transcript above" and the probe's transcript was two messages long. A
    long session may present the evaluator with a truncated view, which would bias it toward
    `ok: true` — silence, the §9 failure mode. Measure on a real session before trusting the
    block rate.
-3. **Interaction with the `Stop` hook already running in this environment.** Debug output
+2. **Interaction with the `Stop` hook already running in this environment.** Debug output
    showed a second `Hook Stop (Stop) success` emitting a metrics payload
    (`skip_reason`, `diff_strategy_v2`) from something already installed. Multiple Stop hooks
    evidently coexist, but ordering and whether one can suppress another was not established.
-4. **The permission rule the filing needs.** The main agent must be able to run
-   `gh issue create` against `agent-notes` in an unattended session. `Bash(echo:*)` and `Write`
-   were verified to work as hook-agent allow-rules, but the exact matcher for the real command —
-   and whether it must live in user settings rather than the plugin — was not tested. This is the
-   first implementation step, ahead of any code.
-5. **Whether the block cap of 9 is configurable downward.** `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` is
-   documented in the binary as raising the limit; whether it can *lower* it was not tested. A cap
-   of 2 would bound the runaway in §4.4 much more tightly than the observed 9.
+3. **Where the allow-rule must live** — user settings vs the plugin. The matcher is verified;
+   its required scope for an unattended run is not.
 
 **A note on drift.** This spec pins behaviour against Claude Code `2.1.251`. The prompt-hook
 wrapper text in §4.1 is an internal implementation detail observed through `--debug-file`, not
