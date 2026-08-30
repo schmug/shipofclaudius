@@ -498,7 +498,8 @@ and it **overwrites** `SKILL.md` with the `prompt` argument, so pass the full bo
 ```
 
 Creating a recurring task is persistent configuration; get explicit approval before
-registering it.
+registering it. **Done 2026-08-30** — registered `0 8 * * 1`, confirmed in the task list
+with a `nextRunAt`.
 
 - [ ] **Step 4: Commit the spec update**
 

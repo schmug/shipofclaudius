@@ -226,11 +226,14 @@ Two mitigations, both required:
 
 **Mitigation 1 is weakest exactly where the feature is aimed.** Spooling requires Bash, and §2
 notes that unattended runs are both where the capture matters most and where tools may be
-denied. So `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2` is not a nicety — it is the only backstop that
-holds when the agent cannot write. **It is NOT shipped.** A plugin cannot set host environment;
-it belongs in `~/.claude/settings.json` `env`, which is a guardrail edit requiring Cory's
-approval. Until it is set, the runaway profile above is live. Tracked as the one decided
-mitigation this work did not deliver.
+denied. So `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2` is not a nicety — it is the only backstop that holds
+when the agent cannot write. A plugin cannot set host environment, so it lives in
+`~/.claude/settings.json` `env`, outside this repo.
+
+**Set and verified 2026-08-30.** With it in user settings and no other override, the same
+unsatisfiable condition that ran to 9 and 14 evaluations on the default terminated at **3**.
+Nothing in this repo can enforce it — `~/.claude` is outside the tree — so the weekly triage
+task checks for evidence of longer loops and reports prominently if the setting has been lost.
 
 ### 4.5 Never fail the turn
 
@@ -271,8 +274,10 @@ repo, so it lives outside this repo by necessity).
 
 **Writing the file does not schedule it.** Registration is a separate step via
 `mcp__scheduled-tasks__create_scheduled_task`; an unregistered directory is inert and several
-already exist in this environment. As of 2026-08-30 this one is **written but unregistered**,
-pending approval — a recurring task is persistent configuration.
+already exist in this environment (`branch-prune`, `pr-check`, `sentry-triage`,
+`worktree-cleanup`). **Registered 2026-08-30**, `0 8 * * 1` (Mondays 08:00 local), confirmed
+present in the scheduled-task list with a `nextRunAt` — an `ls` of the directory would not
+have proven that.
 
 1. Read open `concern`-labelled issues in `schmug/agent-notes`, plus any spool backlog.
 2. Route each item onward: durable unknown → Q&A board post; tooling friction → the vent
