@@ -12,6 +12,7 @@ import { join } from 'node:path'
 
 export const DEFAULTS = Object.freeze({
   mode: 'advisory',            // 'advisory' | 'gate'
+  outcome_log: false,          // append the per-turn validation record of §9.1 (M4)
   gate_threshold: 3,           // unresolved referents that trigger exit 2 in gate mode
   emit_ambiguities: false,     // send unresolved referents to Claude via additionalContext
   sample_count: 10,            // N per side of the delta (M2); 8 was below the N=10 the
@@ -77,6 +78,7 @@ export function normalizeConfig(raw = {}) {
   if (MODES.has(raw.mode)) c.mode = raw.mode
   if (BACKENDS.has(raw.embedding_backend)) c.embedding_backend = raw.embedding_backend
   if (typeof raw.emit_ambiguities === 'boolean') c.emit_ambiguities = raw.emit_ambiguities
+  if (typeof raw.outcome_log === 'boolean') c.outcome_log = raw.outcome_log
   if (typeof raw.sampling_model === 'string') c.sampling_model = raw.sampling_model
   num('gate_threshold', 1, 1000)
   num('sample_count', 1, 64)

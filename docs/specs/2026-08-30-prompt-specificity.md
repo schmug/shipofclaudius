@@ -574,6 +574,7 @@ the two must stay in step.
 | Key | Default | Effect |
 |---|---|---|
 | `mode` | `advisory` | `advisory` \| `gate` |
+| `outcome_log` | `false` | append the per-turn validation record described in §9.1 |
 | `gate_threshold` | `3` | unresolved referents that trigger exit 2 in gate mode |
 | `emit_ambiguities` | `false` | send unresolved referents to Claude via `additionalContext` |
 | `sample_count` | `10` | N per side of the delta (was 8; see §4.3) |
@@ -614,6 +615,39 @@ first risks building the thing the validation then deletes. Running M4 first is 
 model calls), accumulates the dataset that decides whether M2 is worth building at all, and
 calibrates §10's normalization ceiling as a side effect.
 
+### 9.1 M4 — the validation log (decided 2026-08-30)
+
+M4 is the next thing built, and it needs records that outlive a turn. The §6 cache cannot
+supply them: it is one file per session, rewritten every turn. So M4 adds an append-only
+JSONL log — under three constraints, each decided rather than assumed.
+
+**Opt-in, default off.** `outcome_log = false` ships as the default and the log is written
+only when it is switched on. The status line stays the sole always-on surface; the log is
+instrumentation you enable deliberately for the experiment, not a thing that quietly
+accumulates because a milestone needed it.
+
+**Counts only — no prompt-derived text.** Each record carries `prompt_id`, a timestamp,
+the four referent counts (`grounded`, `unresolved`, `ambiguous`, `indeterminate`), the
+constraint counts, `prompt_tokens` and `log_length_baseline`. It does **not** carry the
+referent list: phrases like "the config file", and the paths they matched, are
+prompt-derived text, and a log accumulates permanently where the cache only ever held one
+turn. This is the same call as §10 Q3, which chose re-resolving stored referents precisely
+to keep prompt text off disk.
+
+The cost is real and worth stating: the fix to `GENERIC_HEADS` came from inspecting *which*
+phrases misfired, not from counts. Counts can show that the heuristics are wrong; they
+cannot show why. Diagnosis of that kind stays a deliberate, separate exercise against a
+corpus — as it was here — rather than a standing collection.
+
+**The outcome label is a heuristic whose own error rate is measured.** "Did the turn need a
+follow-up correction?" is inferred from the next turn (short length, correction markers —
+"no", "actually", "I meant"), and then a sample is hand-checked to establish how often the
+heuristic itself is wrong. That second step is not optional: without it, a weak correlation
+is indistinguishable from a weak label, and M4's whole purpose is deciding whether to cut
+the sampler. The pronoun result in §10 Q7 is the cautionary case — a measurement that
+looked meaningful until it was checked against what the answer should have been, at which
+point it turned out to be ~5% correct.
+
 1. **M1 — fast path + status line.** Referent resolution, constraint counts, cache file,
    `jq` renderer. No model calls anywhere. Useful on its own and validates the plumbing.
 2. **M2 — the second measure.** No-sampling information gain (log-det covariance in
@@ -626,7 +660,12 @@ calibrates §10's normalization ceiling as a side effect.
 4. **M4 — validation.** The only score that means anything is one that predicts
    something. Log score alongside turn outcome (did the turn need a follow-up
    correction?) and check whether `delta_normalized` beats `log_length_baseline` at
-   predicting it. If it doesn't, cut the sampler.
+   predicting it. If it doesn't, cut the sampler. Shape and constraints in §9.1.
+
+   Note that until M2 exists there is no `delta_normalized` to test, so M4's first
+   deliverable is the weaker but still useful comparison: whether the **fast-path**
+   grounding ratio beats `log_length_baseline`. If even that fails, the fast path is not
+   earning its screen space and the sampler is moot.
 5. **M5 — packaging.** Move to a plugin `hooks/hooks.json` so it installs as a unit.
    Note that under `allowManagedHooksOnly`, an admin narrows both hooks and `statusLine`
    to managed settings — relevant only if this ever ships to a fleet.
