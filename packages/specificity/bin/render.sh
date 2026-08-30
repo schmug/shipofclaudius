@@ -34,10 +34,18 @@ cache="$dir/$sid.json"
 # stdin once and confirm before depending on any of it). BSD and GNU stat disagree on
 # flags; try both, and treat "no idea" as "not stale" rather than crying wolf.
 cur_pid=$(printf '%s' "$input" | jq -r '.prompt_id // empty' 2>/dev/null)
+#
+# GNU and BSD `stat` are not merely different, they COLLIDE: on GNU, `-f` means
+# --file-system, so `stat -f %m FILE` prints filesystem information for FILE on stdout and
+# only fails on the `%m` operand. Chaining it as `stat -f %m ... || stat -c %Y ...` then
+# concatenates that text with the epoch, and the result is garbage that silently disables
+# staleness. So each variant is tried and its output VALIDATED as digits before use,
+# rather than trusting exit status.
 tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
-mtime=0
+mtime=""
 if [ -n "$tp" ] && [ -f "$tp" ]; then
-  mtime=$(stat -f %m "$tp" 2>/dev/null || stat -c %Y "$tp" 2>/dev/null || echo 0)
+  mtime=$(stat -c %Y "$tp" 2>/dev/null)                          # GNU
+  case "$mtime" in ''|*[!0-9]*) mtime=$(stat -f %m "$tp" 2>/dev/null) ;; esac   # BSD/macOS
 fi
 case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
 

@@ -19,7 +19,7 @@ import { walkFiles, SKIP_DIRS } from '../packages/specificity/src/files.mjs'
 import { buildIndex, termsOf, looksLikePath } from '../packages/specificity/src/context-index.mjs'
 import { extractReferents, countCandidates, resolveReferents, tally, stripCode } from '../packages/specificity/src/referents.mjs'
 import { inventory, estimateTokens, logLengthBaseline } from '../packages/specificity/src/constraints.mjs'
-import { isSafeSessionId, cachePathFor, writeRecord, PHASES } from '../packages/specificity/src/cache.mjs'
+import { isSafeSessionId, cachePathFor, writeRecord, ensureDir, MAX_CREATE_DEPTH, PHASES } from '../packages/specificity/src/cache.mjs'
 import { buildFastBlock, buildRecord, summarize, ambiguityContext, MAX_HOOK_OUTPUT, MAX_LISTED_REFERENTS } from '../packages/specificity/src/record.mjs'
 import { decide } from '../packages/specificity/bin/fast.mjs'
 
@@ -321,6 +321,32 @@ test('cache: a refused session_id writes nothing at all', async () => {
   assert.deepEqual(await readdir(dir), [])
 })
 
+test('cache: ensureDir creates a nested path with no recursive mkdir', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'spec-mk-'))
+  const target = join(base, 'a', 'b', 'c')
+  ensureDir(target)
+  assert.ok((await import('node:fs')).statSync(target).isDirectory())
+  ensureDir(target)  // idempotent
+})
+
+test('cache: ensureDir FAILS FAST instead of hanging on a pathological directory', () => {
+  // Regression. `mkdirSync(dir, { recursive: true })` never returns for a path under
+  // Linux procfs; the bounded stat-then-create walk throws instead. The wall-clock bound
+  // is the assertion that matters — a hang is not a failure any try/catch can see, and on
+  // UserPromptSubmit it stalls the user's turn until the host times out.
+  for (const bad of ['/proc/nonexistent/nope', '/proc/self/mem/nope']) {
+    const started = Date.now()
+    assert.throws(() => ensureDir(bad), undefined, `${bad} must throw`)
+    assert.ok(Date.now() - started < 2000, `${bad} must fail fast, took ${Date.now() - started}ms`)
+  }
+})
+
+test('cache: ensureDir refuses to build an arbitrarily deep tree', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'spec-deep-'))
+  const tooDeep = join(base, ...Array.from({ length: MAX_CREATE_DEPTH + 3 }, (_, n) => `d${n}`))
+  assert.throws(() => ensureDir(tooDeep), /levels below any existing directory/)
+})
+
 test('record: the shape matches the §6 schema', () => {
   const i = idx([userTurn('src/a.mjs')], ['src/a.mjs'])
   const fast = buildFastBlock('fix the timeout in src/a.mjs', extractReferents('fix the timeout in src/a.mjs'), i)
@@ -451,8 +477,17 @@ test('e2e: garbage on stdin exits 0 and still emits valid JSON', async () => {
 })
 
 test('e2e: an unwritable cache directory is cosmetic, not fatal', async () => {
-  const res = runHook({ session_id: 'e2e3', prompt: 'hello', cwd: tmpdir() }, { dir: '/proc/nonexistent/nope' })
+  // The unwritable path is "a directory underneath a regular FILE", which fails ENOTDIR on
+  // every OS and for every uid — including root, which ignores mode bits and would sail
+  // straight through a chmod-based test. The previous version used /proc/nonexistent/nope,
+  // which is merely absent on macOS but is procfs on Linux, where it hung CI for 30
+  // minutes; see ensureDir().
+  const base = await mkdtemp(join(tmpdir(), 'spec-e2e3-'))
+  await writeFile(join(base, 'blocker'), '')
+  const started = Date.now()
+  const res = runHook({ session_id: 'e2e3', prompt: 'hello', cwd: tmpdir() }, { dir: join(base, 'blocker', 'cache') })
   assert.equal(res.code, 0, 'the session survives a cache it cannot write')
+  assert.ok(Date.now() - started < 5000, 'and fails fast rather than hanging the turn')
 })
 
 test('e2e: a traversal session_id writes no file and still exits 0', async () => {
