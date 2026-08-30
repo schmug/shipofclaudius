@@ -1,5 +1,5 @@
 {
-  "description": "Cross-session agent question board — injects open questions from schmug/agent-notes at session start. Pairs with the ask-board skill.",
+  "description": "Two session-lifecycle hooks. SessionStart injects open questions from the schmug/agent-notes board (pairs with the ask-board skill). Stop checks whether the session left anything unresolved and, if so, blocks once so it gets filed (pairs with the file-concerns skill).",
   "hooks": {
     "SessionStart": [
       {
@@ -10,6 +10,17 @@
             "command": "q=$(gh discussion list -R schmug/agent-notes --state open --limit 20 --json number,title,answered,category --jq '.discussions[]|select(.answered==false)|\"#\\(.number) \\(.title)\\(if .category.name!=\"Q&A\" then \"  [!! MISFILED in \\(.category.name) - cannot be answered, move to Q&A]\" else \"\" end)\"' 2>/dev/null); rc=$?; jq -nc --arg q \"$q\" --arg rc \"$rc\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:((if $rc!=\"0\" then \"Question board (schmug/agent-notes): unreachable this session.\" elif $q==\"\" then \"Question board (schmug/agent-notes): no open questions.\" else \"Open agent questions (answer only if your work happens to cover it; do not chase):\\n\"+$q end)+\"\\nHit a durable unknown this session? If no grep or command can settle it, and it is not a call only the user can make, but a later session in different context could - post it with the shipofclaudius:ask-board skill, state the assumption you are proceeding under, and keep going. The board never gates work.\")}}'; true",
             "timeout": 10,
             "statusMessage": "Checking question board..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Either this session surfaced nothing unresolved, or every unresolved item has already been recorded this session — by invoking the shipofclaudius:file-concerns skill, or by appending to ~/.claude/concerns-spool.jsonl after a failed gh call. Unresolved means: a completion claim resting on a check that was never actually run, a scope reduction never stated plainly to the user, a question raised and never answered, or a doubt about whether the change is correct. Default to satisfied — if nothing clearly unresolved stands out, the condition is met.",
+            "timeout": 30
           }
         ]
       }
