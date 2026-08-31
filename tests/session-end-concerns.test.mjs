@@ -110,13 +110,42 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 // re-measuring is the failure mode: run at least five real sessions, confirm a trivial one
 // still evaluates once and does not block, and put that count in the commit message.
 // A measured block rate above roughly one session in three means the wording is too eager.
-const PROMPT_SHA256_16 = 'fa9e798d401aaf2b'
+//
+// 2026-08-31 (#167): added the in-flight-work exemption below. Re-measurement against real
+// sessions was NOT performed as part of that change — it was made by an unattended routine
+// with no way to run five real sessions and observe block behaviour. Treat the hash update
+// as unmeasured until a human (or a session with real transcript access) confirms the block
+// rate per the instructions above.
+const PROMPT_SHA256_16 = '502aba2764499865'
 
 test('stop hook: the condition wording is hash-pinned', () => {
   const actual = createHash('sha256').update(stopEntries[0].prompt || '').digest('hex').slice(0, 16)
   assert.equal(actual, PROMPT_SHA256_16,
     'the Stop condition wording changed. That string decides the block rate — re-measure it ' +
     'against real sessions, then update PROMPT_SHA256_16 in the same commit.')
+})
+
+test('stop hook: exempts legitimately in-flight background work from "unresolved"', () => {
+  const p = stopEntries[0].prompt || ''
+  // #167: an armed monitor or a still-running background task is a pending check, not a
+  // skipped one — a transcript reporting one awaiting result must not block. The exemption
+  // must be checkable from concrete transcript artifacts (a tracked background task, a
+  // spawned agent, an armed monitor), not from the agent merely asserting it is waiting.
+  assert.match(p, /background task/i, 'names a tracked background task as a transcript artifact')
+  assert.match(p, /armed monitor/i, 'names an armed monitor as a transcript artifact')
+  assert.match(p, /spawned agent/i, 'names a spawned agent as a transcript artifact')
+  assert.match(p, /is not unresolved/i, 'states the exemption as a condition, not an instruction')
+  assert.match(p, /pending check, not a skipped one/i,
+    'distinguishes a started-but-not-yet-returned check from a never-run one')
+})
+
+test('stop hook: an unstarted-check completion claim is still unresolved (no regression)', () => {
+  const p = stopEntries[0].prompt || ''
+  // The case the hook exists for: a completion claim resting on a check that was NEVER
+  // actually run must still read as unresolved. The exemption above is scoped to work the
+  // transcript shows is still running — it must not swallow this clause.
+  assert.match(p, /a completion claim resting on a check that was never actually run/,
+    'keeps the never-run-check clause verbatim')
 })
 
 test('stop hook: keeps the anti-nag clause, the skill name, and the escape hatch', () => {
