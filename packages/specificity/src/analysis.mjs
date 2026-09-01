@@ -18,7 +18,7 @@ import { groundingRatio } from './outcome-log.mjs'
 // results, slash-command envelopes, the resume caveat, injected reminders. Each is
 // excluded on a structural signal where one exists (`origin.kind`, array content,
 // `isMeta`) and on a prefix only where it does not.
-const SYNTHETIC_PREFIX_RE = /^\s*(?:<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|user-memory-input|system-reminder)>|Caveat: The messages below|\[Request interrupted)/
+const SYNTHETIC_PREFIX_RE = /^\s*(?:<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|user-memory-input|system-reminder|ci-monitor-event)>|Caveat: The messages below|\[Request interrupted)/
 
 // Pulls the ordered human turns out of one transcript's JSONL text.
 //
@@ -129,8 +129,11 @@ export function pairTurns(turns) {
 }
 
 // Joins outcome-log records to labels on `prompt_id`. A record with no matching turn is
-// dropped and counted: the transcript may have been deleted, or the turn may be the last
-// one in a live session and not yet followed by anything.
+// dropped and counted, for one of three reasons: the transcript may have been deleted, the
+// turn may be the last one in a live session and not yet followed by anything, or the hook
+// logged a machine turn (task-notification origin, a synthetic-prefix tag) that `humanTurns`
+// rejects. The first two are transient — a later run can still produce a match. The third is
+// permanent: a machine turn's own log record can never join, no matter how long the log runs.
 export function joinLabels(records, pairs) {
   const byId = new Map()
   for (const p of pairs) if (p.prompt_id) byId.set(p.prompt_id, p)
