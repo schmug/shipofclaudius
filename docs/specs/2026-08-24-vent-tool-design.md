@@ -1,7 +1,8 @@
 # Agent Vent Tool — Design Spec
 
 **Date:** 2026-08-24
-**Repo:** `schmug/shipofclaudius` (canonical source; `~/.claude/` holds runtime state only)
+**Repo:** `schmug/shipofclaudius` (canonical source; `~/.claude/` is versioned separately in
+`schmug/dotclaude` as of 2026-08-30)
 **Status:** Design approved in chat 2026-08-24. This doc is the handoff source of truth for a fresh agent.
 
 ---
@@ -79,10 +80,10 @@ agent hits friction
         cluster is about the plugin        cluster is about ~/.claude
                       │                                │
                       ▼                                ▼
-        ONE issue per cluster in            summarized in the run report
-        schmug/shipofclaudius               (NOT filed — guardrail edits
-                                             need Cory's approval, and
-                                             ~/.claude is not a git repo)
+        ONE issue per cluster in            ONE issue per cluster in
+        schmug/shipofclaudius               schmug/dotclaude
+                                            (guardrail edits still need
+                                             Cory's approval to land)
 ```
 
 Three units, each independently testable: the server (pure I/O contract), the sink (a file
@@ -275,10 +276,18 @@ A scheduled task (`~/.claude/scheduled-tasks/`), weekly. The pattern is proven �
    - **Plugin clusters** (skills, workflows, this plugin's hooks) → **one** GitHub issue per
      cluster in `schmug/shipofclaudius`, bodied as a Claude Code prompt per the `/issue` skill.
    - **`~/.claude` clusters** (global `CLAUDE.md`, `settings.json` hooks,
-     `hooks/git-push-guard.py`) → summarized in the run report only. **Do not file these.**
-     `~/.claude` is not a git repo, and those are guardrail edits requiring Cory's explicit
-     approval.
+     `hooks/git-push-guard.py`) → **one** GitHub issue per cluster in `schmug/dotclaude`,
+     same prompt-shaped body. Filing an issue is a *proposal*, not an edit: a guardrail
+     change — `settings.json` permissions/hooks, rulesets, global `CLAUDE.md` — still needs
+     Cory's explicit approval before it lands, and `main` there carries a ruleset requiring a
+     PR plus the `checks` status check.
 4. Advance the watermark only after step 3 completes.
+
+> **Revised 2026-09-02.** Step 3 originally routed `~/.claude` clusters to the run report and
+> never filed them, justified by "`~/.claude` is not a git repo". That stopped being true on
+> 2026-08-30, when `schmug/dotclaude` versioned the directory in place (`d74ae0c`, allowlist
+> `.gitignore`; `has_issues: true` and `gh issue list` verified 2026-09-02). The approval
+> requirement on guardrail edits is unchanged — it never depended on versioning.
 
 One issue **per cluster**, never per vent. At a tolerated ~50% false-positive rate, per-vent
 filing would move the noise into a tracker that `issue-triage-fanout` actually reads.

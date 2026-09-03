@@ -945,10 +945,10 @@ Use `create_scheduled_task` with `taskId: "vent-triage"`, `cronExpression: "17 9
 - Read `~/.claude/vents.jsonl`; process only records whose `ts` is newer than the value in `~/.claude/vents.triaged`.
 - Cluster by underlying cause, not by wording. Expect roughly a 50% false-positive rate — that is the accepted cost of a zero-gate write path, so discard freely.
 - For clusters about **this plugin** (skills, workflows, its hooks): file **one** issue per cluster in `schmug/shipofclaudius`, bodied as a Claude Code prompt per the `/issue` skill.
-- For clusters about **`~/.claude`** (global `CLAUDE.md`, `settings.json` hooks, `hooks/git-push-guard.py`): summarize in the run report and **do not file**. `~/.claude` is not a git repo and those are guardrail edits needing Cory's approval.
+- For clusters about **`~/.claude`** (global `CLAUDE.md`, `settings.json` hooks, `hooks/git-push-guard.py`): file **one** issue per cluster in `schmug/dotclaude`, which has versioned `~/.claude` in place since 2026-08-30. Filing is a proposal, not an edit — guardrail changes still need Cory's approval before they land. (Revised 2026-09-02; this line previously said do-not-file, on the since-falsified grounds that `~/.claude` is not a git repo.)
 - One issue per cluster, never per vent.
 - Write the newest processed `ts` to `~/.claude/vents.triaged` only after filing completes.
-- Report counts: vents read, clusters found, issues filed, `~/.claude` items summarized.
+- Report counts: vents read, clusters found, issues filed in `schmug/shipofclaudius`, issues filed in `schmug/dotclaude`.
 - State the §9 kill criterion in the report when the three-week total is under five.
 
 - [ ] **Step 4: Verify it registered**

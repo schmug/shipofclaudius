@@ -1,7 +1,8 @@
 # Session-End Concern Capture — Design Spec
 
 **Date:** 2026-08-30
-**Repo:** `schmug/shipofclaudius` (canonical source; `~/.claude/` holds runtime state only)
+**Repo:** `schmug/shipofclaudius` (canonical source; `~/.claude/` is versioned separately in
+`schmug/dotclaude` as of 2026-08-30)
 **Status:** Design approved in chat 2026-08-30. Mechanism verified end-to-end the same day (§10).
 This doc is the handoff source of truth for a fresh agent.
 
@@ -304,8 +305,9 @@ category — and therefore every future session's injected context — untouched
 ## 6. Triage
 
 A scheduled task, weekly, following the `board-utilization-audit` pattern. Written to
-`~/.claude/scheduled-tasks/concern-triage/SKILL.md` (runtime state — `~/.claude` is not a git
-repo, so it lives outside this repo by necessity).
+`~/.claude/scheduled-tasks/concern-triage/SKILL.md` — outside this repo, and versioned in
+`schmug/dotclaude` since 2026-08-30. Its allowlist `.gitignore` un-ignores `scheduled-tasks/`
+explicitly, so the file is tracked and edits to it go through a PR there.
 
 **Writing the file does not schedule it.** Registration is a separate step via
 `mcp__scheduled-tasks__create_scheduled_task`; an unregistered directory is inert and several
