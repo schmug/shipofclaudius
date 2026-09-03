@@ -59,6 +59,37 @@ test('file-concerns: never fails the turn', async () => {
   assert.match(md, /never (block|fail)[^.]*turn/i, 'states the never-fail-the-turn guarantee')
 })
 
+// #173: a bare truncate (`: > file`) racing a concurrent O_APPEND write silently destroys
+// whatever landed between the triage's read and the truncate. Drain must rotate (atomic `mv`)
+// instead, so an in-flight write either rides along in the rotated file or starts a fresh live
+// spool — never vanishes mid-write.
+test('file-concerns: drains by rotate, never by truncate-in-place', async () => {
+  const md = await read('skills/file-concerns/SKILL.md')
+  assert.doesNotMatch(md, /:\s*>\s*(~|\$HOME|")\/?\.?\.?claude\/?concerns-spool\.jsonl/,
+    'no bare shell truncate of the live spool')
+  assert.doesNotMatch(md, /then truncate the file/i, 'the old truncate-in-place instruction is gone')
+  assert.match(md, /\bmv\s+~\/\.claude\/concerns-spool\.jsonl/, 'rotates the live spool with mv')
+  assert.match(md, /concerns-spool\.\$\(date[^)]*\)\.jsonl/, 'rotates to a timestamped filename')
+  assert.match(md, /atomic/i, 'states the atomicity property the rotate relies on')
+})
+
+test('file-concerns: states the rotated-file lifecycle', async () => {
+  const md = await read('skills/file-concerns/SKILL.md')
+  assert.match(md, /deleted only by the drain/i, 'says who removes a rotated file')
+  assert.match(md, /(unfiled|left in place|leave the rotated file)/i,
+    'says what happens to a rotated file when filing it also fails')
+  assert.match(md, /next\s+successful drain/i, 'says a rotated file is recovered, not stranded')
+})
+
+test('design spec §4.5: agrees with the skill on rotate-then-file', async () => {
+  const spec = await read('docs/specs/2026-08-30-session-end-concerns-design.md')
+  assert.doesNotMatch(spec, /:\s*>\s*(~|\$HOME)\/\.claude\/concerns-spool\.jsonl/,
+    'spec no longer describes a bare truncate')
+  assert.match(spec, /rotate-then-file/i, 'names the mechanism')
+  assert.match(spec, /\bmv\b.*atomic/is, 'states the atomicity property')
+  assert.match(spec, /deleted only by the drainer/i, 'states retention: who removes a rotated file')
+})
+
 const hooksJson = JSON.parse(await read('hooks/hooks.json'))
 const stopEntries = [].concat(hooksJson.hooks?.Stop || []).flatMap((g) => [].concat(g.hooks || []))
 
@@ -129,6 +160,49 @@ test('stop hook: keeps the anti-nag clause, the skill name, and the escape hatch
   assert.ok(p.includes('shipofclaudius:file-concerns'), 'names the skill that does the filing')
   // What terminates the loop when gh is down: a spooled concern satisfies the condition.
   assert.ok(p.includes('concerns-spool.jsonl'), 'counts a spooled concern as satisfying it')
+})
+
+// #173 reproduction, demonstrated under a scratch $HOME rather than pasted from a manual run:
+// a concern appended between the triage's read and its disposal of the live spool survives
+// rotation (the fix) and is destroyed by truncation (the bug). Both runs execute for real —
+// `writeFile(live, '')` is the exact effect of `: > ~/.claude/concerns-spool.jsonl`, and
+// `rename(...)` is the exact effect of the `mv` this issue asks for.
+test('spool drain: rotate survives a concurrent append; truncate-in-place destroys it', async () => {
+  const { mkdtemp, appendFile, rename, readFile: readSpool, writeFile, rm } =
+    await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  async function raceThenDispose(dispose) {
+    const scratchHome = await mkdtemp(join(tmpdir(), 'concerns-spool-'))
+    const live = join(scratchHome, 'concerns-spool.jsonl')
+    await appendFile(live, JSON.stringify({ ts: 't0', concerns: ['seeded before triage'] }) + '\n')
+    await readSpool(live, 'utf8') // triage's read of the spool, opening the race window
+    // a concurrent session's failed `gh` call appends inside that window
+    await appendFile(live, JSON.stringify({ ts: 't1', concerns: ['concurrent, mid-window'] }) + '\n')
+    const survivorPath = await dispose(live, scratchHome)
+    const survivingLines = (await readSpool(survivorPath, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean)
+    await rm(scratchHome, { recursive: true, force: true })
+    return survivingLines
+  }
+
+  const truncateResult = await raceThenDispose(async (live) => {
+    await writeFile(live, '') // `: > ~/.claude/concerns-spool.jsonl`
+    return live
+  })
+  assert.equal(truncateResult.length, 0,
+    'truncate-in-place destroys the concurrent append with no trace — this is the #173 bug')
+
+  const rotateResult = await raceThenDispose(async (live, scratchHome) => {
+    const rotated = join(scratchHome, 'concerns-spool.20260903T011619Z.jsonl')
+    await rename(live, rotated) // mv ~/.claude/concerns-spool.jsonl ~/.claude/concerns-spool.<ts>.jsonl
+    return rotated
+  })
+  assert.equal(rotateResult.length, 2, 'rotate preserves both lines, including the concurrent one')
+  assert.ok(
+    rotateResult.some((line) => JSON.parse(line).concerns[0] === 'concurrent, mid-window'),
+    'the concern appended during the triage window is recoverable from the rotated file'
+  )
 })
 
 // ---- runner ----
