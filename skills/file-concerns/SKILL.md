@@ -55,14 +55,41 @@ session: say what was claimed, what was not checked, and where the code is.
 line to `~/.claude/concerns-spool.jsonl` and carry on:
 
 ```bash
-jq -nc --arg ts "$(date -u +%FT%TZ)" --arg cwd "$PWD" \
-   --args '{ts:$ts,cwd:$cwd,concerns:$ARGS.positional}' \
-   "first concern" "second concern" >> ~/.claude/concerns-spool.jsonl
+jq -nc \
+  --arg ts "$(date -u +%FT%TZ)" \
+  --arg session "<session id>" \
+  --arg cwd "$PWD" \
+  --arg repo "$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#^.*[:/]([^/]+/[^/]+)$#\1#')" \
+  --args '{ts:$ts,session:$session,cwd:$cwd,repo:(if $repo=="" then null else $repo end),concerns:$ARGS.positional}' \
+  "first concern" "second concern" >> ~/.claude/concerns-spool.jsonl
 ```
 
 **Do not retry in this session.** Do not escalate, and do not surface it to the
 user as an error — never block or fail the turn over a concern that did not
 land. A delayed write is fine; a lost concern is not.
+
+### If a spooled concern resolves itself
+
+The spool is append-only (§4.5 of the design spec) — there is no in-place edit.
+If a concern you already spooled this session turns out to be moot before the
+session ends, append a **retraction record** rather than rewriting or deleting
+the earlier line: the same envelope, with `retracts` in place of `concerns`:
+
+```bash
+jq -nc \
+  --arg ts "$(date -u +%FT%TZ)" \
+  --arg session "<session id>" \
+  --arg cwd "$PWD" \
+  --arg repo "$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#^.*[:/]([^/]+/[^/]+)$#\1#')" \
+  --args '{ts:$ts,session:$session,cwd:$cwd,repo:(if $repo=="" then null else $repo end),retracts:$ARGS.positional}' \
+  "first concern" >> ~/.claude/concerns-spool.jsonl
+```
+
+Each entry in `retracts` must match a `concerns` entry **verbatim** — exact
+string equality is the only link between the two lines, so quote the concern
+back exactly as spooled. A retraction carries no reason, severity, or category
+(both are out of scope, see §8 of the design spec); it is a lifecycle marker,
+not a classification.
 
 ## Draining the spool
 
@@ -77,8 +104,10 @@ mv ~/.claude/concerns-spool.jsonl "~/.claude/concerns-spool.$(date -u +%Y%m%dT%H
 `O_APPEND` write either lands before the rename and rides along in the
 rotated file, or starts a fresh live spool after it — never lost, never
 caught mid-write. A truncate (`: > file`) has no such guarantee: a write
-racing the truncate is silently destroyed. Read the rotated file, file its
-lines as their own issue, then delete the rotated file. If that
+racing the truncate is silently destroyed. Read the rotated file. Before
+filing, drop any `concerns` entry that has a matching `retracts` entry (exact
+string match) — a retracted concern is not filed as an open concern. File what
+remains as its own issue, then delete the rotated file. If that
 `gh issue create` also fails, leave the rotated file where it is — do not
 retry in this session.
 
@@ -91,7 +120,16 @@ practice: a rotated file exists only between its own rotate and its own
 successful file-and-delete, and piles up only for as long as `gh` stays
 unreachable across repeated drain attempts.
 
-The weekly triage drains the same way, as a backstop.
+The weekly triage drains the same way, as a backstop, and applies the same
+retraction rule.
+
+Two lines predate this schema and do not parse this way — they carry ad-hoc
+keys instead of `concerns`/`retracts`. Parse leniently: read whatever free-text
+fields a non-conforming line holds and treat it as a single concern (or, for a
+line that already says a prior one resolved, as a retraction) rather than
+discarding it. A line that will not parse as JSON at all gets filed by hand
+from its raw text. Do not let one unparseable line block the drain of the
+lines around it.
 
 ## Then stop
 
