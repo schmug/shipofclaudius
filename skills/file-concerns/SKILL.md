@@ -64,9 +64,34 @@ jq -nc --arg ts "$(date -u +%FT%TZ)" --arg cwd "$PWD" \
 user as an error — never block or fail the turn over a concern that did not
 land. A delayed write is fine; a lost concern is not.
 
-Drain the spool the next time `gh issue create` succeeds: file the backlogged
-lines as their own issue, then truncate the file. The weekly triage drains it
-too, as a backstop.
+## Draining the spool
+
+Drain the spool the next time `gh issue create` succeeds. **Rotate first, then
+read — never truncate in place:**
+
+```bash
+mv ~/.claude/concerns-spool.jsonl "~/.claude/concerns-spool.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+```
+
+`mv` on the same filesystem is atomic, so a concurrent session's in-flight
+`O_APPEND` write either lands before the rename and rides along in the
+rotated file, or starts a fresh live spool after it — never lost, never
+caught mid-write. A truncate (`: > file`) has no such guarantee: a write
+racing the truncate is silently destroyed. Read the rotated file, file its
+lines as their own issue, then delete the rotated file. If that
+`gh issue create` also fails, leave the rotated file where it is — do not
+retry in this session.
+
+**Rotated-file lifecycle.** A rotated file is deleted only by the drain that
+successfully files its contents — the never-fail-the-turn guarantee (above),
+applied one step later. An unfiled rotated file is picked up by the next
+successful drain, from any session, or by the weekly triage as the final
+backstop. Retention is therefore unbounded in principle but self-limiting in
+practice: a rotated file exists only between its own rotate and its own
+successful file-and-delete, and piles up only for as long as `gh` stays
+unreachable across repeated drain attempts.
+
+The weekly triage drains the same way, as a backstop.
 
 ## Then stop
 
