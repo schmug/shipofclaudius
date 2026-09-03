@@ -462,7 +462,7 @@ because a block replaces the session's closing message."
 ### Task 5: Weekly triage scheduled task
 
 **Files:**
-- Create: `~/.claude/scheduled-tasks/concern-triage/SKILL.md` (runtime state, not this repo — `~/.claude` is not a git repo)
+- Create: `~/.claude/scheduled-tasks/concern-triage/SKILL.md` (not this repo — versioned in `schmug/dotclaude` since 2026-08-30; registration itself remains unversioned runtime state)
 - Modify: `docs/specs/2026-08-30-session-end-concerns-design.md` (§6, record that it exists and when it runs)
 
 **Interfaces:**
