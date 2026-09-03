@@ -91,11 +91,37 @@ back exactly as spooled. A retraction carries no reason, severity, or category
 (both are out of scope, see §8 of the design spec); it is a lifecycle marker,
 not a classification.
 
-Drain the spool the next time `gh issue create` succeeds: file the backlogged
-lines as their own issue, then truncate the file. Before filing, drop any
-`concerns` entry that has a matching `retracts` entry (exact string match) — a
-retracted concern is not filed as an open concern. The weekly triage drains it
-too, as a backstop, and applies the same rule.
+## Draining the spool
+
+Drain the spool the next time `gh issue create` succeeds. **Rotate first, then
+read — never truncate in place:**
+
+```bash
+mv ~/.claude/concerns-spool.jsonl "~/.claude/concerns-spool.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+```
+
+`mv` on the same filesystem is atomic, so a concurrent session's in-flight
+`O_APPEND` write either lands before the rename and rides along in the
+rotated file, or starts a fresh live spool after it — never lost, never
+caught mid-write. A truncate (`: > file`) has no such guarantee: a write
+racing the truncate is silently destroyed. Read the rotated file. Before
+filing, drop any `concerns` entry that has a matching `retracts` entry (exact
+string match) — a retracted concern is not filed as an open concern. File what
+remains as its own issue, then delete the rotated file. If that
+`gh issue create` also fails, leave the rotated file where it is — do not
+retry in this session.
+
+**Rotated-file lifecycle.** A rotated file is deleted only by the drain that
+successfully files its contents — the never-fail-the-turn guarantee (above),
+applied one step later. An unfiled rotated file is picked up by the next
+successful drain, from any session, or by the weekly triage as the final
+backstop. Retention is therefore unbounded in principle but self-limiting in
+practice: a rotated file exists only between its own rotate and its own
+successful file-and-delete, and piles up only for as long as `gh` stays
+unreachable across repeated drain attempts.
+
+The weekly triage drains the same way, as a backstop, and applies the same
+retraction rule.
 
 Two lines predate this schema and do not parse this way — they carry ad-hoc
 keys instead of `concerns`/`retracts`. Parse leniently: read whatever free-text

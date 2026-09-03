@@ -262,12 +262,29 @@ Each entry in `retracts` matches a `concerns` entry by exact string equality —
 only link between the two lines. A retraction carries no reason, severity, or category (§8);
 it is a lifecycle marker, not a classification.
 
-Drained by the next session-end write that succeeds, and by the weekly triage as a backstop.
-On drain, a `concerns` entry with a matching `retracts` entry (exact string match) is not
-filed as an open concern — both lines are dropped rather than routed. Lines predating this
-schema may not parse this way; parse leniently (read whichever free-text fields are present,
-and treat a line that marks a prior one resolved as a retraction) rather than discarding
-them, and file anything that will not parse as JSON at all by hand.
+**Drain is rotate-then-file, never truncate-in-place.** A drainer — the next session-end write
+that succeeds, or the weekly triage as a backstop — first `mv`s the live spool to
+`~/.claude/concerns-spool.<UTC-compact-timestamp>.jsonl` (e.g. `20260903T011619Z`). `mv` within
+one filesystem is atomic, so a producer's in-flight `O_APPEND` write lands in the rotated file
+if it beat the rename, or starts a fresh live spool if it lost the race — either way, nothing
+written before the rotate can vanish. A bare truncate (`: > file`) cannot make that guarantee:
+a write racing the truncate is silently destroyed, with no record it ever existed. The drainer
+then reads the rotated file, drops any `concerns` entry with a matching `retracts` entry
+(exact string match — a retracted concern is not filed as an open concern), and files what
+remains.
+
+**Rotated-file lifecycle.** A rotated file is deleted only by the drainer that successfully
+filed its contents — the same never-fail-the-turn rule as the live spool, applied one step
+later. If that filing also fails, the rotated file is left in place rather than retried
+in-session; it is picked up by the next successful drain — any session, or the weekly triage —
+exactly as spool backlog is today. Retention is therefore unbounded in principle but
+self-limiting in practice: a rotated file exists only between one drain's rotate and its own
+successful file-and-delete, and accumulates only for as long as `gh` stays unreachable across
+repeated drain attempts.
+
+Lines predating this schema may not parse this way; parse leniently (read whichever free-text
+fields are present, and treat a line that marks a prior one resolved as a retraction) rather
+than discarding them, and file anything that will not parse as JSON at all by hand.
 
 ---
 
@@ -325,7 +342,9 @@ Required cases:
   does not throw.
 - A retraction record uses the same envelope with `retracts` in place of `concerns`, and the
   emitted shape fails the test if a field is dropped.
-- The spool drains on the next successful write and is left untouched on a failed one.
+- The spool rotates (never truncates) before draining; a concern appended after the rotate
+  read but before disposal survives in the rotated file, where a bare truncate would destroy
+  it. The rotated file is deleted only on a successful file; a failed file leaves it in place.
 - Concurrent appends from two writers produce two intact lines.
 
 Per repo convention the suite count only ever goes **up**; do not pin a total anywhere —
