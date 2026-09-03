@@ -249,7 +249,25 @@ interleave cleanly:
 {"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner/name|null>","concerns":["…"]}
 ```
 
+**Retraction record.** A concern can resolve itself before the session ends. The spool is
+append-only, so there is no in-place edit — a session that determines an already-spooled
+concern no longer holds appends a second line using the same envelope, with `retracts` in
+place of `concerns`:
+
+```json
+{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner/name|null>","retracts":["…"]}
+```
+
+Each entry in `retracts` matches a `concerns` entry by exact string equality — that is the
+only link between the two lines. A retraction carries no reason, severity, or category (§8);
+it is a lifecycle marker, not a classification.
+
 Drained by the next session-end write that succeeds, and by the weekly triage as a backstop.
+On drain, a `concerns` entry with a matching `retracts` entry (exact string match) is not
+filed as an open concern — both lines are dropped rather than routed. Lines predating this
+schema may not parse this way; parse leniently (read whichever free-text fields are present,
+and treat a line that marks a prior one resolved as a retraction) rather than discarding
+them, and file anything that will not parse as JSON at all by hand.
 
 ---
 
@@ -279,9 +297,11 @@ already exist in this environment (`branch-prune`, `pr-check`, `sentry-triage`,
 present in the scheduled-task list with a `nextRunAt` — an `ls` of the directory would not
 have proven that.
 
-1. Read open `concern`-labelled issues in `schmug/agent-notes`, plus any spool backlog.
-2. Route each item onward: durable unknown → Q&A board post; tooling friction → the vent
-   tool; real defect → issue in the working repo, bodied per `/issue`; nothing
+1. Read open `concern`-labelled issues in `schmug/agent-notes`, plus any spool backlog. Drop
+   any spooled `concerns` entry that has a matching `retracts` entry (§4.5, exact string
+   match) before routing — a retracted concern is not filed as an open concern.
+2. Route each remaining item onward: durable unknown → Q&A board post; tooling friction →
+   the vent tool; real defect → issue in the working repo, bodied per `/issue`; nothing
    actionable → close with a one-line reason.
 3. Close the session issue when every box is routed or dismissed.
 
@@ -303,6 +323,8 @@ Required cases:
 - The issue body renders as a checklist with one box per concern.
 - A simulated `gh` failure appends exactly one parseable spool line with the §4.5 fields and
   does not throw.
+- A retraction record uses the same envelope with `retracts` in place of `concerns`, and the
+  emitted shape fails the test if a field is dropped.
 - The spool drains on the next successful write and is left untouched on a failed one.
 - Concurrent appends from two writers produce two intact lines.
 
