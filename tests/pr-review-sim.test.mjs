@@ -282,6 +282,13 @@ test('dedicated read-only relays fetch the untrusted text + diff with FIXED gh c
   }
 })
 
+test('the diff relay command elides long integrity hashes via a fixed sed pipeline (issue #179)', async () => {
+  const { calls } = await runScript({ args: { number: 7, dimensions: ['security'] } })
+  const d = byPrefix(calls, 'diff:#')[0]
+  assert.ok(d.prompt.includes("sed -E 's/(sha(256|512)-)"), 'the fixed diff command pipes through the elision sed, not a reasoning step')
+  assert.ok(d.prompt.includes('<elided>'), 'long sha256-/sha512- hashes never reach any review/verify agent')
+})
+
 test('the review prompt embeds diff + text as nonce-fenced UNTRUSTED DATA behind a preamble', async () => {
   const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
   const rv = byPrefix(calls, 'review:#')[0]
@@ -316,14 +323,17 @@ test('every subagent runs through a read-only agentType (Explore default + overr
   for (const a of c2.agents) assert.equal(a.opts.agentType, 'gh-ro', `${a.opts.label} honors override`)
 })
 
-test('the report agent escapes untrusted content and honors the report-md guardrail', async () => {
+test('the report agent escapes untrusted content and honors the report-md guardrail (no base64)', async () => {
   const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
   const rp = calls.reportPrompt
   assert.ok(/HTML-escape/i.test(rp), 'report HTML-escapes untrusted fields (diff snippets cannot break out)')
   assert.ok(/do NOT write report\.md/i.test(rp), 'aligns with the subagent guardrail, does not fight it')
-  assert.ok(/base64/i.test(rp), 'markdown embedded base64 in the html')
+  assert.ok(!/base64/i.test(rp), 'no base64 in the report prompt (issue #179)')
+  assert.ok(/application\/json/.test(rp), 'markdown embedded as escaped text in a JSON script block instead')
+  assert.ok(rp.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(rp.includes('Download report.md'), 'html carries a download affordance')
   assert.ok(/coverage/i.test(rp), 'coverage statement required in the report')
+  assert.ok(/elided/i.test(rp) && /integrity hash/i.test(rp), 'coverage statement discloses that integrity hashes were elided (issue #179)')
   assert.equal(calls.reportOpts.agentType, 'Explore', 'report agent is read-only too')
   assert.equal(calls.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
 })

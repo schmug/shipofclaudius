@@ -307,12 +307,14 @@ test('v2: existing return contract preserved (reportable / appendix_count / coun
   assert.equal(result.reportable.length + result.appendix_count, result.candidates, 'invariant intact')
 })
 
-test('v2: report prompt — do NOT write report.md, return it as text, embed base64 in html', async () => {
+test('v2: report prompt — do NOT write report.md, return it as text, embed escaped JSON in html (no base64)', async () => {
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
   assert.ok(/do NOT write report\.md/i.test(map.reportPrompt), 'aligns with guardrail, does not fight it')
   assert.ok(map.reportPrompt.includes('report_md'), 'returns markdown in report_md')
-  assert.ok(/base64/i.test(map.reportPrompt), 'embeds markdown base64 (no breakout)')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 in the report prompt (issue #179 — avoids tripping safeguard false positives)')
+  assert.ok(/application\/json/.test(map.reportPrompt), 'embeds markdown as escaped text in a JSON script block instead')
+  assert.ok(map.reportPrompt.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
 })
 
@@ -454,7 +456,7 @@ test('priorBundle path: a successful load dedups by fingerprint', async () => {
   assert.equal(result.bundle.coverage.delta.carried_over, 2)
 })
 
-test('report prompt carries the bundle + SARIF for base64 embedding, and the delta when incremental', async () => {
+test('report prompt carries the bundle + SARIF for escaped-JSON embedding, and the delta when incremental', async () => {
   const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: first.result.bundle }, stubs: stubsFor(map) })
@@ -462,6 +464,7 @@ test('report prompt carries the bundle + SARIF for base64 embedding, and the del
   assert.ok(/sarif/i.test(map.reportPrompt), 'report embeds the SARIF projection')
   assert.ok(/fingerprint/i.test(map.reportPrompt), 'report explains the fingerprints')
   assert.ok(/delta/i.test(map.reportPrompt) && /new finding/i.test(map.reportPrompt), 'incremental run leads with new findings + delta')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 anywhere in the report prompt (issue #179)')
 })
 
 // ================= VERIFY (independent factual-grounding gate: after Validate, before Report) =================
