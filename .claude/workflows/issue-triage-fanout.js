@@ -658,13 +658,13 @@ let CKPT_PATH = ''
 if (FRESH) {
   log(`args.fresh: bypassing the read-checkpoint — recomputing all ${NUMBERS.length} issue(s) (will still write back).`)
 } else {
-  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA })
+  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA, effort: 'low' })
   CKPT_STATE = ckptParse(loaded && loaded.raw)
   CKPT_PATH = (loaded && typeof loaded.path === 'string') ? loaded.path : ''
   log(`Checkpoint: loaded ${Object.keys(CKPT_STATE).length} prior entr(ies) from ${CKPT_PATH || '(unresolved path)'}.`)
 }
 
-const metaRes = await agent(CKPT_META_PROMPT(NUMBERS), { label: 'ckpt-meta', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA })
+const metaRes = await agent(CKPT_META_PROMPT(NUMBERS), { label: 'ckpt-meta', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA, effort: 'low' })
 const UPDATED_AT = new Map()
 for (const it of ((metaRes && Array.isArray(metaRes.items)) ? metaRes.items : [])) {
   if (it && Number.isInteger(it.number)) UPDATED_AT.set(it.number, typeof it.updatedAt === 'string' ? it.updatedAt : '')
@@ -688,7 +688,7 @@ log(`Triaging ${toRun.length} issue(s) (of ${NUMBERS.length}) in waves of <=${BA
 // fetch drops the issue (returns null) rather than classifying empty data. runWaves keeps
 // peak in-flight agents <= BATCH (sequential waves) so the fan-out stays under the cliff.
 const results = await runWaves(toRun, async (n) => {
-  const fetched = await agent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
+  const fetched = await agent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
   if (!fetched) return null
   const fenced = fence(fetched.nonce, fetched.raw)
   return agent(PROMPT(n, fenced), { label: `triage:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: TRIAGE_SCHEMA })
@@ -759,7 +759,7 @@ const ckptState = { spineVersion: SPINE_VERSION, workflow: CKPT_WF, entries: mer
 let checkpointWritten = false
 if (fresh.length) {
   const writeRes = await agent(CKPT_WRITE_PROMPT(CKPT_PATH || `$HOME/.claude/workflows/state/repo-${CKPT_WF}.json`, JSON.stringify(ckptState, null, 0)),
-    { label: 'ckpt-write', phase: 'Synthesize', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA })
+    { label: 'ckpt-write', phase: 'Synthesize', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA, effort: 'low' })
   checkpointWritten = !!(writeRes && writeRes.written)
   log(`Checkpoint: ${checkpointWritten ? 'wrote' : 'attempted to write'} ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'}.`)
 } else {
