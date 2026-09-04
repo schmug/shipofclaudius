@@ -438,6 +438,12 @@ test('report prompt: subagent must NOT write report.md, returns it as text, embe
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
 })
 
+test('report agent is pinned to effort:high regardless of session effort', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
+  assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
 test('orchestrator surfaces report_dir / report_html / report_md from the structured result', async () => {
   const map = {
     report: {

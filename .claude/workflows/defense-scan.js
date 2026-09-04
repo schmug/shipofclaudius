@@ -606,7 +606,7 @@ Produce:
 7. Embed the SEALED BUNDLE for interop: base64-encode bundle.json into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\`, and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` -> \`Blob\` -> download. Do NOT write these to disk yourself — the orchestrator returns them for the caller to persist.
 
 Return the structured object {output_dir, report_html_path, report_md, html_written, target_visibility, gitignore_ensured}. Do not invent findings beyond those given.`,
-  { label: 'report', phase: 'Merge + report', schema: REPORT_SCHEMA }
+  { label: 'report', phase: 'Merge + report', effort: 'high', schema: REPORT_SCHEMA }
 )
 
 const reportDir = (reportResult && reportResult.output_dir) || null
