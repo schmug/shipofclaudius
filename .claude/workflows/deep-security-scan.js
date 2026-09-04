@@ -794,9 +794,11 @@ phase('Report')
 // The workflow runtime blocks subagents from WRITING report files it treats as "findings
 // text" — report.md is rejected ("Subagents should return findings as text, not write
 // report files"), while report.html (an artifact) is allowed. Align with that guardrail
-// instead of fighting it: write ONLY report.html, embed the markdown base64-encoded inside
-// it (recoverable with zero caller action), and RETURN the full markdown as structured
-// output. The orchestrator surfaces report_md + paths so the caller persists report.md.
+// instead of fighting it: write ONLY report.html, embed the markdown as escaped text inside
+// a <script type="application/json"> block (recoverable with zero caller action, and no
+// base64 — a base64 blob returned into a subagent's context can trip safeguard false
+// positives per the Fable 5.1 prompting guide, issue #179), and RETURN the full markdown as
+// structured output. The orchestrator surfaces report_md + paths so the caller persists it.
 const REPORT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -832,7 +834,7 @@ Coverage facts: ${TOOL_COVERAGE} Saturation discovery ran ${roundsRun} round(s) 
 Worker threat models / lenses:
 ${JSON.stringify(clean.map((d, i) => ({ worker: i, files_reviewed: d.files_reviewed, threat_model: d.threat_model })), null, 2)}
 
-SEALED BUNDLE (issue #21) — the machine-readable findings + coverage doc; each finding carries a stable content-addressed fingerprint (file + class + normalized root-cause, NOT line numbers). Persist it as bundle.json and embed it base64 in report.html:
+SEALED BUNDLE (issue #21) — the machine-readable findings + coverage doc; each finding carries a stable content-addressed fingerprint (file + class + normalized root-cause, NOT line numbers). Persist it as bundle.json and embed it as escaped JSON text in report.html:
 \`\`\`json
 ${JSON.stringify(bundle)}
 \`\`\`
@@ -849,9 +851,9 @@ Produce:
 2. Report the TARGET's visibility so the orchestrator can warn about disclosure: run \`gh repo view --json visibility\` from "\${TARGET}" (add no other flags). Set target_visibility to PUBLIC, PRIVATE or INTERNAL. If \`gh\` is absent, unauthenticated, or the target is not a GitHub repo, set it to UNKNOWN — do NOT guess and do NOT fail the run.
 3. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise produce an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, and any scanned input before inserting it (& -> &amp; < -> &lt; > -> &gt; " -> &quot;) — a reviewed file may contain <script>. Set the verdict border color to the highest severity present. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
 4. report.md — compose the SAME report as a terminal/PR-friendly markdown summary: severity counts, each finding (title, severity, file:line, one-line fix), and the coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the caller persists it).
-5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html, base64-encoded, inside \`<script type="application/octet-stream" id="report-md-b64">…</script>\` (base64 cannot break out of the script tag, unlike raw text containing </script>), and add a small "Download report.md" button whose click handler does \`atob\` → \`Blob\` → download.
+5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html as escaped text — JSON.stringify the markdown text, then replace every literal \`</\` in the result with \`<\\/\` so a \`</script\` sequence can never appear (\`\\/\` stays a legal JSON escape) — and put that inside \`<script type="application/json" id="report-md-json">…</script>\`. Add a small "Download report.md" button whose click handler reads the script block's textContent, \`JSON.parse\`s it (which restores \`<\\/\` back to \`</\`), and builds the Blob from the resulting string.
 6. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md: the deterministic-prefilter line (tool + version + files scanned + findings ingested, or exactly why it was skipped/disabled), how many SATURATION ROUNDS ran (${roundsRun} of up to ${MAX_ROUNDS}) and the terminal state (${terminalState}: saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), how many workers/lenses ran per round, approx files reviewed, candidates found vs reported, and the honest limits (what was NOT deeply reviewed). Use the bundle's coverage doc: render completeness (${bundle.coverage.completeness}), the explicit "not scanned" exclusions, and — distinctly — the "not observed" classes (reviewed, none confirmed). "Not observed" must never read the same as "not scanned", "found nothing" must never read the same as "didn't look," and "stopped at the cap" must never read the same as "saturated."
-7. Embed the SEALED BUNDLE for interop: base64-encode the bundle.json above into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\` (same no-breakout reasoning as report.md), and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` → \`Blob\` → download. Do NOT write these to disk yourself (the subagent guardrail blocks it) — the orchestrator returns them for the caller to persist.
+7. Embed the SEALED BUNDLE for interop the same way: JSON.stringify the bundle.json object above, replace every literal \`</\` in the result with \`<\\/\`, and embed it as \`<script type="application/json" id="bundle-json">…</script>\`; do the same for the SARIF object into \`<script type="application/json" id="results-sarif">…</script>\`. Add "Download bundle.json" and "Download results.sarif" buttons whose handlers read the script block's textContent, \`JSON.parse\` it (undoing the \`<\\/\` escape) to get the object back, and build the Blob from \`JSON.stringify(obj, null, 2)\`. Do NOT write these to disk yourself (the subagent guardrail blocks it) — the orchestrator returns them for the caller to persist.
 
 Return the structured object {output_dir, report_html_path, report_md, html_written, target_visibility, gitignore_ensured}. Do not invent findings beyond those given.`,
   { label: 'report', phase: 'Report', effort: 'high', schema: REPORT_SCHEMA }
@@ -869,7 +871,7 @@ const DISCLOSURE_WARNING = (TARGET_VISIBILITY === 'PRIVATE' || TARGET_VISIBILITY
 if (DISCLOSURE_WARNING) log(DISCLOSURE_WARNING)
 const reportHtml = (reportResult && reportResult.report_html_path) || null
 const reportMd = (reportResult && reportResult.report_md) || null
-if (reportMd) log(`report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). Also embedded base64 in report.html ("Download report.md").`)
+if (reportMd) log(`report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). Also embedded (escaped JSON, not base64) in report.html ("Download report.md").`)
 
 return {
   target: TARGET,

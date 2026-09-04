@@ -515,12 +515,14 @@ test('orchestrator is resilient when the report agent dies (null) — fields nul
   assert.ok(Array.isArray(result.reportable), 'findings still returned even if the report agent dies')
 })
 
-test('report prompt: subagent must NOT write report.md, returns it as text, embeds it in html', async () => {
+test('report prompt: subagent must NOT write report.md, returns it as text, embeds it in html (no base64)', async () => {
   const map = {}
   await runScript({ args: { target: '/tmp/fake' }, map })
   assert.ok(/do NOT write report\.md/i.test(map.reportPrompt), 'must not fight the guardrail by writing report.md')
   assert.ok(map.reportPrompt.includes('report_md'), 'must return markdown in the report_md field')
-  assert.ok(/base64/i.test(map.reportPrompt), 'embeds the markdown base64-encoded (no breakout)')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 in the report prompt (issue #179)')
+  assert.ok(/application\/json/.test(map.reportPrompt), 'embeds the markdown as escaped text in a JSON script block instead')
+  assert.ok(map.reportPrompt.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'HTML carries a client-side download affordance')
 })
 

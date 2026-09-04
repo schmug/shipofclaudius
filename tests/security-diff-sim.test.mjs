@@ -231,6 +231,22 @@ test('local resolve prompt uses git (never gh); worktree vs range diff the right
   assert.ok(!/gh pr/.test(rg.resolvePrompt), 'range mode must NOT call gh')
 })
 
+// ===================== INTEGRITY-HASH ELISION (issue #179) =====================
+// Long sha256-/sha512- integrity hashes (lockfile bumps) flood every discovery/validation
+// prompt with base64-ish text. The fix is a FIXED sed pipeline baked into the resolve
+// command itself (never a reasoning step an agent could skip or narrow).
+
+test('both local diff commands (worktree AND range mode) pipe through the fixed hash-elision sed', async () => {
+  const wt = {}
+  await runScript({ args: { target: '/repo' }, map: wt })
+  assert.ok(wt.resolvePrompt.includes("sed -E 's/(sha(256|512)-)"), 'worktree-mode diff command elides integrity hashes via a fixed pipeline')
+  assert.ok(wt.resolvePrompt.includes('<elided>'), 'worktree-mode diff hides long hashes from the model')
+  const rg = {}
+  await runScript({ args: { target: '/repo', base: 'main', head: 'feat' }, map: rg })
+  assert.ok(rg.resolvePrompt.includes("sed -E 's/(sha(256|512)-)"), 'range-mode diff command elides integrity hashes via a fixed pipeline')
+  assert.ok(rg.resolvePrompt.includes('<elided>'), 'range-mode diff hides long hashes from the model')
+})
+
 test('resolve agent runs read-only and defaults to the Explore agentType', async () => {
   const map = {}
   await runScript({ args: { target: '/tmp/fake' }, map })
@@ -372,6 +388,8 @@ test('PR mode resolve relay uses FIXED gh commands + a fresh nonce, nothing else
   assert.ok(map.resolvePrompt.includes('gh pr view 42 -R o/n'), 'fixed gh pr view command')
   assert.ok(/openssl rand -hex 12|uuidgen/.test(map.resolvePrompt), 'generates a fresh nonce')
   assert.ok(/READ-ONLY/.test(map.resolvePrompt) && /do NOT review/i.test(map.resolvePrompt), 'relay role: transcribe, do not reason')
+  assert.ok(map.resolvePrompt.includes("sed -E 's/(sha(256|512)-)"), 'PR-mode diff command elides integrity hashes via a fixed pipeline, not a reasoning step')
+  assert.ok(map.resolvePrompt.includes('<elided>'), 'long sha256-/sha512- hashes are elided before the diff reaches any review agent')
 })
 
 test('PR mode: untrusted PR title/body is nonce-fenced behind the anti-injection preamble in reasoning prompts', async () => {
@@ -427,14 +445,17 @@ test('report prompt mandates HTML-escaping, the -diff dir, date -u, and the cove
   assert.ok(map.reportPrompt.includes('date -u'), 'dir stamped via date -u (no Date.now in scripts)')
   assert.ok(/COVERAGE STATEMENT/.test(map.reportPrompt), 'mandatory coverage statement requested')
   assert.ok(/NOT a clean bill|found nothing IN THIS CHANGE/i.test(map.reportPrompt), 'found-nothing != clean is enforced in the report')
+  assert.ok(/elided/i.test(map.reportPrompt) && /integrity hash/i.test(map.reportPrompt), 'coverage statement discloses that integrity hashes were elided (issue #179)')
 })
 
-test('report prompt: subagent must NOT write report.md, returns it as text, embeds base64 in html', async () => {
+test('report prompt: subagent must NOT write report.md, returns it as text, embeds escaped JSON in html (no base64)', async () => {
   const map = {}
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
   assert.ok(/do NOT write report\.md/i.test(map.reportPrompt), 'aligns with the guardrail, does not fight it')
   assert.ok(map.reportPrompt.includes('report_md'), 'returns markdown in report_md')
-  assert.ok(/base64/i.test(map.reportPrompt), 'embeds markdown base64 (no breakout)')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 in the report prompt (issue #179)')
+  assert.ok(/application\/json/.test(map.reportPrompt), 'embeds markdown as escaped text in a JSON script block instead')
+  assert.ok(map.reportPrompt.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
 })
 
@@ -479,6 +500,14 @@ test('report prompt carries the scope + reportable findings for rendering', asyn
 // in-scope finding gets a stable fingerprint (file + class + normalized root-cause, NOT the
 // line/change_ref which drift); the coverage doc distinguishes "not observed" from "not scanned";
 // args.priorBundle dedups across runs with a delta. Mirrors dss-sim's bundle suite.
+
+test('report prompt: bundle + SARIF embedding carries no base64', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
+  assert.ok(/bundle\.json/i.test(map.reportPrompt), 'report embeds the machine-readable bundle')
+  assert.ok(/sarif/i.test(map.reportPrompt), 'report embeds the SARIF projection')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 anywhere in the report prompt (issue #179)')
+})
 
 test('bundle: emits a sealed security-diff-scan manifest/findings/coverage doc', async () => {
   const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: {} })
