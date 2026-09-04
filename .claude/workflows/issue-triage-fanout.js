@@ -736,7 +736,7 @@ let roadmap = null
 if (clean.length) {
   phase('Synthesize')
   log(`Synthesizing ${clean.length} assessment(s) into a grouped, dependency-ordered roadmap.`)
-  roadmap = await agent(SYNTH_PROMPT(clean), { label: 'synthesize', phase: 'Synthesize', agentType: READONLY_AGENT, schema: SYNTH_SCHEMA })
+  roadmap = await agent(SYNTH_PROMPT(clean), { label: 'synthesize', phase: 'Synthesize', agentType: READONLY_AGENT, effort: 'high', schema: SYNTH_SCHEMA })
 }
 
 // ── Read-checkpoint WRITE-BACK (spine §2.4). ─────────────────────────────────────────

@@ -524,6 +524,12 @@ test('report prompt: subagent must NOT write report.md, returns it as text, embe
   assert.ok(map.reportPrompt.includes('Download report.md'), 'HTML carries a client-side download affordance')
 })
 
+test('report agent is pinned to effort:high regardless of session effort', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
 // ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
 // The defense-scan bundle AGGREGATES the merged findings across every layer. Its coverage doc
 // maps RAN-with-0-findings layers to "not observed" and SKIPPED/DISABLED/ERROR layers to

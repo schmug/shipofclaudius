@@ -82,7 +82,7 @@ function defaultCkptMeta(nums) {
 
 async function runScript({ args, gather, fetch, triage, synth, ckptLoad, ckptMeta, onWrite } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', synthPrompt: '', parallelBatches: [], metaNumbers: [], written: null }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', synthPrompt: '', synthOpts: null, parallelBatches: [], metaNumbers: [], written: null }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -116,6 +116,7 @@ async function runScript({ args, gather, fetch, triage, synth, ckptLoad, ckptMet
     }
     if (label.startsWith('synth')) {
       calls.synthPrompt = prompt
+      calls.synthOpts = opts
       return synth ? synth() : defaultSynth()
     }
     throw new Error('unexpected agent label: ' + label)
@@ -265,6 +266,7 @@ test('an additive synthesis phase produces a grouped roadmap with markdown', asy
   const synths = agentsByLabelPrefix(calls, 'synth')
   assert.equal(synths.length, 1, 'exactly one synthesis agent runs')
   assert.equal(synths[0].opts.agentType, 'Explore', 'the synthesis agent is read-only too')
+  assert.equal(synths[0].opts.effort, 'high', 'synthesis agent pinned to high, not inherited')
   assert.ok(result.roadmap && typeof result.roadmap === 'object', 'roadmap object returned')
   assert.equal(typeof result.roadmap.markdown, 'string', 'roadmap carries a markdown report')
   assert.ok(result.roadmap.markdown.length > 0, 'markdown report is non-empty')
