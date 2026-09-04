@@ -251,9 +251,25 @@ const VERIFY_SCHEMA = {
   },
 }
 
+// FOLLOWUPS (issue #181): a pre-existing bug, a performance concern, or issue-adjacent behavior
+// noticed while fixing but NOT fixed/extended/tested here. Required — an empty array is a cheap,
+// valid "none" — so the report.md renderer and any downstream filer never has to guess whether
+// an absent field meant "nothing found" or "not considered". `maxLength` per field follows
+// #178's convention: this is model-generated text that may echo untrusted issue text, so a filer
+// must still fence it (this workflow never files anything itself).
+const FOLLOWUP_ITEM_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['title', 'pointer', 'why'],
+  properties: {
+    title: { type: 'string', maxLength: 100, description: 'Short label for the follow-up.' },
+    pointer: { type: 'string', maxLength: 200, description: 'Where it lives, in path:line form.' },
+    why: { type: 'string', maxLength: 500, description: 'What you saw and why it is worth a look, in your own words — not a copy of any untrusted text.' },
+  },
+}
+
 const FIX_SCHEMA = {
   type: 'object', additionalProperties: false,
-  required: ['status', 'weakened_control'],
+  required: ['status', 'weakened_control', 'followups'],
   properties: {
     status: { type: 'string', enum: ['PR_OPENED', 'BLOCKED'], description: 'PR_OPENED=a DRAFT PR with the committed fixture/test and the minimal fix is open and all repo gates are green. BLOCKED=could not reach green without a broad refactor or weakening a control — no broken PR opened.' },
     pr_url: { type: 'string' }, branch: { type: 'string' }, base: { type: 'string' },
@@ -270,6 +286,11 @@ const FIX_SCHEMA = {
     weakened_control: { type: 'boolean', description: 'Self-report: did the change weaken ANY auth/authz/input-validation/sandboxing control? MUST be false.' },
     preview_url: { type: 'string', description: "The deploy-preview URL for the PR, if this repo's CI produces one. Empty otherwise — do NOT poll CI waiting for it." },
     summary: { type: 'string' }, blocker: { type: 'string' },
+    followups: {
+      type: 'array',
+      description: 'Pre-existing bugs, performance concerns, or issue-adjacent behavior you noticed but did NOT fix, extend, or add tests for. Empty array if you found nothing.',
+      items: FOLLOWUP_ITEM_SCHEMA,
+    },
   },
 }
 
@@ -447,10 +468,21 @@ const FIX_PROMPT = (num, fenced, repro, diag, verification, branch) =>
   `     • the reproduction, the red->green evidence, the root cause, and the gate output.\n` +
   `   Set is_draft=true and weakened_control=false. Return \`scope_block\` with the same globs you wrote.\n` +
   `   STOP — do not check CI, do not mark ready, do not merge.\n\n` +
+  `EXTRAS STAY OUT: if, while working or testing, you find a pre-existing bug, a performance concern, or ` +
+  `behavior this issue doesn't cover, don't fix, optimize, or extend it here unless the fix cannot work ` +
+  `without it — return it in \`followups\` instead. This does NOT relax step 2 (RED) above: committing the ` +
+  `fixture/test FIRST stays MANDATORY, and RED-on-base is not optional — it is the proof the bug was real. ` +
+  `Where anything else about scope is ambiguous, implement the reading the issue's wording and the surrounding ` +
+  `code most directly support, state that assumption in your summary, and don't build for the other readings ` +
+  `too. Verify however you like beyond the required fixture; scratch scripts and quick checks need not be ` +
+  `kept. Commit tests only for the fixture above, or where this repository already keeps tests for this kind ` +
+  `of change, sized like the neighboring test files — don't turn scratch checks into additional permanent test ` +
+  `files.\n\n` +
   `If you cannot reach green without weakening a control or a broad refactor, STOP, open NO PR, and return ` +
   `status=BLOCKED with the precise blocker.\n\n` +
   `Return: status, pr_url, branch, base, is_draft, fixture_committed, test_committed, red_on_base, red_output, ` +
-  `green_on_head, green_output, gates, files_changed, scope_block, weakened_control, preview_url, summary, blocker.`
+  `green_on_head, green_output, gates, files_changed, scope_block, weakened_control, preview_url, summary, ` +
+  `blocker, followups.`
 
 // ── report.md assembly (spec §6). Append-only within a run; each phase writes only its section. ──
 function renderReport(num, parts) {
@@ -497,6 +529,9 @@ function renderReport(num, parts) {
       `- **Green on head:**`, '', '```', String(f.green_output || '(none recorded)'), '```', '',
       `- **Files changed:** ${(f.files_changed || []).join(', ') || '(none)'}`,
       `- **Weakened control:** ${f.weakened_control === true ? 'TRUE — ESCALATE' : 'false'}`,
+      ...(Array.isArray(f.followups) && f.followups.length
+        ? ['', '**Follow-ups (not fixed here):**', '', ...f.followups.map((u) => `- **${u.title || '(untitled)'}** (\`${u.pointer || '?'}\`): ${u.why || ''}`)]
+        : []),
       '')
   }
   if (parts.prior) L.push('---', '', '<details><summary>Earlier run</summary>', '', parts.prior, '', '</details>', '')

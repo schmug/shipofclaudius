@@ -368,6 +368,40 @@ test('models: the model pin does not disturb the fix agent tools or the reviewer
   assert.equal(r.opts.agentType, 'security-hardening-reviewer', 'model independence is ADDED TO role independence, not swapped for it')
 })
 
+// ---------- #181: followups (test-sizing guidance + a structured escape hatch) ----------
+
+test('#181: FIX_SCHEMA carries a required followups array with {title,pointer,why} + maxLength caps', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(f.opts.schema.required.includes('followups'), 'followups is required on the fix result schema')
+  const fu = f.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'followups is an array')
+  const item = fu.items
+  assert.deepEqual(item.required.sort(), ['pointer', 'title', 'why'].sort(), 'each follow-up carries title/pointer/why')
+  for (const k of ['title', 'pointer', 'why']) {
+    assert.equal(typeof item.properties[k].maxLength, 'number', `followups[].${k} has a maxLength cap`)
+    assert.ok(item.properties[k].maxLength > 0, `followups[].${k} maxLength is positive`)
+  }
+  assert.equal(item.additionalProperties, false, 'follow-up items reject unlisted keys')
+})
+
+test('#181: the fix prompt tells the actor to report extras as followups, without relaxing RED-first', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(/followups/i.test(f.prompt), 'the prompt names the followups field')
+  assert.ok(/pre-existing bug/i.test(f.prompt), 'the prompt names the pre-existing-bug case')
+  assert.ok(/don't fix, optimize, or extend it here/i.test(f.prompt), 'extras are explicitly kept out of the diff')
+  assert.ok(/regression test stays MANDATORY/i.test(f.prompt), 'the fixture-first rule is restated beside the extras guidance')
+  assert.ok(/RED FIRST is not optional/i.test(f.prompt), 'RED-first is not weakened by the extras guidance')
+  assert.ok(/don't turn scratch checks into additional permanent test files/i.test(f.prompt), 'the test-sizing guidance is present')
+})
+
+test('#181: the Return line lists followups', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(/Return:.*followups/.test(f.prompt.replace(/\n/g, ' ')), 'the Return line names followups')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
