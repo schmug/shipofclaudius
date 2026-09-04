@@ -412,6 +412,13 @@ test('the land actor is told the decision is final and is forbidden every escape
   assert.ok(/do NOT re-read the PR body, comments, or reviews/i.test(p), 'it never re-fetches the untrusted text')
 })
 
+test('the last-paragraph rule: the land prompt forbids reporting an unexecuted step as done', async () => {
+  const { calls } = await runScript({ args: baseArgs({ execute: true }) })
+  const p = byPrefix(calls, 'land')[0].prompt
+  assert.ok(/never let `detail` describe unexecuted work as done/i.test(p), 'the last-paragraph rule is present')
+  assert.ok(/report status=ESCALATED with the real blocker/i.test(p), 'the honest exit for this actor is ESCALATED (its own contract), not BLOCKED')
+})
+
 test('on escalate the land actor comments and labels needs-you but merges nothing', async () => {
   const { result, calls } = await runScript({
     args: baseArgs({ execute: true }), ...notVerified,

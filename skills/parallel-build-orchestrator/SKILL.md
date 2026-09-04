@@ -105,9 +105,13 @@ After each merge, the full suite must run against the merged base. Cross-node in
 
 ## Autonomy boundary
 
+You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work.
+
 Proceed without asking: planning, worktrees, lane fan-out, review, follow-up issues, opening draft PRs.
 
 Stop and ask: anything needing credentials or a token scope change; product tradeoffs (cutting a node, changing acceptance criteria); `execute: true` on the merge walk; force-push, branch deletion, or bulk issue closure; and any node whose reviewer fails twice — a second failure usually means the plan was wrong, and that is a decision, not a retry.
+
+Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.
 
 ## References
 

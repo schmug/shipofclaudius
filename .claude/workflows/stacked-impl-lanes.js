@@ -411,6 +411,8 @@ Plan -> implement -> verify -> ship:
 
 If you cannot reach green, STOP, do not open a broken PR, return status=BLOCKED with the precise blocker. Never --no-verify or bypass hooks.
 
+Before you return: if \`summary\` would describe a step you have not actually executed — a plan, a promise, or a next step — do that step now instead, or set status=BLOCKED with the real blocker; never let \`summary\` report unexecuted work as done.
+
 Return: key, issues, status, pr_url, branch, base, tests_run, blocker, summary, files_changed.`
 
 const REVIEW_PROMPT = (lane, impl, base) => `READ-ONLY security-hardening review of a just-opened PR for issue(s) ${lane.issues.map(n => '#' + n).join(', ')} on branch \`${impl.branch || lane.branch}\` (base \`${base}\`). Audit against the project's documented security invariants (read CLAUDE.md / THREAT_MODEL / CONTRIBUTING).
