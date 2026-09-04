@@ -766,6 +766,42 @@ test('#131 the brief rule reaches EVERY classify prompt in a wave, not just the 
   }
 })
 
+// ===================== WORKED EXAMPLE + maxLength (issue #178) =====================
+// The Fable 5.1 prompting guide ("Quoting retrieved sources") says the fix for a model
+// reproducing untrusted source text unmarked is one complete worked example in the
+// prompt. This pins that the classify prompt carries one, and that every free-text
+// schema field the guide's fix targets carries a maxLength so a pasted body cannot fit.
+
+test('#178 the classify prompt contains one complete worked <example> (request/response/rationale)', async () => {
+  const p = await briefPrompt()
+  const open = p.indexOf('<example>')
+  const close = p.indexOf('</example>')
+  assert.ok(open >= 0 && close > open, 'a complete <example>...</example> block is present')
+  const block = p.slice(open, close)
+  assert.ok(/<user>[\s\S]*<\/user>/.test(block), 'the example carries a <user> turn (the fenced request)')
+  assert.ok(/<response>[\s\S]*<\/response>/.test(block), 'the example carries a <response> turn')
+  assert.ok(/<rationale>[\s\S]*CORRECT[\s\S]*<\/rationale>/.test(block), 'the example carries a correctness <rationale>')
+})
+
+test('#178 the worked example is synthetic and self-fenced, not the real issue being triaged', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
+  assert.ok(cls.prompt.includes('UNTRUSTED_GH_DATA_EXAMPLE'), 'the example fences its own synthetic data, distinct from the real per-issue nonce')
+  assert.ok(!cls.prompt.slice(cls.prompt.indexOf('<example>'), cls.prompt.indexOf('</example>')).includes('nonce-7-deadbeef'),
+    'the example does not reuse the real issue\'s fetch nonce')
+})
+
+test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLength', async () => {
+  const { calls } = await runScript({ args: { numbers: [7] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
+  const props = cls.opts.schema.properties
+  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
+  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
+  assert.equal(typeof props.research_context.maxLength, 'number', 'research_context (long-form) carries a maxLength')
+  assert.ok(props.research_context.maxLength > props.rationale.maxLength, 'the long-form field gets a more generous cap than the short rationale')
+  assert.ok(props.rationale.maxLength >= 400, 'the rationale cap still admits a real 2-4 sentence answer')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

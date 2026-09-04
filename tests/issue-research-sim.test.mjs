@@ -862,6 +862,39 @@ test('CONTRACT: the handoff mode stays OPTIONAL — a lane without one inherits 
   assert.equal(resolve(emitted, 'sequential'), 'parallel', 'a DECLARED mode still wins over the global')
 })
 
+// ===================== WORKED EXAMPLE + maxLength (issue #178) =====================
+
+test('#178 the research prompt contains one complete worked <example> (request/response/rationale)', async () => {
+  const { calls } = await runScript({ args: { numbers: [12] } })
+  const p = byPrefix(calls, 'research:#')[0].prompt
+  const open = p.indexOf('<example>')
+  const close = p.indexOf('</example>')
+  assert.ok(open >= 0 && close > open, 'a complete <example>...</example> block is present')
+  const block = p.slice(open, close)
+  assert.ok(/<user>[\s\S]*<\/user>/.test(block), 'the example carries a <user> turn (the fenced request)')
+  assert.ok(/<response>[\s\S]*<\/response>/.test(block), 'the example carries a <response> turn')
+  assert.ok(/<rationale>[\s\S]*CORRECT[\s\S]*<\/rationale>/.test(block), 'the example carries a correctness <rationale>')
+})
+
+test('#178 the worked example is synthetic and self-fenced, not the real issue being researched', async () => {
+  const { calls } = await runScript({ args: { numbers: [12] } })
+  const r = byPrefix(calls, 'research:#')[0]
+  assert.ok(r.prompt.includes('UNTRUSTED_GH_DATA_EXAMPLE'), 'the example fences its own synthetic data, distinct from the real per-issue nonce')
+  assert.ok(!r.prompt.slice(r.prompt.indexOf('<example>'), r.prompt.indexOf('</example>')).includes('nonce-12-cafef00d'),
+    'the example does not reuse the real issue\'s fetch nonce')
+})
+
+test('#178 the RESEARCH_SCHEMA free-text fields named in the issue carry a maxLength', async () => {
+  const { calls } = await runScript({ args: { numbers: [12] } })
+  const r = byPrefix(calls, 'research:#')[0]
+  const props = r.opts.schema.properties
+  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
+  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
+  assert.equal(typeof props.spec.maxLength, 'number', 'spec (long-form) carries a maxLength')
+  assert.equal(typeof props.next_question.maxLength, 'number', 'next_question carries a maxLength')
+  assert.ok(props.spec.maxLength > props.rationale.maxLength, 'the long-form spec field gets a more generous cap than the short rationale')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

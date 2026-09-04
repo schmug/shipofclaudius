@@ -384,6 +384,20 @@ test('injection: the fence nonce varies with payload content', async () => {
   assert.notEqual(await mk('XSS in render'), await mk('a completely different finding title'), 'the nonce is content-derived, not a constant')
 })
 
+// ===================== maxLength on the CONTEXT_SCHEMA title field (issue #178) =====================
+// track-findings has no classifier prompt (it files, it doesn't classify), so it gets no worked
+// example — only the maxLength half of #178 applies here, on the free-text title of an
+// already-filed tracker item (read back for dedup, itself GitHub-sourced free text).
+
+test('#178 the CONTEXT_SCHEMA existing-item title carries a maxLength', async () => {
+  const map = { context: ctx('PRIVATE', existingPrivate) }
+  const { calls } = await runScript({ args: { bundle: bundleFp, repo: 'o/r' }, stubs: stubsFor(map) })
+  const contextCall = calls.agents.find((a) => (a.opts.label || '').startsWith('context:'))
+  assert.ok(contextCall, 'the context agent ran')
+  const titleField = contextCall.opts.schema.properties.existing.items.properties.title
+  assert.equal(typeof titleField.maxLength, 'number', 'the existing-item title field carries a maxLength')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
