@@ -555,8 +555,9 @@ if (isIncremental) log(`Incremental defense run vs ${PRIOR.ref}: ${bundle.covera
 // "findings text" — report.md is rejected ("Subagents should return findings as text,
 // not write report files"), while report.html (an artifact) is allowed. So we ALIGN with
 // that guardrail instead of fighting it: the report agent writes ONLY report.html, embeds
-// the markdown base64-encoded inside it (recoverable with zero caller action), and RETURNS
-// the full markdown as STRUCTURED output. The orchestrator surfaces report_md + paths as
+// the markdown as escaped text inside a <script type="application/json"> block (recoverable
+// with zero caller action, and no base64 — issue #179), and RETURNS the full markdown as
+// STRUCTURED output. The orchestrator surfaces report_md + paths as
 // first-class return fields so the caller persists report.md deterministically.
 const REPORT_SCHEMA = {
   type: 'object',
@@ -584,7 +585,7 @@ ${JSON.stringify(inventoryAll, null, 2)}
 MANDATORY per-layer COVERAGE STATEMENT (render verbatim in BOTH the HTML and the markdown — every layer must be named with RAN/findings vs SKIPPED/reason vs DISABLED vs ERROR; a SKIPPED layer must NEVER read like a clean one):
 ${coverage.map((c) => '- ' + c).join('\n')}
 
-SEALED BUNDLE (issue #21) — machine-readable findings + coverage doc; each merged finding carries a stable content-addressed fingerprint. Persist as bundle.json and embed base64 in report.html:
+SEALED BUNDLE (issue #21) — machine-readable findings + coverage doc; each merged finding carries a stable content-addressed fingerprint. Persist as bundle.json and embed it as escaped JSON text in report.html:
 \`\`\`json
 ${JSON.stringify(bundle)}
 \`\`\`
@@ -601,9 +602,9 @@ Produce:
 2. Report the TARGET's visibility so the orchestrator can warn about disclosure: run \`gh repo view --json visibility\` from "\${TARGET}" (add no other flags). Set target_visibility to PUBLIC, PRIVATE or INTERNAL. If \`gh\` is absent, unauthenticated, or the target is not a GitHub repo, set it to UNKNOWN — do NOT guess and do NOT fail the run.
 3. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, URL, and any scanned input before inserting it (& -> &amp;  < -> &lt;  > -> &gt;  " -> &quot;) — a scanned file, dependency string, DAST response, or LLM probe payload may contain <script>. Set the verdict border color to the highest severity present. Render the COVERAGE STATEMENT in its own section. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
 4. report.md — compose the SAME report as terminal/PR-friendly markdown: severity counts, each finding (title, severity, layer, location, one-line fix), the supply-chain inventory, and the full per-layer coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the orchestrator's caller persists it).
-5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html, base64-encoded, inside \`<script type="application/octet-stream" id="report-md-b64">…</script>\` (base64 cannot break out of the script tag, unlike raw text containing </script>), and add a small "Download report.md" button whose click handler does \`atob\` → \`Blob\` → download. This keeps the single HTML file self-contained AND carriers of its own markdown.
+5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html as escaped text — JSON.stringify the markdown text, then replace every literal \`</\` in the result with \`<\\/\` so a \`</script\` sequence can never appear (\`\\/\` stays a legal JSON escape) — and put that inside \`<script type="application/json" id="report-md-json">…</script>\`. Add a small "Download report.md" button whose click handler reads the script block's textContent, \`JSON.parse\`s it (which restores \`<\\/\` back to \`</\`), and builds the Blob from the resulting string. This keeps the single HTML file self-contained AND carrier of its own markdown.
 6. The COVERAGE STATEMENT is non-negotiable in both the HTML and report_md. "Found nothing" and "did not run" must read differently — use the bundle's coverage doc, which separates "not observed" (a layer that ran with no findings) from the "not scanned" exclusions (a skipped/disabled/errored layer).
-7. Embed the SEALED BUNDLE for interop: base64-encode bundle.json into \`<script type="application/octet-stream" id="bundle-json-b64">…</script>\` and the SARIF into \`<script type="application/octet-stream" id="results-sarif-b64">…</script>\`, and add "Download bundle.json" and "Download results.sarif" buttons whose handlers \`atob\` -> \`Blob\` -> download. Do NOT write these to disk yourself — the orchestrator returns them for the caller to persist.
+7. Embed the SEALED BUNDLE for interop the same way: JSON.stringify bundle.json above, replace every literal \`</\` in the result with \`<\\/\`, and embed it as \`<script type="application/json" id="bundle-json">…</script>\`; do the same for the SARIF object into \`<script type="application/json" id="results-sarif">…</script>\`. Add "Download bundle.json" and "Download results.sarif" buttons whose handlers read the script block's textContent, \`JSON.parse\` it (undoing the \`<\\/\` escape) to get the object back, and build the Blob from \`JSON.stringify(obj, null, 2)\`. Do NOT write these to disk yourself — the orchestrator returns them for the caller to persist.
 
 Return the structured object {output_dir, report_html_path, report_md, html_written, target_visibility, gitignore_ensured}. Do not invent findings beyond those given.`,
   { label: 'report', phase: 'Merge + report', schema: REPORT_SCHEMA }
@@ -622,7 +623,7 @@ if (DISCLOSURE_WARNING) log(DISCLOSURE_WARNING)
 const reportHtml = (reportResult && reportResult.report_html_path) || null
 const reportMd = (reportResult && reportResult.report_md) || null
 if (reportMd) {
-  log(`Merged report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). It is also embedded base64 in report.html ("Download report.md").`)
+  log(`Merged report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). It is also embedded (escaped JSON, not base64) in report.html ("Download report.md").`)
 } else {
   log('Report agent returned no markdown — report.html may still be on disk; see coverage.')
 }
