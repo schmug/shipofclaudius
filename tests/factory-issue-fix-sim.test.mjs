@@ -440,6 +440,13 @@ test('the fix opens a DRAFT PR and never merges, marks ready, or pushes main', a
   assert.ok(/do NOT poll CI/i.test(p), 'CI polling is forbidden (it trips the no-progress watchdog)')
 })
 
+test('the last-paragraph rule: the fix prompt forbids reporting an unexecuted step as done', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const p = byPrefix(calls, 'fix')[0].prompt
+  assert.ok(/never let `summary` report unexecuted work as done/i.test(p), 'the last-paragraph rule is present')
+  assert.ok(/set status=BLOCKED with the real blocker/i.test(p), 'the honest exit is BLOCKED, not a described-but-undone step')
+})
+
 test('the workflow performs no irreversible action: no merge/ready/land agent exists', async () => {
   const { calls } = await runScript({ args: baseArgs() })
   for (const a of calls.agents) {

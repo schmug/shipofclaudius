@@ -231,6 +231,13 @@ test('args.fresh:true bypasses the idempotency check (re-does the write)', async
   assert.equal(result.skipped_existing.length, 0, 'nothing skipped under fresh')
 })
 
+test('the last-paragraph rule: the impl prompt forbids reporting an unexecuted step as done', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const im = byPrefix(calls, 'impl:')[0]
+  assert.ok(/never let `summary` report unexecuted work as done/i.test(im.prompt), 'the last-paragraph rule is present')
+  assert.ok(/set status=BLOCKED with the real blocker/i.test(im.prompt), 'the honest exit is BLOCKED, not a described-but-undone step')
+})
+
 test('the impl agent opens a DRAFT PR (reversible-only floor: never auto-merged)', async () => {
   const { calls } = await runScript({ args: { lanes: [lane()] } })
   const im = byPrefix(calls, 'impl:')[0]

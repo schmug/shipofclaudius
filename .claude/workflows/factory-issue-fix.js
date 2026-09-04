@@ -449,6 +449,9 @@ const FIX_PROMPT = (num, fenced, repro, diag, verification, branch) =>
   `   STOP — do not check CI, do not mark ready, do not merge.\n\n` +
   `If you cannot reach green without weakening a control or a broad refactor, STOP, open NO PR, and return ` +
   `status=BLOCKED with the precise blocker.\n\n` +
+  `Before you return: if \`summary\` would describe a step you have not actually executed — a plan, a promise, or ` +
+  `a next step — do that step now instead, or set status=BLOCKED with the real blocker; never let \`summary\` ` +
+  `report unexecuted work as done.\n\n` +
   `Return: status, pr_url, branch, base, is_draft, fixture_committed, test_committed, red_on_base, red_output, ` +
   `green_on_head, green_output, gates, files_changed, scope_block, weakened_control, preview_url, summary, blocker.`
 

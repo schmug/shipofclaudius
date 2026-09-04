@@ -75,6 +75,37 @@ test('implement-issue: handoff prompt ends gate-conditional, keeps no-push-to-ma
   assert.ok(/which gate is\s+missing/i.test(md), 'ungated path names the missing gate')
 })
 
+test('parallel-build-orchestrator: exists as a process skill', async () => {
+  assertProcessSkill('parallel-build-orchestrator', await skill('parallel-build-orchestrator'))
+})
+
+test('parallel-build-orchestrator: carries the autonomy opening sentence, its own proceed/stop lists, and the last-paragraph rule', async () => {
+  const md = await skill('parallel-build-orchestrator')
+  assert.ok(md.includes("You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work."), 'opening sentence present verbatim')
+  assert.ok(md.includes('Proceed without asking:'), 'the existing proceed list survives')
+  assert.ok(md.includes('Stop and ask:'), 'the existing stop list survives')
+  assert.ok(/Before ending your turn, check your last paragraph\./.test(md), 'the last-paragraph rule is present')
+  assert.ok(/blocked on input only the user can provide/.test(md), 'the last-paragraph rule keeps its human-input exception')
+  const openIdx = md.indexOf('You are operating autonomously')
+  const proceedIdx = md.indexOf('Proceed without asking:')
+  const ruleIdx = md.indexOf('Before ending your turn, check your last paragraph')
+  assert.ok(openIdx >= 0 && openIdx < proceedIdx && proceedIdx < ruleIdx, 'order: opening sentence, then the lists, then the last-paragraph rule')
+})
+
+test('critic-gated-build: exists as a process skill', async () => {
+  assertProcessSkill('critic-gated-build', await skill('critic-gated-build'))
+})
+
+test('critic-gated-build: defines what "autonomy begins" means and names its exceptions', async () => {
+  const md = await skill('critic-gated-build')
+  assert.ok(!/,\s*and autonomy begins\.?/i.test(md), 'the bare undefined phrase "and autonomy begins" is gone')
+  assert.ok(md.includes("You are operating autonomously from this point"), 'the opening sentence is present in place of the bare phrase')
+  assert.ok(/intake/i.test(md), 'names the Phase 0 intake exception')
+  assert.ok(/first-deploy/i.test(md), 'names the first-deploy check-in exception')
+  assert.ok(/platform-setting/i.test(md), 'names the platform-setting decision exception')
+  assert.ok(/Before ending your turn, check your last paragraph\./.test(md), 'the last-paragraph rule is present')
+})
+
 test('sanitized: no personal references in any policy skill', async () => {
   for (const name of POLICY_SKILLS) {
     const md = await skill(name)

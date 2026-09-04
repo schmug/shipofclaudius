@@ -18,7 +18,9 @@ Use AskUserQuestion in 2–3 batched rounds for only the load-bearing decisions;
 4. **Cycle cap** — default 12; on cap, stop and report gaps instead of thrashing.
 5. Deploy target, repo name/visibility, check-in points (default: first deploy + completion only).
 
-Then: spec (committed to the repo), implementation plan, explicit user approval of the design, and autonomy begins.
+Then: spec (committed to the repo), implementation plan, explicit user approval of the design. You are operating autonomously from this point: the user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. The exceptions are exactly the check-ins already named above and below: the Phase 0 intake round, the first-deploy and completion check-in points, and any platform-setting decision (a zone/org-wide config change) — those still go to the user, never decided here.
+
+Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.
 
 ## Phase 1 — Build loop (per increment)
 
