@@ -683,6 +683,52 @@ test('a blank nonce falls back to a content-derived fence, never a guessable con
   assert.ok(inj > open && inj < close, 'the hostile text is still fenced as data')
 })
 
+// ---------- #181: followups (test-sizing guidance + a structured escape hatch) ----------
+
+test('#181: FIX_SCHEMA carries a required followups array with {title,pointer,why} + maxLength caps', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(f.opts.schema.required.includes('followups'), 'followups is required on the fix result schema')
+  const fu = f.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'followups is an array')
+  const item = fu.items
+  assert.deepEqual(item.required.sort(), ['pointer', 'title', 'why'].sort(), 'each follow-up carries title/pointer/why')
+  for (const k of ['title', 'pointer', 'why']) {
+    assert.equal(typeof item.properties[k].maxLength, 'number', `followups[].${k} has a maxLength cap`)
+    assert.ok(item.properties[k].maxLength > 0, `followups[].${k} maxLength is positive`)
+  }
+  assert.equal(item.additionalProperties, false, 'follow-up items reject unlisted keys')
+})
+
+test('#181: the fix prompt tells the actor to report extras as followups, without relaxing fixture-first', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const p = byPrefix(calls, 'fix')[0].prompt
+  assert.ok(/followups/i.test(p), 'the prompt names the followups field')
+  assert.ok(/pre-existing bug/i.test(p), 'the prompt names the pre-existing-bug case')
+  assert.ok(/don't fix, optimize, or extend it here/i.test(p), 'extras are explicitly kept out of the diff')
+  assert.ok(/committing the fixture\/test FIRST stays MANDATORY/i.test(p), 'the fixture-first rule is restated beside the extras guidance')
+  assert.ok(/RED-on-base is not optional/i.test(p), 'RED-on-base is not weakened by the extras guidance')
+  assert.ok(/don't turn scratch checks into additional permanent test files/i.test(p), 'the test-sizing guidance is present')
+  assert.ok(/Return:.*followups/.test(p.replace(/\n/g, ' ')), 'the Return line names followups')
+})
+
+test('#181: report.md renders a Follow-ups section when the fix returns any', async () => {
+  const { result } = await runScript({
+    args: baseArgs(),
+    fix: () => fixOpened({ followups: [{ title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' }] }),
+  })
+  assert.ok(/## Fix/.test(result.report), 'the Fix section is still rendered')
+  assert.ok(/Follow-ups \(not fixed here\):/.test(result.report), 'a Follow-ups heading is rendered')
+  assert.ok(result.report.includes('Dead branch in scoring.ts'), 'the follow-up title is rendered')
+  assert.ok(result.report.includes('src/shared/scoring.ts:120'), 'the follow-up pointer is rendered')
+  assert.ok(result.report.includes('Unreachable since the multiplier fix'), 'the follow-up rationale is rendered')
+})
+
+test('#181: report.md renders no Follow-ups section when the fix returns none', async () => {
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: [] }) })
+  assert.ok(!/Follow-ups \(not fixed here\):/.test(result.report), 'an empty followups array renders no heading')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
