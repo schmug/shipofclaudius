@@ -487,6 +487,46 @@ test('the read-checkpoint preserves the existing return contract (additive: reus
   assert.ok(Array.isArray(empty.result.reused) && empty.result.checkpointWritten === false, 'empty-success path carries reused[]/checkpointWritten too')
 })
 
+// ===================== WORKED EXAMPLE + maxLength (issue #178) =====================
+
+test('#178 the classify prompt contains one complete worked <example> (request/response/rationale)', async () => {
+  const { calls } = await runScript({ args: {}, gather: oneAlice })
+  const p = byPrefix(calls, 'triage:#')[0].prompt
+  const open = p.indexOf('<example>')
+  const close = p.indexOf('</example>')
+  assert.ok(open >= 0 && close > open, 'a complete <example>...</example> block is present')
+  const block = p.slice(open, close)
+  assert.ok(/<user>[\s\S]*<\/user>/.test(block), 'the example carries a <user> turn (the fenced request)')
+  assert.ok(/<response>[\s\S]*<\/response>/.test(block), 'the example carries a <response> turn')
+  assert.ok(/<rationale>[\s\S]*CORRECT[\s\S]*<\/rationale>/.test(block), 'the example carries a correctness <rationale>')
+})
+
+test('#178 the worked example is synthetic and self-fenced, not the real PR being triaged', async () => {
+  const { calls } = await runScript({ args: {}, gather: oneAlice })
+  const cls = byPrefix(calls, 'triage:#')[0]
+  assert.ok(cls.prompt.includes('UNTRUSTED_GH_DATA_EXAMPLE'), 'the example fences its own synthetic data, distinct from the real per-PR nonce')
+  assert.ok(!cls.prompt.slice(cls.prompt.indexOf('<example>'), cls.prompt.indexOf('</example>')).includes('nonce-1-feedface'),
+    'the example does not reuse the real PR\'s fetch nonce')
+})
+
+test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLength', async () => {
+  const { calls } = await runScript({ args: {}, gather: oneAlice })
+  const cls = byPrefix(calls, 'triage:#')[0]
+  const props = cls.opts.schema.properties
+  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
+  assert.equal(typeof props.blocking_decision.maxLength, 'number', 'blocking_decision carries a maxLength')
+  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
+})
+
+test('#178 the rationale hint no longer asks for "comment quotes" — it asks for author/date + what it establishes', async () => {
+  const { calls } = await runScript({ args: {}, gather: oneAlice })
+  const cls = byPrefix(calls, 'triage:#')[0]
+  const desc = cls.opts.schema.properties.rationale.description
+  assert.ok(!/comment quotes/i.test(desc), 'the "comment quotes" phrasing is gone')
+  assert.ok(/author/i.test(desc) && /date/i.test(desc), 'the hint asks for the comment/review author and date')
+  assert.ok(/own words/i.test(desc), 'the hint asks for what it establishes in the classifier\'s own words')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
