@@ -271,6 +271,9 @@ const LAND_PROMPT = (pass, commentMd, failedIds) =>
     : `2. Apply the escalation label: \`gh pr edit ${PR} ${REPOFLAG} --add-label needs-you\`. If that label does not ` +
       `exist in the repo, say so in \`detail\` and continue — do NOT create labels.\n` +
       `3. Merge NOTHING. Do not mark the PR ready. Return status=ESCALATED.\n`) +
+  `\nBefore you return: if \`detail\` would describe a step (the comment post, the merge, the label) you have not ` +
+  `actually carried out, do it now instead, or report status=ESCALATED with the real blocker; never let \`detail\` ` +
+  `describe unexecuted work as done.\n` +
   `\nReturn { status, merged_sha, comment_url, labels_applied, detail }.`
 
 // ── Phase: Gather (read-only relays; the script parses the raw bytes in code) ──

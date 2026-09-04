@@ -316,6 +316,12 @@ test('v2: report prompt — do NOT write report.md, return it as text, embed bas
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
 })
 
+test('report agent is pinned to effort:high regardless of session effort', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
 // ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
 // A persisted, content-addressed findings artifact alongside the HTML+md report: each finding
 // carries a stable fingerprint (file + class + normalized root-cause — NOT line numbers), and a

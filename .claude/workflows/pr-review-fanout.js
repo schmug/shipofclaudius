@@ -519,7 +519,7 @@ Produce:
 5. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md (the facts above): PRs and dimensions reviewed, candidates → unique → surfaced → appendix counts, and the confidence threshold. "Found nothing" must never read the same as "didn't look."
 
 This is a REVIEW for a human to act on WITH confirmation — do NOT instruct anyone to auto-merge/auto-comment. Do not invent findings beyond those given. Return the structured object {output_dir, report_html_path, report_md, html_written}.`,
-  { label: 'report', phase: 'Report', agentType: READONLY_AGENT, schema: REPORT_SCHEMA }
+  { label: 'report', phase: 'Report', agentType: READONLY_AGENT, effort: 'high', schema: REPORT_SCHEMA }
 )
 
 const reportDir = (reportResult && reportResult.output_dir) || null

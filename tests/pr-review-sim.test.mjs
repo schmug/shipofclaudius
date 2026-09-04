@@ -325,6 +325,7 @@ test('the report agent escapes untrusted content and honors the report-md guardr
   assert.ok(rp.includes('Download report.md'), 'html carries a download affordance')
   assert.ok(/coverage/i.test(rp), 'coverage statement required in the report')
   assert.equal(calls.reportOpts.agentType, 'Explore', 'report agent is read-only too')
+  assert.equal(calls.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
 })
 
 // ============================ RESILIENCE ============================

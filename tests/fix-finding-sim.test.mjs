@@ -209,6 +209,13 @@ test('the fix opens a DRAFT PR and never pushes to main (reversible-only floor)'
   assert.ok(/gh pr create/i.test(f.prompt), 'it opens a PR via gh pr create')
 })
 
+test('the last-paragraph rule: the fix prompt forbids reporting an unexecuted step as done', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(/never let `summary` report unexecuted work as done/i.test(f.prompt), 'the last-paragraph rule is present')
+  assert.ok(/set status=BLOCKED with the real blocker/i.test(f.prompt), 'the honest exit is BLOCKED, not a described-but-undone step')
+})
+
 test('the write agent stays write-capable (worktree-isolated, not a read-only agentType)', async () => {
   const { calls } = await runScript({ args: baseArgs() })
   const f = byPrefix(calls, 'fix')[0]

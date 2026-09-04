@@ -307,7 +307,7 @@ const GATHER_PROMPT = EXPLICIT.length
     `For each PR return: number, author (the author.login string, e.g. "octocat" or "app/dependabot"), state ("OPEN"), isDraft, title.\n` +
     `${REPO_FIELD_INSTR}${VIEWER_INSTR}\nIf there are no open PRs, return {repo, viewer, prs:[]}.`
 
-const gathered = await agent(GATHER_PROMPT, { label: 'gather-open-prs', phase: 'Gather', agentType: READONLY_AGENT, schema: CANDIDATE_SCHEMA })
+const gathered = await agent(GATHER_PROMPT, { label: 'gather-open-prs', phase: 'Gather', agentType: READONLY_AGENT, schema: CANDIDATE_SCHEMA, effort: 'low' })
 const CANDIDATES = (gathered && Array.isArray(gathered.prs)) ? gathered.prs : []
 const QUERIED_REPO = A.repo || (gathered && typeof gathered.repo === 'string' ? gathered.repo : '')
 log(`Triaging repo: ${QUERIED_REPO || '(gh default in cwd)'}`)
@@ -538,13 +538,13 @@ let CKPT_PATH = ''
 if (FRESH) {
   log(`args.fresh: bypassing the read-checkpoint — recomputing all ${kept.length} kept PR(s) (will still write back).`)
 } else {
-  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA })
+  const loaded = await agent(CKPT_LOAD_PROMPT, { label: 'ckpt-load', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_LOAD_SCHEMA, effort: 'low' })
   CKPT_STATE = ckptParse(loaded && loaded.raw)
   CKPT_PATH = (loaded && typeof loaded.path === 'string') ? loaded.path : ''
   log(`Checkpoint: loaded ${Object.keys(CKPT_STATE).length} prior entr(ies) from ${CKPT_PATH || '(unresolved path)'}.`)
 }
 
-const metaRes = await agent(CKPT_META_PROMPT(KEPT_NUMS), { label: 'ckpt-meta', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA })
+const metaRes = await agent(CKPT_META_PROMPT(KEPT_NUMS), { label: 'ckpt-meta', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_META_SCHEMA, effort: 'low' })
 const UPDATED_AT = new Map()
 for (const it of ((metaRes && Array.isArray(metaRes.items)) ? metaRes.items : [])) {
   if (it && Number.isInteger(it.number)) UPDATED_AT.set(it.number, typeof it.updatedAt === 'string' ? it.updatedAt : '')
@@ -568,7 +568,7 @@ log(`Triaging ${keptToRun.length} kept PR(s) (of ${kept.length}) in waves of <=$
 // issuing only the trusted metadata queries. A failed fetch drops the PR (returns null).
 // runWaves keeps peak in-flight agents <= BATCH (sequential waves) under the cliff.
 const results = await runWaves(keptToRun, async (p) => {
-  const fetched = await agent(FETCH_PROMPT(p.number), { label: `fetch:#${p.number}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
+  const fetched = await agent(FETCH_PROMPT(p.number), { label: `fetch:#${p.number}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
   if (!fetched) return null
   const fenced = fence(fetched.nonce, fetched.raw)
   return agent(PROMPT(p.number, DRAFTS.has(p.number), fenced, DISC), { label: `triage:#${p.number}`, phase: 'Triage', agentType: READONLY_AGENT, schema: TRIAGE_SCHEMA })
@@ -603,7 +603,7 @@ let roadmap = null
 if (clean.length) {
   phase('Synthesize')
   log(`Synthesizing ${clean.length} PR verdict(s) into action-grouped buckets + a markdown roadmap.`)
-  roadmap = await agent(SYNTH_PROMPT(clean), { label: 'synthesize', phase: 'Synthesize', agentType: READONLY_AGENT, schema: SYNTH_SCHEMA })
+  roadmap = await agent(SYNTH_PROMPT(clean), { label: 'synthesize', phase: 'Synthesize', agentType: READONLY_AGENT, effort: 'high', schema: SYNTH_SCHEMA })
 }
 
 // ── Read-checkpoint WRITE-BACK (spine §2.4). ─────────────────────────────────────────
@@ -626,7 +626,7 @@ const ckptState = { spineVersion: SPINE_VERSION, workflow: CKPT_WF, entries: mer
 let checkpointWritten = false
 if (fresh.length) {
   const writeRes = await agent(CKPT_WRITE_PROMPT(CKPT_PATH || `$HOME/.claude/workflows/state/repo-${CKPT_WF}.json`, JSON.stringify(ckptState, null, 0)),
-    { label: 'ckpt-write', phase: 'Synthesize', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA })
+    { label: 'ckpt-write', phase: 'Synthesize', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA, effort: 'low' })
   checkpointWritten = !!(writeRes && writeRes.written)
   log(`Checkpoint: ${checkpointWritten ? 'wrote' : 'attempted to write'} ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'}.`)
 } else {
