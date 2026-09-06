@@ -111,6 +111,13 @@ test('file-concerns: the concerns writer really emits the five-field envelope', 
   const [concernsSnippet] = await spoolWriters()
   // mkdtemp's path may traverse a symlink (macOS: /var/folders/... -> /private/var/folders/...);
   // the writer's `$PWD` is shell-resolved, so compare against the resolved path too.
+  // Resolve on the test side only. The resolved cwd is the writer's output contract, so do
+  // not make the writer un-resolve paths to match an unresolved expectation. Before #195 the
+  // cwd assertion failed on every Mac and passed on Linux CI, where tmpdir() is already real.
+  // The blast radius is wider than one red line: package.json's `test` script `&&`-chains
+  // the suites, so a failure here stops the chain and hides specificity-fast,
+  // specificity-render, specificity-outcome-log and plugin-integrity locally on macOS. Each
+  // of those passes when run on its own, which is what makes the gap easy to miss.
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'file-concerns-')))
   const spool = join(dir, 'spool.jsonl')
   const script = concernsSnippet
