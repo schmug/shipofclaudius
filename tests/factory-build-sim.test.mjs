@@ -36,7 +36,7 @@ function buildOpened(key, over = {}) {
     key,
     status: 'opened',
     branch: `factory/${key}`,
-    pr_url: `https://x/pr/${key}`,
+    pr_url: `https://github.com/owner/demo/pull/${key === 'a' ? 101 : key === 'b' ? 102 : key === 'c' ? 103 : 104}`,
     worker_name: `factory-demo-${key}`,
     preview_url: `https://demo-${key}.preview.example.test`,
     version_id: `v-${key}-0001`,
@@ -385,6 +385,28 @@ test('an unknown status from the agent is coerced to blocked, and the preview UR
   assert.equal(result.candidates[0].status, 'blocked')
   const ok = await runScript({ args: baseArgs(), build: () => buildOpened('a', { preview_url: '' }) })
   assert.equal(ok.result.candidates[0].preview_url, 'https://demo-a.preview.example.test')
+})
+
+test('a build agent cannot smuggle URLs into the result: a foreign pr_url is dropped and preview_url is always the contract hostname', async () => {
+  const { result } = await runScript({
+    args: baseArgs(),
+    build: () => buildOpened('a', { pr_url: 'https://evil.example/attacker/pull/1', preview_url: 'https://attacker.example/candidate-a' }),
+  })
+  const a = result.candidates[0]
+  assert.equal(a.status, 'opened')
+  assert.equal(a.pr_url, '', 'a URL outside https://github.com/owner/demo/pull/<n> is dropped, the same rule the preflight relay passes')
+  assert.equal(a.preview_url, 'https://demo-a.preview.example.test', 'preview_url is derived from the naming contract, never read from the agent')
+})
+
+test('a well-formed pr_url from the build agent is kept, and deploy_failed reports no preview_url even if the agent sends one', async () => {
+  const kept = await runScript({ args: baseArgs(), build: () => buildOpened('a', { pr_url: 'https://github.com/owner/demo/pull/12' }) })
+  assert.equal(kept.result.candidates[0].pr_url, 'https://github.com/owner/demo/pull/12', 'a PR of the project repo passes through')
+  const df = await runScript({
+    args: baseArgs(),
+    build: () => buildOpened('a', { status: 'deploy_failed', preview_url: 'https://demo-a.preview.example.test', blocker: 'wrangler: custom domain already taken' }),
+  })
+  assert.equal(df.result.candidates[0].status, 'deploy_failed')
+  assert.equal(df.result.candidates[0].preview_url, '', 'no deploy => no preview URL, whatever the agent claims')
 })
 
 test('the workflow never dispatches an irreversible-action agent', async () => {
