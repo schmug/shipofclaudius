@@ -7,6 +7,7 @@
 // (read-only relay call shapes + nonce fence + read-only agentType). Run:
 //   node tests/pr-review-sim.test.mjs
 import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 
 const SRC_PATH = new URL('../.claude/workflows/pr-review-fanout.js', import.meta.url)
@@ -119,6 +120,37 @@ async function runScript({ args, text, diff, review, verify, report, issue } = {
 const byPrefix = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || '').startsWith(prefix))
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+// ---- the <script>-embedding escape recipe (issue #179; executed here since the PR #189 review) ----
+// The report prompt tells the agent to embed report.md as escaped JSON text inside a
+// <script type="application/json"> block and names the recipe as literal code. This suite EXECUTES
+// that recipe instead of trusting the prose: escapeForScript's own source text is asserted to
+// contain the same string the prompt is asserted to contain, so the text the agent reads and the
+// code the test runs cannot drift apart. What the recipe guarantees — and all it guarantees — is
+// that no "</" survives in the output, hence no "</script" terminator in any letter-case or spacing.
+const RECIPE = "JSON.stringify(text).replace(/<\\//g, '<\\\\/')"
+const escapeForScript = (text) => JSON.stringify(text).replace(/<\//g, '<\\/')
+const BREAKOUT_INPUTS = [
+  '</script><script>alert(1)</script>',
+  '</SCRIPT >',
+  '</ScRiPt\t>',
+  '<\\/script>', // already carries a backslash-slash: must round-trip, not double-escape
+  '<</script>', // a "<" immediately before the "</"
+  '<//script>',
+  '<!--<script></script>-->',
+  '"quoted" \\ backslash\nnewline\ttab   line-sep \u{1F389} é',
+  { title: '</script>', body: 'a "b"\n</SCRIPT>' }, // an object goes through the same recipe
+]
+function assertRecipeHolds(reportPrompt) {
+  assert.ok(escapeForScript.toString().includes(RECIPE), 'test discipline: the executed function IS the recipe text — edit both or neither')
+  assert.ok(reportPrompt.includes(RECIPE), `the report prompt names the escape recipe as exact code: ${RECIPE}`)
+  for (const input of BREAKOUT_INPUTS) {
+    const out = escapeForScript(input)
+    assert.ok(!out.includes('</'), `no "</" survives the recipe at all — ${JSON.stringify(input)} gave ${out}`)
+    assert.ok(!/<\/script/i.test(out), 'so a </script terminator cannot appear in any letter-case')
+    assert.deepEqual(JSON.parse(out), input, 'and JSON.parse restores the exact original')
+  }
+}
 
 // ============================ BASELINE / WIRING ============================
 
@@ -289,6 +321,74 @@ test('the diff relay command elides long integrity hashes via a fixed sed pipeli
   assert.ok(d.prompt.includes('<elided>'), 'long sha256-/sha512- hashes never reach any review/verify agent')
 })
 
+// ---- the fixed integrity-hash elision sed (issue #179; fingerprint form since the PR #189 review) ----
+// The diff relay's command is asserted WHOLE and then RUN through the real sh against a fixture:
+// the first 8 characters of every sha256-/sha512- hash body 20+ characters long survive and the
+// remainder becomes <elided> (SRI integrity= and CSP 'sha256-…' values alike); shorter bodies and
+// unprefixed base64 runs are untouched. The same constant + fixture live in
+// tests/security-diff-sim.test.mjs, which also proves all four relay sites are byte-identical in
+// source and carries the portability notes (the fingerprint backreference is \3, not \2; BSD sed
+// keeps the class's backslash as a literal member, so hash runs in the fixture carry none).
+const ELISION_SED = "sed -E 's/(sha(256|512)-)([A-Za-z0-9+\\/=]{8})[A-Za-z0-9+\\/=]{12,}/\\1\\3<elided>/g'"
+const extractSeds = (text) => text.match(/sed -E '[^']*'/g) || []
+const runSh = (cmd, input) => spawnSync('sh', ['-c', cmd], { input, encoding: 'utf8' })
+const shAvailable = () => !runSh('true', '').error
+const OLD512 = 'y1rPjQuS6ebX4uPYYZ5v6V/d3dEI6inUalIhg2Tu4Pbr2vb5T7bj1k8pXFtsFI6hBipzCAKJL/M+/rl+IXgvag=='
+const NEW512 = 'jcbXDH6NCHELul5Y7Z2CcjcDG6WPdnjQz0DlNcmGUDoMfvaW8q02qDNRCEZapjbVis1l1U9L8s/ux94zNuKTwg=='
+const SRI256 = 'VZcl9lySAQZ2ILaCW5WxWHOFr94GRKeKiO9tA37dLyg='
+const CSP256 = 'xQlpMSpToT+/A0WBBKmJao9gkln6YQfcxN8mz1DzMbQ='
+const ELISION_FIXTURE_IN = [
+  'diff --git a/package-lock.json b/package-lock.json',
+  '@@ -10,3 +10,3 @@',
+  `-      "integrity": "sha512-${OLD512}",`,
+  `+      "integrity": "sha512-${NEW512}",`,
+  `+    <script src="https://cdn.example/x.js" integrity="sha256-${SRI256}" crossorigin="anonymous"></script>`,
+  `+    Content-Security-Policy: script-src 'self' 'sha256-${CSP256}'`,
+  '+    short: sha256-abc',
+  '+    nineteen: sha256-abcdefghijklmnopqrs',
+  '+    twenty: sha256-abcdefghijklmnopqrst',
+  `+    unrelated: token=${NEW512}`,
+  '',
+].join('\n')
+const ELISION_FIXTURE_OUT = [
+  'diff --git a/package-lock.json b/package-lock.json',
+  '@@ -10,3 +10,3 @@',
+  '-      "integrity": "sha512-y1rPjQuS<elided>",',
+  '+      "integrity": "sha512-jcbXDH6N<elided>",',
+  '+    <script src="https://cdn.example/x.js" integrity="sha256-VZcl9lyS<elided>" crossorigin="anonymous"></script>',
+  "+    Content-Security-Policy: script-src 'self' 'sha256-xQlpMSpT<elided>'",
+  '+    short: sha256-abc',
+  '+    nineteen: sha256-abcdefghijklmnopqrs',
+  '+    twenty: sha256-abcdefgh<elided>',
+  `+    unrelated: token=${NEW512}`,
+  '',
+].join('\n')
+
+test('the diff relay runs the WHOLE fixed command, byte-for-byte — an appended stage would fail this', async () => {
+  const { calls } = await runScript({ args: { number: 7, repo: 'o/n', dimensions: ['security'] } })
+  const d = byPrefix(calls, 'diff:#')[0]
+  const line = (d.prompt.match(/^[ \t]*gh pr diff .*$/m) || [''])[0].trim()
+  assert.equal(line, `gh pr diff 7 -R o/n | ${ELISION_SED}`)
+  assert.deepEqual(extractSeds(d.prompt), [ELISION_SED], 'exactly one sed in the relay prompt, the fixed fingerprint form')
+})
+
+test('the elision sed, RUN through sh, keeps an 8-char fingerprint and touches nothing else', async () => {
+  if (!shAvailable()) { console.log('SKIP: no sh on this machine — the elision sed was not executed'); return }
+  const { calls } = await runScript({ args: { number: 7, dimensions: ['security'] } })
+  const [cmd] = extractSeds(byPrefix(calls, 'diff:#')[0].prompt)
+  assert.equal(cmd, ELISION_SED, 'executing the exact command the relay is told to run')
+  for (const [name, body, len] of [['OLD512', OLD512, 88], ['NEW512', NEW512, 88], ['SRI256', SRI256, 44], ['CSP256', CSP256, 44]]) {
+    assert.equal(body.length, len, `${name} has a real hash length`)
+    assert.ok(!body.includes('\\'), `${name} carries no backslash (BSD sed keeps the class backslash as a member)`)
+  }
+  const r = runSh(cmd, ELISION_FIXTURE_IN)
+  assert.equal(r.error, undefined, 'sh spawned')
+  assert.equal(r.stderr, '', 'sed accepted the expression (BSD and GNU alike)')
+  assert.equal(r.status, 0, 'sed exited 0')
+  assert.equal(r.stdout, ELISION_FIXTURE_OUT, 'fingerprint kept, remainder elided, everything else byte-identical')
+  assert.equal(r.stdout.split('\n').length, ELISION_FIXTURE_IN.split('\n').length, 'line count identical')
+})
+
 test('the review prompt embeds diff + text as nonce-fenced UNTRUSTED DATA behind a preamble', async () => {
   const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
   const rv = byPrefix(calls, 'review:#')[0]
@@ -336,6 +436,11 @@ test('the report agent escapes untrusted content and honors the report-md guardr
   assert.ok(/elided/i.test(rp) && /integrity hash/i.test(rp), 'coverage statement discloses that integrity hashes were elided (issue #179)')
   assert.equal(calls.reportOpts.agentType, 'Explore', 'report agent is read-only too')
   assert.equal(calls.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
+test('the report prompt names the </ escape recipe as code AND the recipe holds when executed (issue #179)', async () => {
+  const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
+  assertRecipeHolds(calls.reportPrompt)
 })
 
 // ============================ RESILIENCE ============================

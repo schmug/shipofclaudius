@@ -7,6 +7,7 @@
 // shapes) — is testable in milliseconds at zero token cost. Node built-ins only. Run:
 //   node tests/security-diff-sim.test.mjs
 import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { validateSarif } from './lib/sarif-2_1_0.mjs'
 
@@ -179,6 +180,38 @@ async function runScript({ args, map }) {
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
+// ---- the <script>-embedding escape recipe (issue #179; executed here since the PR #189 review) ----
+// The report prompt tells the agent to embed report.md / bundle.json / results.sarif as escaped JSON
+// text inside a <script type="application/json"> block and names the recipe as literal code. This
+// suite EXECUTES that recipe instead of trusting the prose: escapeForScript's own source text is
+// asserted to contain the same string the prompt is asserted to contain, so the text the agent
+// reads and the code the test runs cannot drift apart. What the recipe guarantees — and all it
+// guarantees — is that no "</" survives in the output, hence no "</script" terminator in any
+// letter-case or spacing.
+const RECIPE = "JSON.stringify(text).replace(/<\\//g, '<\\\\/')"
+const escapeForScript = (text) => JSON.stringify(text).replace(/<\//g, '<\\/')
+const BREAKOUT_INPUTS = [
+  '</script><script>alert(1)</script>',
+  '</SCRIPT >',
+  '</ScRiPt\t>',
+  '<\\/script>', // already carries a backslash-slash: must round-trip, not double-escape
+  '<</script>', // a "<" immediately before the "</"
+  '<//script>',
+  '<!--<script></script>-->',
+  '"quoted" \\ backslash\nnewline\ttab   line-sep \u{1F389} é',
+  { title: '</script>', body: 'a "b"\n</SCRIPT>' }, // bundle.json / SARIF go through the same recipe as objects
+]
+function assertRecipeHolds(reportPrompt) {
+  assert.ok(escapeForScript.toString().includes(RECIPE), 'test discipline: the executed function IS the recipe text — edit both or neither')
+  assert.ok(reportPrompt.includes(RECIPE), `the report prompt names the escape recipe as exact code: ${RECIPE}`)
+  for (const input of BREAKOUT_INPUTS) {
+    const out = escapeForScript(input)
+    assert.ok(!out.includes('</'), `no "</" survives the recipe at all — ${JSON.stringify(input)} gave ${out}`)
+    assert.ok(!/<\/script/i.test(out), 'so a </script terminator cannot appear in any letter-case')
+    assert.deepEqual(JSON.parse(out), input, 'and JSON.parse restores the exact original')
+  }
+}
+
 // ===================== STRUCTURE / PARSE =====================
 
 test('script parses, meta is loadable, and a default run completes', async () => {
@@ -234,7 +267,57 @@ test('local resolve prompt uses git (never gh); worktree vs range diff the right
 // ===================== INTEGRITY-HASH ELISION (issue #179) =====================
 // Long sha256-/sha512- integrity hashes (lockfile bumps) flood every discovery/validation
 // prompt with base64-ish text. The fix is a FIXED sed pipeline baked into the resolve
-// command itself (never a reasoning step an agent could skip or narrow).
+// command itself (never a reasoning step an agent could skip or narrow). Since the PR #189
+// review it keeps a FINGERPRINT: the first 8 characters of every hash body 20+ characters
+// long survive and the remainder becomes <elided>, so a reviewer still sees that a hash is
+// present and whether it changed. SRI integrity="sha256-…" and CSP 'sha256-…' values are
+// affected the same way; shorter bodies and unprefixed base64 runs are untouched. This suite
+// RUNS the command through the real sh against a fixture rather than only grepping for it.
+//
+// Two portability facts, both verified on BSD (macOS) and GNU (Linux CI) sed:
+//   - the fingerprint backreference is \3 — group 2 is the inner "(256|512)", and \1\2 renders
+//     "sha256-256<elided>" (the executed test below is what caught that);
+//   - the class is written [A-Za-z0-9+\/=] because GNU sed does not track brackets while it
+//     scans for the "/" delimiter (a bare "/" there ends the regex), while BSD sed keeps that
+//     backslash as a literal class member — so on macOS a backslash INSIDE a hash run is also
+//     elided. Real base64 never contains one; the fixture keeps them out of hash runs, and the
+//     expected output below is byte-identical on both platforms.
+const ELISION_SED = "sed -E 's/(sha(256|512)-)([A-Za-z0-9+\\/=]{8})[A-Za-z0-9+\\/=]{12,}/\\1\\3<elided>/g'"
+const extractSeds = (text) => text.match(/sed -E '[^']*'/g) || []
+const runSh = (cmd, input) => spawnSync('sh', ['-c', cmd], { input, encoding: 'utf8' })
+const shAvailable = () => !runSh('true', '').error
+// Deterministic, real-length hash bodies — sha512 → 88 base64 chars, sha256 → 44 — from
+// createHash(alg).update('shipofclaudius:<tag>').digest('base64'); "+" and "/" present, no backslash.
+const OLD512 = 'y1rPjQuS6ebX4uPYYZ5v6V/d3dEI6inUalIhg2Tu4Pbr2vb5T7bj1k8pXFtsFI6hBipzCAKJL/M+/rl+IXgvag=='
+const NEW512 = 'jcbXDH6NCHELul5Y7Z2CcjcDG6WPdnjQz0DlNcmGUDoMfvaW8q02qDNRCEZapjbVis1l1U9L8s/ux94zNuKTwg=='
+const SRI256 = 'VZcl9lySAQZ2ILaCW5WxWHOFr94GRKeKiO9tA37dLyg='
+const CSP256 = 'xQlpMSpToT+/A0WBBKmJao9gkln6YQfcxN8mz1DzMbQ='
+const ELISION_FIXTURE_IN = [
+  'diff --git a/package-lock.json b/package-lock.json',
+  '@@ -10,3 +10,3 @@',
+  `-      "integrity": "sha512-${OLD512}",`,
+  `+      "integrity": "sha512-${NEW512}",`,
+  `+    <script src="https://cdn.example/x.js" integrity="sha256-${SRI256}" crossorigin="anonymous"></script>`,
+  `+    Content-Security-Policy: script-src 'self' 'sha256-${CSP256}'`,
+  '+    short: sha256-abc',
+  '+    nineteen: sha256-abcdefghijklmnopqrs',
+  '+    twenty: sha256-abcdefghijklmnopqrst',
+  `+    unrelated: token=${NEW512}`,
+  '',
+].join('\n')
+const ELISION_FIXTURE_OUT = [
+  'diff --git a/package-lock.json b/package-lock.json',
+  '@@ -10,3 +10,3 @@',
+  '-      "integrity": "sha512-y1rPjQuS<elided>",',
+  '+      "integrity": "sha512-jcbXDH6N<elided>",',
+  '+    <script src="https://cdn.example/x.js" integrity="sha256-VZcl9lyS<elided>" crossorigin="anonymous"></script>',
+  "+    Content-Security-Policy: script-src 'self' 'sha256-xQlpMSpT<elided>'",
+  '+    short: sha256-abc',
+  '+    nineteen: sha256-abcdefghijklmnopqrs',
+  '+    twenty: sha256-abcdefgh<elided>',
+  `+    unrelated: token=${NEW512}`,
+  '',
+].join('\n')
 
 test('both local diff commands (worktree AND range mode) pipe through the fixed hash-elision sed', async () => {
   const wt = {}
@@ -245,6 +328,44 @@ test('both local diff commands (worktree AND range mode) pipe through the fixed 
   await runScript({ args: { target: '/repo', base: 'main', head: 'feat' }, map: rg })
   assert.ok(rg.resolvePrompt.includes("sed -E 's/(sha(256|512)-)"), 'range-mode diff command elides integrity hashes via a fixed pipeline')
   assert.ok(rg.resolvePrompt.includes('<elided>'), 'range-mode diff hides long hashes from the model')
+})
+
+test("the elision sed is byte-identical at all four relay sites: pr / range / worktree here and pr-review-fanout's diff relay", async () => {
+  const wt = {}
+  await runScript({ args: { target: '/repo' }, map: wt })
+  const rg = {}
+  await runScript({ args: { target: '/repo', base: 'main', head: 'feat' }, map: rg })
+  const pr = { resolve: RESOLVE_PR }
+  await runScript({ args: { pr: 42, repo: 'o/n' }, map: pr })
+  for (const [mode, m] of [['worktree', wt], ['range', rg], ['pr', pr]]) {
+    assert.deepEqual(extractSeds(m.resolvePrompt), [ELISION_SED], `${mode} mode relay carries exactly one sed — the fixed fingerprint form, byte-for-byte`)
+  }
+  // and in SOURCE, so the sibling workflow cannot drift from this one
+  const own = await readFile(SRC_PATH, 'utf8')
+  const sibling = await readFile(new URL('../.claude/workflows/pr-review-fanout.js', import.meta.url), 'utf8')
+  const ownSeds = extractSeds(own)
+  const sibSeds = extractSeds(sibling)
+  assert.equal(ownSeds.length, 3, 'security-diff-scan.js has exactly three relay sed sites (pr, range, worktree)')
+  assert.equal(sibSeds.length, 1, 'pr-review-fanout.js has exactly one (its diff relay)')
+  assert.equal(new Set([...ownSeds, ...sibSeds]).size, 1, 'all four sites are byte-identical in source')
+})
+
+test('the elision sed, RUN through sh, keeps an 8-char fingerprint and touches nothing else', async () => {
+  if (!shAvailable()) { console.log('SKIP: no sh on this machine — the elision sed was not executed'); return }
+  const map = { resolve: RESOLVE_PR }
+  await runScript({ args: { pr: 42, repo: 'o/n' }, map })
+  const [cmd] = extractSeds(map.resolvePrompt)
+  assert.equal(cmd, ELISION_SED, 'executing the exact command the relay is told to run')
+  for (const [name, body, len] of [['OLD512', OLD512, 88], ['NEW512', NEW512, 88], ['SRI256', SRI256, 44], ['CSP256', CSP256, 44]]) {
+    assert.equal(body.length, len, `${name} has a real hash length`)
+    assert.ok(!body.includes('\\'), `${name} carries no backslash (see the BSD note above)`)
+  }
+  const r = runSh(cmd, ELISION_FIXTURE_IN)
+  assert.equal(r.error, undefined, 'sh spawned')
+  assert.equal(r.stderr, '', 'sed accepted the expression (BSD and GNU alike)')
+  assert.equal(r.status, 0, 'sed exited 0')
+  assert.equal(r.stdout, ELISION_FIXTURE_OUT, 'fingerprint kept, remainder elided, everything else byte-identical')
+  assert.equal(r.stdout.split('\n').length, ELISION_FIXTURE_IN.split('\n').length, 'line count identical')
 })
 
 test('resolve agent runs read-only and defaults to the Explore agentType', async () => {
@@ -384,12 +505,19 @@ test('validator prompt is trace-only, >80% floor, with a change-scope gate', asy
 test('PR mode resolve relay uses FIXED gh commands + a fresh nonce, nothing else', async () => {
   const map = { resolve: RESOLVE_PR }
   await runScript({ args: { pr: 42, repo: 'o/n' }, map })
-  assert.ok(map.resolvePrompt.includes('gh pr diff 42 -R o/n --patch'), 'fixed gh pr diff command')
-  assert.ok(map.resolvePrompt.includes('gh pr view 42 -R o/n'), 'fixed gh pr view command')
-  assert.ok(/openssl rand -hex 12|uuidgen/.test(map.resolvePrompt), 'generates a fresh nonce')
-  assert.ok(/READ-ONLY/.test(map.resolvePrompt) && /do NOT review/i.test(map.resolvePrompt), 'relay role: transcribe, do not reason')
-  assert.ok(map.resolvePrompt.includes("sed -E 's/(sha(256|512)-)"), 'PR-mode diff command elides integrity hashes via a fixed pipeline, not a reasoning step')
-  assert.ok(map.resolvePrompt.includes('<elided>'), 'long sha256-/sha512- hashes are elided before the diff reaches any review agent')
+  const p = map.resolvePrompt
+  // The two fixed commands are asserted WHOLE, not by fragment: an appended flag, a second pipe
+  // stage, or a loosened sed fails this test, and so would a third "Run EXACTLY".
+  const exact = [...p.matchAll(/Run EXACTLY: `([^`]+)`/g)].map((m) => m[1])
+  assert.deepEqual(exact, [
+    `gh pr diff 42 -R o/n --patch | ${ELISION_SED}`,
+    'gh pr view 42 -R o/n --json number,title,body,baseRefName,headRefName,files,additions,deletions',
+  ], 'exactly two Run EXACTLY commands, each byte-for-byte')
+  // Every backticked span anywhere in the prompt is one of those two or a nonce generator.
+  const spans = [...p.matchAll(/`([^`]+)`/g)].map((m) => m[1])
+  assert.deepEqual(new Set(spans), new Set(['openssl rand -hex 12', 'uuidgen', ...exact]), 'no other command is named anywhere in the relay prompt')
+  assert.ok(/READ-ONLY/.test(p) && /do NOT review/i.test(p), 'relay role: transcribe, do not reason')
+  assert.ok(p.includes('Run NO command other than openssl/uuidgen and the two fixed gh commands above'), 'the closing rule names the allowlist')
 })
 
 test('PR mode: untrusted PR title/body is nonce-fenced behind the anti-injection preamble in reasoning prompts', async () => {
@@ -463,6 +591,12 @@ test('report agent is pinned to effort:high regardless of session effort', async
   const map = {}
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
   assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
+test('report prompt: the </ escape recipe is named as code AND holds when executed (issue #179)', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
+  assertRecipeHolds(map.reportPrompt)
 })
 
 test('orchestrator surfaces report_dir / report_html / report_md from the structured result', async () => {
