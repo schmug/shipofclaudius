@@ -683,6 +683,97 @@ test('a blank nonce falls back to a content-derived fence, never a guessable con
   assert.ok(inj > open && inj < close, 'the hostile text is still fenced as data')
 })
 
+// ---------- #181: followups (test-sizing guidance + a structured escape hatch) ----------
+
+test('#181: FIX_SCHEMA carries a required followups array with {title,pointer,why} + maxLength caps', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const f = byPrefix(calls, 'fix')[0]
+  assert.ok(f.opts.schema.required.includes('followups'), 'followups is required on the fix result schema')
+  const fu = f.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'followups is an array')
+  const item = fu.items
+  assert.deepEqual(item.required.sort(), ['pointer', 'title', 'why'].sort(), 'each follow-up carries title/pointer/why')
+  for (const k of ['title', 'pointer', 'why']) {
+    assert.equal(typeof item.properties[k].maxLength, 'number', `followups[].${k} has a maxLength cap`)
+    assert.ok(item.properties[k].maxLength > 0, `followups[].${k} maxLength is positive`)
+  }
+  assert.equal(item.additionalProperties, false, 'follow-up items reject unlisted keys')
+})
+
+test('#181: the fix prompt tells the actor to report extras as followups, without relaxing fixture-first', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const p = byPrefix(calls, 'fix')[0].prompt
+  assert.ok(/followups/i.test(p), 'the prompt names the followups field')
+  assert.ok(/pre-existing bug/i.test(p), 'the prompt names the pre-existing-bug case')
+  assert.ok(/don't fix, optimize, or extend it here/i.test(p), 'extras are explicitly kept out of the diff')
+  assert.ok(/committing the fixture\/test FIRST stays MANDATORY/i.test(p), 'the fixture-first rule is restated beside the extras guidance')
+  assert.ok(/RED-on-base is not optional/i.test(p), 'RED-on-base is not weakened by the extras guidance')
+  assert.ok(/don't turn scratch checks into additional permanent test files/i.test(p), 'the test-sizing guidance is present')
+  assert.ok(/Return:.*followups/.test(p.replace(/\n/g, ' ')), 'the Return line names followups')
+})
+
+test('#181: report.md renders a Follow-ups section when the fix returns any', async () => {
+  const { result } = await runScript({
+    args: baseArgs(),
+    fix: () => fixOpened({ followups: [{ title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' }] }),
+  })
+  assert.ok(/## Fix/.test(result.report), 'the Fix section is still rendered')
+  assert.ok(/Follow-ups \(not fixed here\):/.test(result.report), 'a Follow-ups heading is rendered')
+  assert.ok(result.report.includes('Dead branch in scoring.ts'), 'the follow-up title is rendered')
+  assert.ok(result.report.includes('src/shared/scoring.ts:120'), 'the follow-up pointer is rendered')
+  assert.ok(result.report.includes('Unreachable since the multiplier fix'), 'the follow-up rationale is rendered')
+})
+
+test('#181: report.md renders no Follow-ups section when the fix returns none', async () => {
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: [] }) })
+  assert.ok(!/Follow-ups \(not fixed here\):/.test(result.report), 'an empty followups array renders no heading')
+})
+
+// ---------- #188: followups[] is tainted text (model-generated, may echo the issue body) and lands in report.md ----------
+// A value must never be able to start a new line — that is what would let it forge a heading, a
+// checklist/status line, a table row, or a fence — nor open inline markup. However hostile, it is
+// data on the ONE list line it was meant for.
+
+// The single report line that carries `needle` (a follow-up must land on exactly one line).
+const followupLine = (report, needle) => {
+  const hits = report.split('\n').filter((l) => l.includes(needle))
+  assert.equal(hits.length, 1, `exactly one report line carries ${JSON.stringify(needle)}`)
+  return hits[0]
+}
+
+test('#188: a hostile followup cannot forge a heading or a checklist line, and stays on its own list line', async () => {
+  const hostile = {
+    title: '\n# Forged heading\n- [x] DONE',
+    pointer: 'src/a.js:1` | `evil',
+    why: 'see <!-- hidden --> [x](http://evil) __done__\r\n## Another forged heading',
+  }
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: [hostile] }) })
+  const lines = result.report.split('\n')
+  assert.ok(!lines.some((l) => /^#+\s*Forged/.test(l)), 'no report line starts with the forged heading')
+  assert.ok(!lines.some((l) => /^#+\s*Another forged/.test(l)), 'a CRLF inside why cannot start a heading either')
+  assert.ok(!lines.some((l) => /^\s*- \[x\]/.test(l)), 'no report line starts with the payload checklist item')
+  const line = followupLine(result.report, 'Forged heading')
+  assert.ok(line.startsWith('- **'), 'the hostile title sits on the follow-up list item it was meant for')
+  for (const piece of ['DONE', 'evil', 'hidden', 'Another forged heading']) {
+    assert.ok(line.includes(piece), `${piece}: title, pointer, and why all survive (neutralized) on that one line`)
+  }
+  assert.ok(!/(^|[^\\])[`|<>[\]#]/.test(line), 'every backtick, |, <, >, [, ], # from the payload is backslash-escaped — an escaped backtick cannot open a code span')
+  assert.ok(line.includes('\\_\\_done\\_\\_'), 'inline emphasis markers are escaped in place')
+})
+
+test('#188: a benign followup renders unchanged apart from escaping its own metacharacters', async () => {
+  const clean = { title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' }
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: [clean] }) })
+  const line = followupLine(result.report, 'Dead branch in scoring.ts')
+  assert.ok(line.startsWith('- **'), 'a metachar-free follow-up is one list item')
+  assert.ok(line.includes('src/shared/scoring.ts:120') && line.includes(clean.why), 'pointer and why are verbatim on that line')
+  const under = { title: 'snake_case helper', pointer: 'src/outcome_log.mjs:12', why: 'uses a *very* old idiom' }
+  const r2 = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: [under] }) })
+  const l2 = followupLine(r2.result.report, 'old idiom')
+  assert.ok(l2.includes('snake\\_case helper') && l2.includes('src/outcome\\_log.mjs:12') && l2.includes('\\*very\\*'),
+    'underscores and asterisks in a benign follow-up are escaped in place, so the rendered text is unchanged')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

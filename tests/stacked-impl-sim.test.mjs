@@ -1042,6 +1042,42 @@ test('CONTRACT: the handoff mode stays OPTIONAL — stripping it falls back to t
     'every lane reports the inherited global mode')
 })
 
+// ===================== #181: followups (test-sizing guidance + a structured escape hatch) =====================
+// The impl prompt now tells the actor to leave pre-existing bugs / adjacent behavior OUT of the
+// diff and hand them back structured, instead of either fixing them (scope creep) or losing them
+// in free-text summary prose. RESULT_SCHEMA carries the `followups` array the orchestrator reads.
+
+test('#181: RESULT_SCHEMA carries a required followups array with {title,pointer,why} + maxLength caps', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const im = byPrefix(calls, 'impl:')[0]
+  assert.ok(im.opts.schema.required.includes('followups'), 'followups is required on the impl result schema')
+  const fu = im.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'followups is an array')
+  const item = fu.items
+  assert.deepEqual(item.required.sort(), ['pointer', 'title', 'why'].sort(), 'each follow-up carries title/pointer/why')
+  for (const k of ['title', 'pointer', 'why']) {
+    assert.equal(typeof item.properties[k].maxLength, 'number', `followups[].${k} has a maxLength cap`)
+    assert.ok(item.properties[k].maxLength > 0, `followups[].${k} maxLength is positive`)
+  }
+  assert.equal(item.additionalProperties, false, 'follow-up items reject unlisted keys')
+})
+
+test('#181: the impl prompt tells the actor to report extras as followups instead of fixing them', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const im = byPrefix(calls, 'impl:')[0]
+  assert.ok(/followups/i.test(im.prompt), 'the prompt names the followups field')
+  assert.ok(/pre-existing bug/i.test(im.prompt), 'the prompt names the pre-existing-bug case')
+  assert.ok(/don't fix, optimize, or extend it here/i.test(im.prompt), 'extras are explicitly kept out of the diff')
+  assert.ok(/scratch (scripts and quick checks|checks)/i.test(im.prompt), 'scratch verification need not be kept')
+  assert.ok(/don't turn scratch checks into additional permanent test files/i.test(im.prompt), 'the test-sizing guidance is present')
+})
+
+test('#181: the Return line lists followups', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane()] } })
+  const im = byPrefix(calls, 'impl:')[0]
+  assert.ok(/Return:.*followups/.test(im.prompt.replace(/\n/g, ' ')), 'the Return line names followups')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
