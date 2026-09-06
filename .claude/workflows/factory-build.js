@@ -10,7 +10,8 @@
 //   Run:  Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-build.js",
 //                    args: { slug, repo, base?, spec_path, previewDomain,
 //                            candidates: [{ key, brief, direction }],   // 1..4
-//                            iterate?: { key, branch, feedback }, fresh?, readonlyAgent? } })
+//                            iterate?: { key, branch, feedback }, fresh?, readonlyAgent?,
+//                            fenceNonce? } })   // branch must equal factory/<key>; fenceNonce: a fresh crypto.randomUUID()
 //
 // WHY THE WORKFLOW ENDS AT "DEPLOYED". Agents inside a Workflow must not sleep or poll (the
 // no-progress watchdog), and a Workflow cannot call AskUserQuestion. The certificate for a new
@@ -28,12 +29,18 @@
 //
 // SECURITY. The spec the build agent reads is user-approved content. The only text a third party
 // could influence is `iterate.feedback` (typed by the user today, but fenced anyway so the prompt
-// shape never depends on provenance). The build agent has no WebFetch/WebSearch. Every
-// `wrangler deploy` it runs MUST carry --config wrangler.preview.<key>.jsonc; the production
-// config deploys only from the intake skill's promote phase, after the gated merge. The Access
-// service token (CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET) is never needed here and the prompt
-// says so; only the scaffolded scripts read it, from process.env.
+// shape never depends on provenance). The build agent is TOLD not to use WebFetch/WebSearch (HARD
+// RULES); its tool grant is the runtime default. Every `wrangler deploy` it runs MUST carry
+// --config wrangler.preview.<key>.jsonc; the production config deploys only from the intake
+// skill's promote phase, after the gated merge. The Access service token (CF_ACCESS_CLIENT_ID /
+// CF_ACCESS_CLIENT_SECRET) is never needed here and the prompt says so; only the scaffolded
+// scripts read it, from process.env.
 // Write ladder: draft PR only. Never merge, never push to main, never --admin, never force.
+// RESIDUAL RISK: the fallback fence nonce is content-derived (FNV-1a over slug/repo/keys/feedback)
+// and therefore predictable by whoever wrote the feedback; the intake skill should always pass a
+// fresh `crypto.randomUUID()` as `args.fenceNonce`. Forged fence markers inside the feedback are
+// neutralized in script code before fencing, but the anti-injection preamble and the draft-PR-only
+// write ladder are the real mitigations, not the nonce.
 
 export const meta = {
   name: 'factory-build',
@@ -62,9 +69,12 @@ const SLUG = String(A.slug || '')
 if (!/^[a-z0-9][a-z0-9-]{1,23}$/.test(SLUG)) throw new Error(`factory-build: args.slug must match ^[a-z0-9][a-z0-9-]{1,23}$ (got "${SLUG}")`)
 const REPO = String(A.repo || '')
 if (!/^[\w.-]+\/[\w.-]+$/.test(REPO)) throw new Error(`factory-build: args.repo must be "owner/name" (got "${REPO}")`)
+// BASE and SPEC_PATH are interpolated into shell commands in the build prompt: a tight charset, no "..".
 const BASE = (typeof A.base === 'string' && A.base.trim()) ? A.base.trim() : 'main'
+if (!/^[\w][\w./-]*$/.test(BASE) || BASE.includes('..')) throw new Error(`factory-build: args.base must be a plain ref name matching ^[\\w][\\w./-]*$ with no ".." (got "${BASE}")`)
 const SPEC_PATH = String(A.spec_path || '')
 if (!SPEC_PATH) throw new Error('factory-build: args.spec_path is required (the approved spec inside the project repo)')
+if (!/^[\w][\w./-]*\.md$/.test(SPEC_PATH) || SPEC_PATH.includes('..')) throw new Error(`factory-build: args.spec_path must be a repo-relative .md path matching ^[\\w][\\w./-]*\\.md$ with no ".." (got "${SPEC_PATH}")`)
 const PREVIEW_DOMAIN = String(A.previewDomain || '')
 if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(PREVIEW_DOMAIN)) throw new Error(`factory-build: args.previewDomain must be a hostname suffix such as preview.example.com (got "${PREVIEW_DOMAIN}")`)
 if (A.candidates.length > 4) throw new Error(`factory-build: at most 4 candidates per run (got ${A.candidates.length})`)
@@ -75,22 +85,31 @@ const CANDIDATES = A.candidates.map((c, i) => {
 })
 const KEYS = CANDIDATES.map((c) => c.key)
 if (new Set(KEYS).size !== KEYS.length) throw new Error(`factory-build: candidate keys must be unique (got ${KEYS.join(', ')})`)
-const ITERATE = A.iterate
-  ? { key: String(A.iterate.key || ''), branch: String(A.iterate.branch || ''), feedback: String(A.iterate.feedback || '') }
-  : null
-if (ITERATE) {
-  if (!KEYS.includes(ITERATE.key)) throw new Error(`factory-build: iterate.key "${ITERATE.key}" names no candidate (have ${KEYS.join(', ')})`)
-  if (!ITERATE.branch) throw new Error('factory-build: iterate.branch is required')
-}
-const FRESH = A.fresh === true
-
 // Naming (spec §8.1). These four are the contract with factory-intake — do not rename.
 const branchOf = (key) => `factory/${key}`
 const workerOf = (key) => `factory-${SLUG}-${key}`
 const hostOf = (key) => `${SLUG}-${key}.${PREVIEW_DOMAIN}`
 const cloneDirOf = (key) => `\${TMPDIR:-/tmp}/factory/${SLUG}/${key}`
 
-// Content-derived fence nonce (FNV-1a 32-bit) — no Date.now()/Math.random() in a Workflow script.
+// A forged fence marker inside the feedback must never open or close the real fence, so both marker
+// prefixes are replaced in script code before the text is fenced (the replacement contains no '<',
+// so it cannot assemble a new marker).
+const stripFenceMarkers = (s) => s.split('<<<UNTRUSTED_FEEDBACK_').join('[fence-marker removed]').split('<<<END_UNTRUSTED_FEEDBACK_').join('[fence-marker removed]')
+const ITERATE = A.iterate
+  ? { key: String(A.iterate.key || ''), branch: String(A.iterate.branch || ''), feedback: stripFenceMarkers(String(A.iterate.feedback || '')) }
+  : null
+if (ITERATE) {
+  if (!KEYS.includes(ITERATE.key)) throw new Error(`factory-build: iterate.key "${ITERATE.key}" names no candidate (have ${KEYS.join(', ')})`)
+  if (!ITERATE.branch) throw new Error('factory-build: iterate.branch is required')
+  // The branch is derived from the key everywhere else (checkout, push, PR lookup, PR comment); an
+  // iterate.branch that disagrees would send the commits one way and the PR comment another.
+  if (ITERATE.branch !== branchOf(ITERATE.key)) throw new Error(`factory-build: iterate.branch "${ITERATE.branch}" must equal the derived branch "${branchOf(ITERATE.key)}" for iterate.key "${ITERATE.key}"`)
+}
+const FRESH = A.fresh === true
+
+// Fence nonce. Preferred: a caller-minted `args.fenceNonce` (the intake skill passes a fresh
+// crypto.randomUUID()). Fallback: content-derived FNV-1a 32-bit — no Date.now()/Math.random() in a
+// Workflow script — which whoever wrote the feedback can compute (RESIDUAL RISK in the header).
 function fnv1aHex(str) {
   let h = 0x811c9dc5
   for (let i = 0; i < str.length; i++) {
@@ -99,7 +118,9 @@ function fnv1aHex(str) {
   }
   return ('00000000' + h.toString(16)).slice(-8)
 }
-const NONCE = fnv1aHex(JSON.stringify({ SLUG, REPO, KEYS, feedback: ITERATE ? ITERATE.feedback : '' }))
+const HAS_FENCE_NONCE = A.fenceNonce !== undefined && A.fenceNonce !== null
+if (HAS_FENCE_NONCE && !/^[0-9a-f-]{8,64}$/.test(String(A.fenceNonce))) throw new Error(`factory-build: args.fenceNonce must match ^[0-9a-f-]{8,64}$ (got "${String(A.fenceNonce).slice(0, 80)}")`)
+const NONCE = HAS_FENCE_NONCE ? String(A.fenceNonce) : fnv1aHex(JSON.stringify({ SLUG, REPO, KEYS, feedback: ITERATE ? ITERATE.feedback : '' }))
 
 // ── Prompts and schemas ──────────────────────────────────────────────────────────────────
 // The HARD RULES line is copied VERBATIM from stacked-impl-lanes.js (the sim diffs it against
@@ -207,12 +228,20 @@ const buildPrompt = (c, existingPrUrl) => {
 
 // ── Preflight (read-only, state-derived idempotency) ─────────────────────────────────────
 phase('Preflight')
+// Derive, don't trust. The preflight's branch is normalized before it is matched, and its pr_url is
+// kept only when it is a PR of THIS repo — anything else becomes '' and the build actor looks the PR
+// up itself with the fixed gh command in its prompt.
+const PR_URL_RE = new RegExp(`^https://github\\.com/${REPO.replace(/\./g, '\\.')}/pull/\\d+$`)
+const normBranch = (b) => String(b || '').trim().replace(/^refs\/heads\//, '')
+const prUrlOf = (e) => (e && typeof e.pr_url === 'string' && PR_URL_RE.test(e.pr_url)) ? e.pr_url : ''
 let existing = []
 if (!FRESH) {
   const pre = await agent(PREFLIGHT_PROMPT, { label: 'preflight', phase: 'Preflight', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA })
-  existing = (pre && Array.isArray(pre.existing)) ? pre.existing : []
+  existing = ((pre && Array.isArray(pre.existing)) ? pre.existing : [])
+    .filter((e) => e && typeof e === 'object')
+    .map((e) => ({ branch: normBranch(e.branch), pr_url: prUrlOf(e), state: String(e.state || '') }))
 }
-const existingFor = (key) => existing.find((e) => e && e.branch === branchOf(key)) || null
+const existingFor = (key) => existing.find((e) => e.branch === branchOf(key)) || null
 
 // In iterate mode only the target is this round's work; otherwise every candidate is.
 const ROUND = ITERATE ? CANDIDATES.filter((c) => c.key === ITERATE.key) : CANDIDATES
@@ -233,7 +262,7 @@ const STATUSES = new Set(['opened', 'deploy_failed', 'blocked'])
 const shape = (c, r, status, blocker) => ({
   key: c.key,
   status,
-  branch: (r && r.branch) || (isIterTarget(c) ? ITERATE.branch : branchOf(c.key)),
+  branch: isIterTarget(c) ? ITERATE.branch : branchOf(c.key), // from the naming contract, never echoed from the agent
   pr_url: (r && r.pr_url) || '',
   worker_name: workerOf(c.key),
   preview_url: status === 'opened' || status === 'skipped_existing' ? ((r && r.preview_url) || `https://${hostOf(c.key)}`) : ((r && r.preview_url) || ''),
@@ -248,7 +277,7 @@ const shape = (c, r, status, blocker) => ({
 const results = ROUND.map((c) => {
   if (skippedKeys.includes(c.key)) {
     const ex = existingFor(c.key)
-    return shape(c, { pr_url: ex.pr_url || '', branch: ex.branch }, 'skipped_existing', 'an open PR already exists for this branch; pass fresh:true to rebuild')
+    return shape(c, { pr_url: ex.pr_url }, 'skipped_existing', 'an open PR already exists for this branch; pass fresh:true to rebuild')
   }
   const r = built[toBuild.indexOf(c)]
   if (!r || typeof r !== 'object') return shape(c, null, 'blocked', 'the build agent returned nothing (it threw or was cut off)')
