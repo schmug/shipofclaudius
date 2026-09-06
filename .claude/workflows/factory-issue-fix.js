@@ -487,6 +487,20 @@ const FIX_PROMPT = (num, fenced, repro, diag, verification, branch) =>
   `green_on_head, green_output, gates, files_changed, scope_block, weakened_control, preview_url, summary, ` +
   `blocker, followups.`
 
+// followups[] is model-generated text that may echo the (attacker-writable) issue body, and it is
+// interpolated into report.md as markdown. A value must never be able to start a new line — that is
+// what would let it forge a heading, a checklist/status line, a table row, or a fence — nor open
+// inline markup. Vertical whitespace and control characters collapse to one space; the inline
+// metacharacters are backslash-escaped, the backslash itself included so a payload cannot pre-escape
+// the escape. The pointer is rendered as plain text rather than in a code span on purpose: nothing
+// can be escaped inside a code span, so a span would either leak the escapes or need its own rule.
+function mdInline(s) {
+  return String(s == null ? '' : s)
+    .replace(/[\x00-\x1f\x7f\u2028\u2029]+/g, ' ')
+    .replace(/[\\`*_[\]|<>#]/g, (c) => '\\' + c)
+    .trim()
+}
+
 // ── report.md assembly (spec §6). Append-only within a run; each phase writes only its section. ──
 function renderReport(num, parts) {
   const L = [
@@ -533,7 +547,7 @@ function renderReport(num, parts) {
       `- **Files changed:** ${(f.files_changed || []).join(', ') || '(none)'}`,
       `- **Weakened control:** ${f.weakened_control === true ? 'TRUE — ESCALATE' : 'false'}`,
       ...(Array.isArray(f.followups) && f.followups.length
-        ? ['', '**Follow-ups (not fixed here):**', '', ...f.followups.map((u) => `- **${u.title || '(untitled)'}** (\`${u.pointer || '?'}\`): ${u.why || ''}`)]
+        ? ['', '**Follow-ups (not fixed here):**', '', ...f.followups.map((u) => `- **${mdInline(u.title) || '(untitled)'}** (${mdInline(u.pointer) || '?'}): ${mdInline(u.why)}`)]
         : []),
       '')
   }

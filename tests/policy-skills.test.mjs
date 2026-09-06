@@ -92,6 +92,23 @@ test('parallel-build-orchestrator: carries the autonomy opening sentence, its ow
   assert.ok(openIdx >= 0 && openIdx < proceedIdx && proceedIdx < ruleIdx, 'order: opening sentence, then the lists, then the last-paragraph rule')
 })
 
+// #188: Phase 5 files GitHub issues from lane followups[] and the autonomy block pre-approves that
+// filing. A follow-up can describe a security weakness that is NOT yet fixed on the default branch,
+// so Phase 5 must carry track-findings' disclosure routing, not only its fence: public repo -> the
+// advisory path (never a public issue), private/internal -> collaborator-only issue, no path -> stop.
+test('parallel-build-orchestrator: Phase 5 routes an unpatched security follow-up away from a public issue (#188)', async () => {
+  const md = await skill('parallel-build-orchestrator')
+  const p5 = md.slice(md.indexOf('## Phase 5'), md.indexOf('## Autonomy boundary'))
+  assert.ok(p5.includes('anti-injection preamble'), 'the existing anti-injection fence survives the routing addition')
+  assert.ok(/not yet fixed/i.test(p5), 'classifies each follow-up by whether the weakness is not yet fixed on the default branch')
+  assert.ok(/advisory/i.test(p5) && /public/i.test(p5), 'the rule is keyed on repo visibility and names the advisory path')
+  assert.ok(/MUST NOT be filed as a public issue/.test(p5), 'a public repo never gets an unpatched weakness as a public issue')
+  assert.ok(/surface it to the human/i.test(p5), 'an unavailable advisory path stops and surfaces, rather than files')
+  assert.ok(/private or internal/i.test(p5) && /collaborator-only/i.test(p5), 'private/internal repos keep the collaborator-only issue path, as track-findings does')
+  const stop = md.slice(md.indexOf('Stop and ask:'), md.indexOf('Before ending your turn'))
+  assert.ok(/not yet fixed/i.test(stop), 'the autonomy block pre-approves follow-up filing, so its stop list carries the same exception')
+})
+
 test('critic-gated-build: exists as a process skill', async () => {
   assertProcessSkill('critic-gated-build', await skill('critic-gated-build'))
 })
