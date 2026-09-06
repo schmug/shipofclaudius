@@ -193,7 +193,7 @@ const CONTEXT_SCHEMA = {
           ref: { type: 'string', description: 'Issue "#123" or advisory "GHSA-xxxx-xxxx-xxxx".' },
           url: { type: 'string', description: 'html_url of the item.' },
           state: { type: 'string', description: 'open | closed (issue) | draft | published | closed (advisory).' },
-          title: { type: 'string', description: 'Item title.' },
+          title: { type: 'string', maxLength: 300, description: 'Item title.' },
         },
       },
     },
