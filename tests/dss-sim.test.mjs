@@ -163,6 +163,38 @@ function stubsFor(map) {
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
+// ---- the <script>-embedding escape recipe (issue #179; executed here since the PR #189 review) ----
+// The report prompt tells the agent to embed report.md / bundle.json / results.sarif as escaped JSON
+// text inside a <script type="application/json"> block and names the recipe as literal code. This
+// suite EXECUTES that recipe instead of trusting the prose: escapeForScript's own source text is
+// asserted to contain the same string the prompt is asserted to contain, so the text the agent
+// reads and the code the test runs cannot drift apart. What the recipe guarantees — and all it
+// guarantees — is that no "</" survives in the output, hence no "</script" terminator in any
+// letter-case or spacing.
+const RECIPE = "JSON.stringify(text).replace(/<\\//g, '<\\\\/')"
+const escapeForScript = (text) => JSON.stringify(text).replace(/<\//g, '<\\/')
+const BREAKOUT_INPUTS = [
+  '</script><script>alert(1)</script>',
+  '</SCRIPT >',
+  '</ScRiPt\t>',
+  '<\\/script>', // already carries a backslash-slash: must round-trip, not double-escape
+  '<</script>', // a "<" immediately before the "</"
+  '<//script>',
+  '<!--<script></script>-->',
+  '"quoted" \\ backslash\nnewline\ttab   line-sep \u{1F389} é',
+  { title: '</script>', body: 'a "b"\n</SCRIPT>' }, // bundle.json / SARIF go through the same recipe as objects
+]
+function assertRecipeHolds(reportPrompt) {
+  assert.ok(escapeForScript.toString().includes(RECIPE), 'test discipline: the executed function IS the recipe text — edit both or neither')
+  assert.ok(reportPrompt.includes(RECIPE), `the report prompt names the escape recipe as exact code: ${RECIPE}`)
+  for (const input of BREAKOUT_INPUTS) {
+    const out = escapeForScript(input)
+    assert.ok(!out.includes('</'), `no "</" survives the recipe at all — ${JSON.stringify(input)} gave ${out}`)
+    assert.ok(!/<\/script/i.test(out), 'so a </script terminator cannot appear in any letter-case')
+    assert.deepEqual(JSON.parse(out), input, 'and JSON.parse restores the exact original')
+  }
+}
+
 // ================= BASELINE (must pass before AND after the v2 edits) =================
 
 test('baseline: schemas used during a run are satisfiable', async () => {
@@ -307,12 +339,14 @@ test('v2: existing return contract preserved (reportable / appendix_count / coun
   assert.equal(result.reportable.length + result.appendix_count, result.candidates, 'invariant intact')
 })
 
-test('v2: report prompt — do NOT write report.md, return it as text, embed base64 in html', async () => {
+test('v2: report prompt — do NOT write report.md, return it as text, embed escaped JSON in html (no base64)', async () => {
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
   assert.ok(/do NOT write report\.md/i.test(map.reportPrompt), 'aligns with guardrail, does not fight it')
   assert.ok(map.reportPrompt.includes('report_md'), 'returns markdown in report_md')
-  assert.ok(/base64/i.test(map.reportPrompt), 'embeds markdown base64 (no breakout)')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 in the report prompt (issue #179 — avoids tripping safeguard false positives)')
+  assert.ok(/application\/json/.test(map.reportPrompt), 'embeds markdown as escaped text in a JSON script block instead')
+  assert.ok(map.reportPrompt.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'html carries a download affordance')
 })
 
@@ -320,6 +354,12 @@ test('report agent is pinned to effort:high regardless of session effort', async
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
   assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
+test('v2: the </ escape recipe is named as code in the report prompt AND holds when executed (issue #179)', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assertRecipeHolds(map.reportPrompt)
 })
 
 // ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
@@ -454,7 +494,7 @@ test('priorBundle path: a successful load dedups by fingerprint', async () => {
   assert.equal(result.bundle.coverage.delta.carried_over, 2)
 })
 
-test('report prompt carries the bundle + SARIF for base64 embedding, and the delta when incremental', async () => {
+test('report prompt carries the bundle + SARIF for escaped-JSON embedding, and the delta when incremental', async () => {
   const first = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor({ tool: toolMissing, discovery: () => discoveryTwo }) })
   const map = { tool: toolMissing, discovery: () => discoveryTwo }
   await runScript({ args: { target: '/tmp/fake', rounds: 2, priorBundle: first.result.bundle }, stubs: stubsFor(map) })
@@ -462,6 +502,7 @@ test('report prompt carries the bundle + SARIF for base64 embedding, and the del
   assert.ok(/sarif/i.test(map.reportPrompt), 'report embeds the SARIF projection')
   assert.ok(/fingerprint/i.test(map.reportPrompt), 'report explains the fingerprints')
   assert.ok(/delta/i.test(map.reportPrompt) && /new finding/i.test(map.reportPrompt), 'incremental run leads with new findings + delta')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 anywhere in the report prompt (issue #179)')
 })
 
 // ================= VERIFY (independent factual-grounding gate: after Validate, before Report) =================

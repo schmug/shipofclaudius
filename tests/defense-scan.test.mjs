@@ -135,6 +135,38 @@ async function runScript({ args, map }) {
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
+// ---- the <script>-embedding escape recipe (issue #179; executed here since the PR #189 review) ----
+// The report prompt tells the agent to embed report.md / bundle.json / results.sarif as escaped JSON
+// text inside a <script type="application/json"> block and names the recipe as literal code. This
+// suite EXECUTES that recipe instead of trusting the prose: escapeForScript's own source text is
+// asserted to contain the same string the prompt is asserted to contain, so the text the agent
+// reads and the code the test runs cannot drift apart. What the recipe guarantees — and all it
+// guarantees — is that no "</" survives in the output, hence no "</script" terminator in any
+// letter-case or spacing.
+const RECIPE = "JSON.stringify(text).replace(/<\\//g, '<\\\\/')"
+const escapeForScript = (text) => JSON.stringify(text).replace(/<\//g, '<\\/')
+const BREAKOUT_INPUTS = [
+  '</script><script>alert(1)</script>',
+  '</SCRIPT >',
+  '</ScRiPt\t>',
+  '<\\/script>', // already carries a backslash-slash: must round-trip, not double-escape
+  '<</script>', // a "<" immediately before the "</"
+  '<//script>',
+  '<!--<script></script>-->',
+  '"quoted" \\ backslash\nnewline\ttab   line-sep \u{1F389} é',
+  { title: '</script>', body: 'a "b"\n</SCRIPT>' }, // bundle.json / SARIF go through the same recipe as objects
+]
+function assertRecipeHolds(reportPrompt) {
+  assert.ok(escapeForScript.toString().includes(RECIPE), 'test discipline: the executed function IS the recipe text — edit both or neither')
+  assert.ok(reportPrompt.includes(RECIPE), `the report prompt names the escape recipe as exact code: ${RECIPE}`)
+  for (const input of BREAKOUT_INPUTS) {
+    const out = escapeForScript(input)
+    assert.ok(!out.includes('</'), `no "</" survives the recipe at all — ${JSON.stringify(input)} gave ${out}`)
+    assert.ok(!/<\/script/i.test(out), 'so a </script terminator cannot appear in any letter-case')
+    assert.deepEqual(JSON.parse(out), input, 'and JSON.parse restores the exact original')
+  }
+}
+
 // ===================== STRUCTURE / PARSE =====================
 
 test('script parses, meta is loadable, and a default run completes', async () => {
@@ -515,12 +547,14 @@ test('orchestrator is resilient when the report agent dies (null) — fields nul
   assert.ok(Array.isArray(result.reportable), 'findings still returned even if the report agent dies')
 })
 
-test('report prompt: subagent must NOT write report.md, returns it as text, embeds it in html', async () => {
+test('report prompt: subagent must NOT write report.md, returns it as text, embeds it in html (no base64)', async () => {
   const map = {}
   await runScript({ args: { target: '/tmp/fake' }, map })
   assert.ok(/do NOT write report\.md/i.test(map.reportPrompt), 'must not fight the guardrail by writing report.md')
   assert.ok(map.reportPrompt.includes('report_md'), 'must return markdown in the report_md field')
-  assert.ok(/base64/i.test(map.reportPrompt), 'embeds the markdown base64-encoded (no breakout)')
+  assert.ok(!/base64/i.test(map.reportPrompt), 'no base64 in the report prompt (issue #179)')
+  assert.ok(/application\/json/.test(map.reportPrompt), 'embeds the markdown as escaped text in a JSON script block instead')
+  assert.ok(map.reportPrompt.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
   assert.ok(map.reportPrompt.includes('Download report.md'), 'HTML carries a client-side download affordance')
 })
 
@@ -528,6 +562,12 @@ test('report agent is pinned to effort:high regardless of session effort', async
   const map = {}
   await runScript({ args: { target: '/tmp/fake' }, map })
   assert.equal(map.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
+})
+
+test('report prompt: the </ escape recipe is named as code AND holds when executed (issue #179)', async () => {
+  const map = {}
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  assertRecipeHolds(map.reportPrompt)
 })
 
 // ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
