@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "Either this session surfaced nothing unresolved, or every unresolved item has already been recorded this session — by invoking the shipofclaudius:file-concerns skill, or by appending to ~/.claude/concerns-spool.jsonl after a failed gh call. Unresolved means: a completion claim resting on a check that was never actually run, a scope reduction never stated plainly to the user, a question raised and never answered, or a doubt about whether the change is correct. Default to satisfied — if nothing clearly unresolved stands out, the condition is met.",
+            "prompt": "Either this session surfaced nothing unresolved, or every unresolved item has already been recorded this session — by invoking the shipofclaudius:file-concerns skill, or by appending to ~/.claude/concerns-spool.jsonl after a failed gh call. Unresolved means: a completion claim resting on a check that was never actually run, a scope reduction never stated plainly to the user, a question raised and never answered, or a doubt about whether the change is correct. Work that is still legitimately in flight — a background task, a spawned agent, or an armed monitor that the transcript shows is still running and whose result the session is waiting on — is not unresolved; a check that has been started and has not yet returned is a pending check, not a skipped one. Default to satisfied — if nothing clearly unresolved stands out, the condition is met.",
             "timeout": 30
           }
         ]
