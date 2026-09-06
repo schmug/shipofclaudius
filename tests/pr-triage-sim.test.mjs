@@ -512,9 +512,9 @@ test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLeng
   const { calls } = await runScript({ args: {}, gather: oneAlice })
   const cls = byPrefix(calls, 'triage:#')[0]
   const props = cls.opts.schema.properties
-  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
-  assert.equal(typeof props.blocking_decision.maxLength, 'number', 'blocking_decision carries a maxLength')
-  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
+  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
+  assert.equal(props.blocking_decision.maxLength, 600, 'blocking_decision is capped at 600 chars')
+  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
 })
 
 test('#178 the rationale hint no longer asks for "comment quotes" — it asks for author/date + what it establishes', async () => {
@@ -524,6 +524,22 @@ test('#178 the rationale hint no longer asks for "comment quotes" — it asks fo
   assert.ok(!/comment quotes/i.test(desc), 'the "comment quotes" phrasing is gone')
   assert.ok(/author/i.test(desc) && /date/i.test(desc), 'the hint asks for the comment/review author and date')
   assert.ok(/own words/i.test(desc), 'the hint asks for what it establishes in the classifier\'s own words')
+})
+
+test('#178 the worked example reaches EVERY classify prompt in a wave, not just the first', async () => {
+  const { calls } = await runScript({ args: {}, gather: manyAlice(3) })
+  const cls = byPrefix(calls, 'triage:#')
+  assert.equal(cls.length, 3, 'all three PRs classified')
+  for (const c of cls) {
+    const n = Number(c.opts.label.slice('triage:#'.length))
+    const open = c.prompt.indexOf('<example>')
+    const close = c.prompt.indexOf('</example>')
+    assert.ok(open >= 0 && close > open, `${c.opts.label} carries a complete <example>...</example> block`)
+    const block = c.prompt.slice(open, close)
+    assert.ok(block.includes('UNTRUSTED_GH_DATA_EXAMPLE'), `${c.opts.label}'s example fences its own synthetic data`)
+    assert.ok(!block.includes(`nonce-${n}-feedface`), `${c.opts.label}'s example does not reuse that PR's real fetch nonce`)
+    assert.ok(c.prompt.includes(`nonce-${n}-feedface`), `${c.opts.label} still carries its own real fenced data outside the example`)
+  }
 })
 
 // ---- runner ----

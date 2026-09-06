@@ -795,11 +795,27 @@ test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLeng
   const { calls } = await runScript({ args: { numbers: [7] } })
   const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
   const props = cls.opts.schema.properties
-  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
-  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
-  assert.equal(typeof props.research_context.maxLength, 'number', 'research_context (long-form) carries a maxLength')
+  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
+  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
+  assert.equal(props.research_context.maxLength, 4000, 'research_context (long-form) is capped at 4000 chars')
   assert.ok(props.research_context.maxLength > props.rationale.maxLength, 'the long-form field gets a more generous cap than the short rationale')
   assert.ok(props.rationale.maxLength >= 400, 'the rationale cap still admits a real 2-4 sentence answer')
+})
+
+test('#178 the worked example reaches EVERY classify prompt in a wave, not just the first', async () => {
+  const { calls } = await runScript({ args: { numbers: [7, 8, 9] } })
+  const cls = agentsByLabelPrefix(calls, 'triage:#')
+  assert.equal(cls.length, 3, 'all three issues classified')
+  for (const c of cls) {
+    const n = Number(c.opts.label.slice('triage:#'.length))
+    const open = c.prompt.indexOf('<example>')
+    const close = c.prompt.indexOf('</example>')
+    assert.ok(open >= 0 && close > open, `${c.opts.label} carries a complete <example>...</example> block`)
+    const block = c.prompt.slice(open, close)
+    assert.ok(block.includes('UNTRUSTED_GH_DATA_EXAMPLE'), `${c.opts.label}'s example fences its own synthetic data`)
+    assert.ok(!block.includes(`nonce-${n}-deadbeef`), `${c.opts.label}'s example does not reuse that issue's real fetch nonce`)
+    assert.ok(c.prompt.includes(`nonce-${n}-deadbeef`), `${c.opts.label} still carries its own real fenced data outside the example`)
+  }
 })
 
 // ---- runner ----

@@ -345,8 +345,23 @@ test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLeng
   const { calls } = await runScript({ args: { findings: FINDINGS } })
   const t1 = byPrefix(calls, 'triage:f1')[0]
   const props = t1.opts.schema.properties
-  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
-  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
+  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
+  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
+})
+
+test('#178 the worked example reaches EVERY triage prompt in a wave, not just the first', async () => {
+  const { calls } = await runScript({ args: { findings: FINDINGS } })
+  const ts = byPrefix(calls, 'triage:')
+  assert.equal(ts.length, 3, 'all three findings triaged')
+  for (const t of ts) {
+    const open = t.prompt.indexOf('<example>')
+    const close = t.prompt.indexOf('</example>')
+    assert.ok(open >= 0 && close > open, `${t.opts.label} carries a complete <example>...</example> block`)
+    const block = t.prompt.slice(open, close)
+    assert.ok(block.includes('UNTRUSTED_FINDING_EXAMPLE'), `${t.opts.label}'s example fences its own synthetic data`)
+    assert.ok(!block.includes(NONCE), `${t.opts.label}'s example does not reuse the real ingest nonce`)
+    assert.ok(t.prompt.includes(NONCE), `${t.opts.label} still carries its own real fenced finding outside the example`)
+  }
 })
 
 // ---- runner ----

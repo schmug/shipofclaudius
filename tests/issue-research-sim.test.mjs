@@ -888,11 +888,53 @@ test('#178 the RESEARCH_SCHEMA free-text fields named in the issue carry a maxLe
   const { calls } = await runScript({ args: { numbers: [12] } })
   const r = byPrefix(calls, 'research:#')[0]
   const props = r.opts.schema.properties
-  assert.equal(typeof props.title.maxLength, 'number', 'title carries a maxLength')
-  assert.equal(typeof props.rationale.maxLength, 'number', 'rationale carries a maxLength')
-  assert.equal(typeof props.spec.maxLength, 'number', 'spec (long-form) carries a maxLength')
-  assert.equal(typeof props.next_question.maxLength, 'number', 'next_question carries a maxLength')
+  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
+  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
+  assert.equal(props.spec.maxLength, 8000, 'spec (long-form) is capped at 8000 chars')
+  assert.equal(props.next_question.maxLength, 500, 'next_question is capped at 500 chars')
   assert.ok(props.spec.maxLength > props.rationale.maxLength, 'the long-form spec field gets a more generous cap than the short rationale')
+})
+
+test('#178 the worked example reaches EVERY research prompt in a wave, not just the first', async () => {
+  const { calls } = await runScript({ args: { numbers: [12, 13, 14] } })
+  const rs = byPrefix(calls, 'research:#')
+  assert.equal(rs.length, 3, 'all three issues researched')
+  for (const r of rs) {
+    const n = Number(r.opts.label.slice('research:#'.length))
+    const open = r.prompt.indexOf('<example>')
+    const close = r.prompt.indexOf('</example>')
+    assert.ok(open >= 0 && close > open, `${r.opts.label} carries a complete <example>...</example> block`)
+    const block = r.prompt.slice(open, close)
+    assert.ok(block.includes('UNTRUSTED_GH_DATA_EXAMPLE'), `${r.opts.label}'s example fences its own synthetic data`)
+    assert.ok(!block.includes(`nonce-${n}-cafef00d`), `${r.opts.label}'s example does not reuse that issue's real fetch nonce`)
+    assert.ok(r.prompt.includes(`nonce-${n}-cafef00d`), `${r.opts.label} still carries its own real fenced data outside the example`)
+  }
+})
+
+// The spec cap is enforced by the schema, and `spec` is what green_lanes[].brief is built from —
+// so a spec that fills the cap is a probably-truncated implementation brief. The workflow must
+// say so (a warning + a lane flag), never hand it over silently.
+test('#178 a GREEN spec AT the schema cap is flagged spec_at_cap on its lane and warned about — never a silent handoff', async () => {
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), spec: 'x'.repeat(8000) }),
+  })
+  const lane = laneFor(result, 12)
+  assert.ok(lane, 'the issue still becomes a GREEN lane')
+  assert.equal(lane.spec_at_cap, true, 'the lane carries spec_at_cap: true')
+  assert.equal(lane.brief.length, 8000, 'the (possibly truncated) spec still reaches the brief — flagged, not dropped')
+  const warn = calls.logs.filter((m) => /spec_at_cap/.test(m))
+  assert.equal(warn.length, 1, 'exactly one cap warning is logged')
+  assert.ok(warn[0].includes('#12'), 'the warning names the capped issue')
+  assert.ok(/⚠️/.test(warn[0]) && /truncat/i.test(warn[0]), 'the warning is marked as a warning and says why (likely truncated)')
+})
+
+test('#178 a short GREEN spec is NOT flagged: spec_at_cap is false and no cap warning is logged', async () => {
+  const { result, calls } = await runScript({ args: { numbers: [12] } })
+  const lane = laneFor(result, 12)
+  assert.ok(lane, 'the issue becomes a GREEN lane')
+  assert.equal(lane.spec_at_cap, false, 'a short spec is not flagged')
+  assert.equal(calls.logs.filter((m) => /spec_at_cap/.test(m)).length, 0, 'no cap warning for a short spec')
 })
 
 // ---- runner ----

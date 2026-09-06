@@ -779,6 +779,21 @@ for (const r of clean) counts[r.verdict] = (counts[r.verdict] || 0) + 1
 // review gate at each hop). brief = the implementable spec produced by the research.
 const green = clean.filter((r) => r.verdict === 'GREEN')
 
+// A GREEN spec that fills its schema cap was almost certainly cut off by it, and `spec` is what
+// the lane `brief` below is built from — the implementation handoff — so a truncated spec must
+// not reach stacked-impl-lanes silently. Detected in script code from the returned length (no
+// agent): at or within SPEC_CAP_MARGIN chars of RESEARCH_SCHEMA's maxLength -> one warning here
+// naming the issue(s), and `spec_at_cap: true` on the lane that carries the brief. The spec is
+// still handed over (flagged, not dropped) — the consumer decides what to do with it.
+const SPEC_CAP = RESEARCH_SCHEMA.properties.spec.maxLength
+const SPEC_CAP_MARGIN = 100
+const specAtCap = (r) => typeof r.spec === 'string' && r.spec.length >= SPEC_CAP - SPEC_CAP_MARGIN
+const specCapped = green.filter(specAtCap).map((r) => r.number)
+if (specCapped.length) {
+  log(`⚠️ ${specCapped.length} GREEN spec(s) at or within ${SPEC_CAP_MARGIN} chars of the ${SPEC_CAP}-char schema cap — ` +
+    `likely truncated, so the lane brief may be incomplete (flagged spec_at_cap): ` + specCapped.map((n) => `#${n}`).join(', '))
+}
+
 // One lane per BATCH, not per issue: same-group GREEN issues whose footprints overlap and
 // carry no dependency edge are genuinely one unit of work (see planLaneGroups above).
 const laneGroups = planLaneGroups(green)
@@ -802,6 +817,7 @@ const laneDrafts = laneGroups.map((members) => {
     // closes (which would otherwise be a self-edge).
     depends_on: [...new Set(members.flatMap((m) => m.deps))].filter((d) => !own.has(d)).sort((a, b) => a - b),
     invariant: members.some((m) => !!m.r.invariant), // any invariant member arms the security review
+    spec_at_cap: members.some((m) => specAtCap(m.r)), // any at-cap member taints the shared brief
     brief: members.length === 1
       ? (first.r.spec || first.r.chosen_approach || first.r.rationale || '')
       : members.map((m) => `### Issue #${m.number}${m.r.title ? ` — ${m.r.title}` : ''}\n\n` +
@@ -833,6 +849,9 @@ const green_lanes = laneDrafts.map((d, i) => ({
   issues: d.issues,
   invariant: d.invariant,
   brief: d.brief,
+  // True when any member's spec sits at/near the schema cap (see SPEC_CAP above): the brief may
+  // be truncated. Additive; stacked-impl-lanes reads lanes by named field and ignores this key.
+  spec_at_cap: d.spec_at_cap,
   depends_on: d.depends_on,
   // Footprint + execution mode, computed IN SCRIPT CODE (no agent, no prompt — see the
   // file-overlap helpers above). `files` used to be DROPPED here, so stacked-impl-lanes never

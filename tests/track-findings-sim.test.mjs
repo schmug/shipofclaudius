@@ -395,7 +395,7 @@ test('#178 the CONTEXT_SCHEMA existing-item title carries a maxLength', async ()
   const contextCall = calls.agents.find((a) => (a.opts.label || '').startsWith('context:'))
   assert.ok(contextCall, 'the context agent ran')
   const titleField = contextCall.opts.schema.properties.existing.items.properties.title
-  assert.equal(typeof titleField.maxLength, 'number', 'the existing-item title field carries a maxLength')
+  assert.equal(titleField.maxLength, 300, 'the existing-item title field is capped at 300 chars')
 })
 
 // ---- runner ----
