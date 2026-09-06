@@ -111,11 +111,20 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 // still evaluates once and does not block, and put that count in the commit message.
 // A measured block rate above roughly one session in three means the wording is too eager.
 //
-// 2026-08-31 (#167): added the in-flight-work exemption below. Re-measurement against real
-// sessions was NOT performed as part of that change — it was made by an unattended routine
-// with no way to run five real sessions and observe block behaviour. Treat the hash update
-// as unmeasured until a human (or a session with real transcript access) confirms the block
-// rate per the instructions above.
+// 2026-08-31 (#167): added the in-flight-work exemption. The unattended routine that wrote it
+// could not run real sessions, so this pin first shipped unmeasured.
+// 2026-09-06 (#168): re-measured. 8 real `claude -p` sessions ran with this exact wording
+// loaded via --plugin-dir and the installed plugin copy disabled (the debug log showed only
+// that hooks.json registering a Stop hook): 5 trivial (arithmetic, ls, write+ls, write and
+// run a node:test file, a two-sentence explanation), 2 in-flight (a run_in_background shell
+// task; a background subagent, which stopped twice — once while running, once after) and 1
+// echo-only control. 9 Stop evaluations, 0 blocks; every trivial session evaluated exactly
+// once. In both in-flight sessions the hook input's `background_tasks` listed the task as
+// `running` and the evaluator's reason cited it, so the exemption rests on that structural
+// field as well as the wording. The control (the assistant echoing a user-dictated "all
+// tests pass") also passed; it exercises neither clause. The never-run-check clause's
+// presence is pinned by the regression test below; its block behaviour was not part of
+// this battery.
 const PROMPT_SHA256_16 = '502aba2764499865'
 
 test('stop hook: the condition wording is hash-pinned', () => {
