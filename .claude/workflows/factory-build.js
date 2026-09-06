@@ -257,15 +257,18 @@ const built = await parallel(toBuild.map((c) => () =>
   agent(buildPrompt(c, existingFor(c.key) ? existingFor(c.key).pr_url : ''), { label: `build:${c.key}`, phase: 'Build', schema: BUILD_SCHEMA })
 ))
 
-// ── Normalize in script code: names come from the contract, never from the agent. ───────
+// ── Normalize in script code: names AND URLs come from the contract, never from the agent. ──
+// branch, worker_name and preview_url are derived from the naming contract; pr_url survives only when
+// it matches PR_URL_RE (a PR of THIS repo) — the same rule the preflight relay's URL passes. The
+// agent's own pr_url / preview_url fields are never echoed into the result.
 const STATUSES = new Set(['opened', 'deploy_failed', 'blocked'])
 const shape = (c, r, status, blocker) => ({
   key: c.key,
   status,
   branch: isIterTarget(c) ? ITERATE.branch : branchOf(c.key), // from the naming contract, never echoed from the agent
-  pr_url: (r && r.pr_url) || '',
+  pr_url: prUrlOf(r), // kept only as a PR of THIS repo, else ''
   worker_name: workerOf(c.key),
-  preview_url: status === 'opened' || status === 'skipped_existing' ? ((r && r.preview_url) || `https://${hostOf(c.key)}`) : ((r && r.preview_url) || ''),
+  preview_url: status === 'opened' || status === 'skipped_existing' ? `https://${hostOf(c.key)}` : '', // from the naming contract, never read from the agent
   version_id: (r && r.version_id) || '',
   gates_output: (r && r.gates_output) || '',
   files_changed: (r && Array.isArray(r.files_changed)) ? r.files_changed : [],
