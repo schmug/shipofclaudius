@@ -83,7 +83,7 @@ test('file-concerns: exactly two spool writers, concerns and retraction, with no
     assert.match(concernsSnippet, new RegExp(`\\b${field}:`), `concerns writer sets ${field}`)
   }
   assert.doesNotMatch(concernsSnippet, /\bretracts:/, 'concerns writer does not also emit retracts')
-  for (const field of ['ts', 'session', 'cwd', 'repo', 'retracts']) {
+  for (const field of ['ts', 'session', 'cwd', 'repo', 'retracts', 'reason']) {
     assert.match(retractSnippet, new RegExp(`\\b${field}:`), `retraction writer sets ${field}`)
   }
   assert.doesNotMatch(retractSnippet, /\bconcerns:/, 'retraction writer does not also emit concerns')
@@ -95,15 +95,15 @@ test('file-concerns: skill and spec agree field-for-field on both envelopes', as
     /\{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner\/name\|null>","concerns":\["…"\]\}/,
     'spec states the concerns envelope verbatim, in ts/session/cwd/repo/concerns order')
   assert.match(specDoc,
-    /\{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner\/name\|null>","retracts":\["…"\]\}/,
-    'spec states the retraction envelope verbatim, in ts/session/cwd/repo/retracts order')
+    /\{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner\/name\|null>","retracts":\["…"\],"reason":"<what fixed it>"\}/,
+    'spec states the retraction envelope verbatim, in ts/session/cwd/repo/retracts/reason order')
   const [concernsSnippet, retractSnippet] = await spoolWriters()
   assert.match(concernsSnippet,
     /\{ts:\$ts,session:\$session,cwd:\$cwd,repo:\(if \$repo=="" then null else \$repo end\),concerns:\$ARGS\.positional\}/,
     'concerns writer builds the object in the same ts/session/cwd/repo/concerns order as the spec')
   assert.match(retractSnippet,
-    /\{ts:\$ts,session:\$session,cwd:\$cwd,repo:\(if \$repo=="" then null else \$repo end\),retracts:\$ARGS\.positional\}/,
-    'retraction writer builds the object in the same ts/session/cwd/repo/retracts order as the spec')
+    /\{ts:\$ts,session:\$session,cwd:\$cwd,repo:\(if \$repo=="" then null else \$repo end\),retracts:\$ARGS\.positional,reason:\$reason\}/,
+    'retraction writer builds the object in the same ts/session/cwd/repo/retracts/reason order as the spec')
 })
 
 test('file-concerns: the concerns writer really emits the five-field envelope', async () => {
@@ -142,13 +142,15 @@ test('file-concerns: the retraction writer really emits retracts (not concerns) 
   const spool = join(dir, 'spool.jsonl')
   const script = retractSnippet
     .replaceAll('<session id>', 'sess-xyz789')
+    .replaceAll('<what fixed it>', 'fixed in this session before wrap-up')
     .replaceAll('~/.claude/concerns-spool.jsonl', spool)
   execFileSync('sh', ['-c', script], { cwd: dir, encoding: 'utf8' })
   const parsed = JSON.parse((await readFile(spool, 'utf8')).trim())
-  assert.deepEqual(Object.keys(parsed), ['ts', 'session', 'cwd', 'repo', 'retracts'],
-    'emits exactly the five envelope fields with retracts, not concerns -- fails if either is wrong')
+  assert.deepEqual(Object.keys(parsed), ['ts', 'session', 'cwd', 'repo', 'retracts', 'reason'],
+    'emits exactly the six envelope fields with retracts and reason, not concerns -- fails if any is wrong')
   assert.equal(parsed.repo, 'schmug/shipofclaudius', 'parses owner/repo from the git remote')
   assert.deepEqual(parsed.retracts, ['first concern'])
+  assert.equal(parsed.reason, 'fixed in this session before wrap-up', 'carries the reason it was retracted')
 })
 
 test('file-concerns: states the retraction drain rule and the pre-existing-line recovery path', async () => {
@@ -158,10 +160,32 @@ test('file-concerns: states the retraction drain rule and the pre-existing-line 
     'states the drain rule for a matched retraction')
   assert.ok(norm.includes('exact string equality is the only link between the two lines'),
     'states that retraction matching is by exact string equality')
-  assert.ok(norm.includes('carries no reason, severity, or category'),
-    'states a retraction is a lifecycle marker, not a classification (§8)')
+  assert.ok(norm.includes('not a severity or category'),
+    'states a retraction is not a severity/category classification (§8), even though it now carries a reason (#206)')
   assert.ok(norm.includes('gets filed by hand from its raw text'),
     'states a recovery path for the pre-existing off-schema lines rather than assuming them away')
+})
+
+// #206: the retraction record shipped in #175 explicitly carried no reason. This issue asks
+// for one, mirroring the issue-side `- [x] RESOLVED — <what fixed it>` convention, while
+// keeping the guard against retraction becoming a write-time bypass (§2's whole premise).
+test('file-concerns: the reason field is required and guards against retraction-as-bypass', async () => {
+  const md = await read('skills/file-concerns/SKILL.md')
+  const norm = md.replace(/\s+/g, ' ')
+  assert.match(md, /--arg reason "<what fixed it>"/, 'the retraction writer takes a reason argument')
+  assert.ok(norm.includes('reason` is required and must name what actually'),
+    'states the reason is required, not optional')
+  assert.ok(norm.includes("not \"on reflection this wasn't worth recording\""),
+    'keeps the retraction-is-not-a-bypass guard from the design spec')
+})
+
+test('design spec §4.5: the reason field mirrors the issue-side RESOLVED convention', async () => {
+  const spec = await read('docs/specs/2026-08-30-session-end-concerns-design.md')
+  const norm = spec.replace(/\s+/g, ' ')
+  assert.match(spec, /"reason":"<what fixed it>"/, 'the retraction envelope carries a reason field')
+  assert.ok(norm.includes('mirroring the issue-side convention'), 'names the issue-side convention it mirrors')
+  assert.ok(norm.includes("not \"on reflection this wasn't worth recording\""),
+    'keeps the retraction-is-not-a-bypass guard')
 })
 
 // #173: a bare truncate (`: > file`) racing a concurrent O_APPEND write silently destroys

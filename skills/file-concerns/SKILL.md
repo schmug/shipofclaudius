@@ -71,9 +71,10 @@ land. A delayed write is fine; a lost concern is not.
 ### If a spooled concern resolves itself
 
 The spool is append-only (§4.5 of the design spec) — there is no in-place edit.
-If a concern you already spooled this session turns out to be moot before the
+If a concern you already spooled this session gets fixed before the
 session ends, append a **retraction record** rather than rewriting or deleting
-the earlier line: the same envelope, with `retracts` in place of `concerns`:
+the earlier line: the same envelope, with `retracts` and `reason` in place of
+`concerns`:
 
 ```bash
 jq -nc \
@@ -81,15 +82,20 @@ jq -nc \
   --arg session "<session id>" \
   --arg cwd "$PWD" \
   --arg repo "$(git remote get-url origin 2>/dev/null | sed -E 's#\.git$##; s#^.*[:/]([^/]+/[^/]+)$#\1#')" \
-  --args '{ts:$ts,session:$session,cwd:$cwd,repo:(if $repo=="" then null else $repo end),retracts:$ARGS.positional}' \
+  --arg reason "<what fixed it>" \
+  --args '{ts:$ts,session:$session,cwd:$cwd,repo:(if $repo=="" then null else $repo end),retracts:$ARGS.positional,reason:$reason}' \
   "first concern" >> ~/.claude/concerns-spool.jsonl
 ```
 
 Each entry in `retracts` must match a `concerns` entry **verbatim** — exact
 string equality is the only link between the two lines, so quote the concern
-back exactly as spooled. A retraction carries no reason, severity, or category
-(both are out of scope, see §8 of the design spec); it is a lifecycle marker,
-not a classification.
+back exactly as spooled. `reason` is required and must name what actually
+fixed it, the same way the issue-side convention reads
+`- [x] RESOLVED — <what fixed it>` — not a severity or category (both stay
+out of scope, see §8 of the design spec). A retraction is for "I fixed it in
+this same session", not "on reflection this wasn't worth recording" — a
+`reason` that doesn't name a fix misuses the record rather than shortcutting
+the no-bar-at-write-time design.
 
 ## Draining the spool
 
