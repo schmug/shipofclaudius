@@ -42,6 +42,7 @@ test('scaffold: CI pins every action by 40-char SHA, sets timeout-minutes, and i
   for (const m of ci.matchAll(/uses:\s*(\S+)/g)) assert.ok(/@[0-9a-f]{40}\b/.test(m[1]), `unpinned action: ${m[1]}`)
   assert.ok(/timeout-minutes:\s*\d+/.test(ci))
   assert.ok(/^\s{2}test:\s*$/m.test(ci), 'the job id is `test`')
+  assert.ok(!/^\s{4}name:/m.test(ci), 'the test job carries no name: key (a job name would change the check context the ruleset requires)')
   const rs = JSON.parse(await read(S + 'ruleset.json'))
   const rsc = rs.rules.find((r) => r.type === 'required_status_checks')
   assert.deepEqual(rsc.parameters.required_status_checks.map((c) => c.context), ['test'])
@@ -54,7 +55,7 @@ test('scaffold: smoke.mjs and critic.mjs read the service token from process.env
     const src = await read(S + f)
     assert.ok(src.includes('process.env.CF_ACCESS_CLIENT_ID') && src.includes('process.env.CF_ACCESS_CLIENT_SECRET'), `${f}: reads both from process.env`)
     for (const line of src.split('\n')) {
-      if (/console\.(log|error)|writeFileSync|process\.stdout/.test(line)) assert.ok(!/CF_ACCESS_CLIENT_SECRET/.test(line), `${f}: a print/write line names the secret: ${line.trim()}`)
+      if (/console\.(log|error|warn|info|debug)|process\.(stdout|stderr)|writeFileSync/.test(line)) assert.ok(!/CF_ACCESS_CLIENT_SECRET/.test(line), `${f}: a print/write line names the secret: ${line.trim()}`)
     }
   }
 })
@@ -113,6 +114,15 @@ test('factory-intake: the write ladder is draft PR → human approval → gated 
   assert.ok(/gh pr ready/.test(md))
   assert.ok(/execute:\s*true/.test(md))
   assert.ok(/--admin/.test(md) && /never/i.test(md.slice(md.indexOf('--admin') - 80, md.indexOf('--admin'))), 'names --admin only to forbid it')
+  // Every occurrence, not only the first: "never" within the 80 chars before it, or inside the
+  // autonomy-boundary sentence that lists the forbidden actions and ends "never do it".
+  const boundary = md.match(/Anything else that would need[^\n]*?never do it/)
+  assert.ok(boundary, 'the autonomy boundary lists the forbidden actions and ends "never do it"')
+  const inBoundary = (i) => i >= boundary.index && i < boundary.index + boundary[0].length
+  for (const m of md.matchAll(/--admin/g)) {
+    const before = md.slice(Math.max(0, m.index - 80), m.index)
+    assert.ok(/never/i.test(before) || inBoundary(m.index), `--admin at ${m.index} is outside any prohibition: …${before.slice(-40)}--admin`)
+  }
   assert.ok(/wrangler delete --name factory-/.test(md))
   assert.ok(/Stop[^\n]*deletes? nothing|nothing is deleted/i.test(md))
 })
@@ -121,6 +131,34 @@ test('factory-intake: every referenced references/ file exists and the scaffold 
   const md = await read('skills/factory-intake/SKILL.md')
   for (const m of md.matchAll(/references\/([\w.-]+)/g)) assert.ok(await exists(`skills/factory-intake/references/${m[1]}`), m[1])
   assert.ok(md.includes('scaffold/') && !md.includes('references/scaffold'))
+})
+
+// The build agent is untrusted and can rewrite scripts/smoke.mjs on its branch; the skill runs
+// that script in the session where CF_ACCESS_CLIENT_* live. THREAT_MODEL.md invariant 8.
+test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-authored file executes (Phase 7 scoring, Phase 9 deploy)', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(/SCAFFOLD_SHA=\$\(git rev-parse HEAD\)/.test(md), 'Phase 4 records the scaffold commit')
+  const guards = [...md.matchAll(/git diff --quiet "\$SCAFFOLD_SHA"/g)]
+  assert.ok(guards.length >= 2, `the guard appears at least twice (found ${guards.length})`)
+  for (const g of guards) {
+    const line = md.slice(g.index, md.indexOf('\n', g.index))
+    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json wrangler\.jsonc wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
+  }
+  assert.ok(md.includes('unverified: candidate modified factory scripts'), 'a tampered candidate is presented as unverified')
+  assert.ok(guards[0].index < md.indexOf('node scripts/smoke.mjs'), 'the first guard precedes the smoke run')
+  const deploy = md.lastIndexOf('npm ci && npx wrangler deploy')
+  assert.ok(deploy > 0 && guards[guards.length - 1].index < deploy, 'the last guard precedes the production deploy')
+})
+
+// Without a caller-minted nonce factory-build falls back to a content-derived one that whoever
+// wrote the fenced text can compute (README, factory-build row).
+test('factory-intake: passes the run nonce to factory-build as fenceNonce on both the build and the iterate invocation', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  const n = (md.match(/fenceNonce/g) || []).length
+  assert.ok(n >= 2, `fenceNonce appears at least twice (found ${n})`)
+  const p5 = md.slice(md.indexOf('## Phase 5'), md.indexOf('## Phase 6'))
+  const p10 = md.slice(md.indexOf('## Phase 10'), md.indexOf('## Phase 11'))
+  assert.ok(p5.includes('fenceNonce') && p10.includes('fenceNonce'), 'both factory-build invocations carry it')
 })
 
 // ---- runner ----

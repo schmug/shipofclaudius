@@ -1,6 +1,7 @@
-// Content-contract test for the gate-merge policy process skills (ship,
-// pr-workflow, implement-issue). Node built-ins only; zero token cost.
-// Asserts each skill exists as a `workflow: none` process skill, carries the
+// Content-contract test for the gate-merge policy process skills — the skills in
+// POLICY_SKILLS below — plus the autonomy-block checks on parallel-build-orchestrator
+// and critic-gated-build. Node built-ins only; zero token cost.
+// Asserts each POLICY_SKILLS entry exists as a `workflow: none` process skill, carries the
 // load-bearing gate-merge policy language (agents merge through a server-side
 // ruleset/protection with required CI checks; UNKNOWN/detection failure fails
 // closed to stop-at-the-open-PR), and stays sanitized for public consumption.

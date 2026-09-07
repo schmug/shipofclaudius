@@ -19,6 +19,7 @@ Read these from the environment; stop with a setup message naming the missing on
 | `FACTORY_PREVIEW_DOMAIN` | the suffix every preview hostname hangs under, e.g. `preview.example.com`; a wildcard Cloudflare Access application on `*.<this>` must already exist |
 | `FACTORY_PROD_DOMAIN` | the zone production hostnames live on, e.g. `example.com` |
 | `FACTORY_GH_OWNER` | optional; defaults to `gh api user --jq .login` |
+| `FACTORY_PROJECTS_ROOT` | optional; a colon-separated list of directories the research agent may scan for reusable local projects — one level deep, never a dot-directory, never `.env*` / `.dev.vars` / `~/.claude`. Unset ⇒ the local scan is skipped and the brief says so. |
 | `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` | an Access **service token** with a Service Auth policy on the preview application. Optional: without it Phase 7 presents candidates as **unverified** instead of scoring them. Never print or echo these; only `scripts/smoke.mjs` and `scripts/critic.mjs` read them, from `process.env`. |
 
 Then: `gh auth status` (write scope), `codex --version` and the smoke `codex exec --skip-git-repo-check --sandbox read-only "Reply with exactly: CRITIC_ONLINE" < /dev/null` (a failure is not fatal — record "critic unavailable" and continue; Phase 7 will skip scoring). `git rev-parse --abbrev-ref HEAD && pwd` to know where you are; nothing below writes to the session's own repository.
@@ -31,14 +32,15 @@ Dispatch one read-only `Explore` agent with the prompt in `references/research-b
 
 ## Phase 2 — Refine ← check-in
 
-Derive the slug from the idea's title: lowercase, non-alphanumerics → `-`, collapsed, trimmed, ≤ 24 chars. Check it is free in all three namespaces before proposing it:
+Derive the slug from the idea's title: lowercase, non-alphanumerics → `-`, collapsed, trimmed, ≤ 22 chars (so a `-2` suffix still fits the 24-char cap below). Check it is free in all three namespaces before proposing it:
 
 ```
-gh repo view <owner>/<slug>              # must fail (404)
-dig +short <slug>.$FACTORY_PROD_DOMAIN   # must be empty
+gh repo view <owner>/<slug>                                 # must fail (404)
+dig +short <slug>.$FACTORY_PROD_DOMAIN                      # must be empty
+npx --yes wrangler@latest deployments list --name <slug>    # must FAIL (no such Worker)
 ```
 
-(The Worker namespace is checked by the scaffold's dry-run; a taken name surfaces there as a first-class error.)
+The third command is the only Worker-namespace check there is: `wrangler deploy --dry-run` (Phase 4) validates the config and does not check whether the name exists. Slug precondition: any slug you or the user choose — the derived one, `<slug>-2`, or a free-text answer — must match `^[a-z0-9][a-z0-9-]{1,23}$` (the `factory-build` contract). A user-supplied slug goes through all three checks again before Phase 4; if it fails the regex or any check, create nothing and report it (Phase 11) — the slug names the repo, the Worker, and the hostname, so a silent substitute is not yours to pick.
 
 Ask at most three `AskUserQuestion` rounds from `references/intake-questions.md` — Round 1 is mandatory, Round 3 (budget) is always last. Record every answer verbatim.
 
@@ -54,17 +56,18 @@ gh repo create "$OWNER/<slug>" --public --license MIT --gitignore Node --descrip
 mkdir -p "${TMPDIR:-/tmp}/factory/<slug>" && git clone "https://github.com/$OWNER/<slug>.git" "${TMPDIR:-/tmp}/factory/<slug>/main"
 ```
 
-Copy every file from this skill's `scaffold/` directory into that clone (including `.github/`), then fill the placeholders in place: `{{SLUG}}`, `{{TITLE}}`, `{{SUMMARY}}`, `{{DATE}}` (today, `YYYY-MM-DD`), `{{PROD_DOMAIN}}`, `{{PREVIEW_DOMAIN}}`, `{{SPEC_PATH}}`, `{{PRODUCT}}`, `{{PRODUCT_SUMMARY}}`. Leave `{{KEY}}` (the build agent's) and `{{LIVE_URL}}` (the critic runner's) untouched. Write the spec to `docs/specs/<date>-<slug>.md`. Then, in the clone:
+Copy every file from this skill's `scaffold/` directory into that clone (including `.github/`) **except `ruleset.json`** — the ruleset is applied from the plugin's own copy below and is never committed to the project — then fill the placeholders in place: `{{SLUG}}`, `{{TITLE}}`, `{{SUMMARY}}`, `{{DATE}}` (today, `YYYY-MM-DD`), `{{PROD_DOMAIN}}`, `{{PREVIEW_DOMAIN}}`, `{{SPEC_PATH}}`, `{{PRODUCT}}`, `{{PRODUCT_SUMMARY}}`. Leave `{{KEY}}` (the build agent's) and `{{LIVE_URL}}` (the critic runner's) untouched. Write the spec to `docs/specs/<date>-<slug>.md`. Then, in the clone:
 
 ```
 npm install --save-dev wrangler@latest playwright@latest && npx playwright install chromium
 npm test && npx wrangler whoami && npx wrangler deploy --dry-run
 git add -A && git commit -m "chore: scaffold from the software factory" && git push origin main
-gh api -X POST "repos/$OWNER/<slug>/rulesets" --input ruleset.json
+SCAFFOLD_SHA=$(git rev-parse HEAD)   # every later guard compares against this commit
+gh api -X POST "repos/$OWNER/<slug>/rulesets" --input "$CLAUDE_PLUGIN_ROOT/skills/factory-intake/scaffold/ruleset.json"
 gh api "repos/$OWNER/<slug>/rules/branches/main" --jq '[.[] | select(.type=="required_status_checks")] | length'
 ```
 
-The last command must print `1`. If it does not, continue to Phase 6 but mark the run **ungated**: Phase 9 will stop at the draft PR and say which gate is missing. (This is the only push to `main` in the whole flow, into a repository this run just created.) Delete `ruleset.json` from the clone after it is applied so it does not ship in the project.
+The last command must print `1`. If it does not, continue to Phase 6 but mark the run **ungated**: Phase 9 will stop at the draft PR and say which gate is missing. (This is the only push to `main` in the whole flow, into a repository this run just created.) The skill keeps `SCAFFOLD_SHA` for the whole run: record the value in the session — a shell variable does not survive between Bash calls — and substitute it wherever Phase 7 or Phase 9 writes `"$SCAFFOLD_SHA"`.
 
 ## Phase 5 — Build (delegated)
 
@@ -73,10 +76,11 @@ Invoke the `factory-build` skill with:
 ```
 { slug, repo: "<owner>/<slug>", base: "main", spec_path: "docs/specs/<date>-<slug>.md",
   previewDomain: "$FACTORY_PREVIEW_DOMAIN",
+  fenceNonce: "<run nonce from Phase 0>",
   candidates: [{ key: "a", brief: "<the spec's one-paragraph summary>", direction: "<Round 1 direction>" }, …] }
 ```
 
-One candidate per direction the user chose; keys `a`, `b`, `c`, `d`. Wait for the Workflow notification. Do nothing else that could race it.
+One candidate per direction the user chose; keys `a`, `b`, `c`, `d`. `fenceNonce` is not optional here: without it the callee falls back to a predictable content-derived nonce, one that whoever wrote the fenced text can compute. Wait for the Workflow notification. Do nothing else that could race it.
 
 ## Phase 6 — Wait (no user contact)
 
@@ -92,7 +96,13 @@ Ceiling 10 minutes. On the ceiling the candidate is presented as **unverified**,
 
 ## Phase 7 — Score (no user contact)
 
-Per verified candidate, in its scratch clone `${TMPDIR:-/tmp}/factory/<slug>/<key>` on its branch:
+Per verified candidate, in its scratch clone `${TMPDIR:-/tmp}/factory/<slug>/<key>` on its branch, the tamper guard runs first:
+
+```
+git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+```
+
+If it prints `TAMPERED`, do NOT run either script below: present the candidate as **unverified: candidate modified factory scripts or config**, list the changed paths (`git diff --stat "$SCAFFOLD_SHA" HEAD -- <the same paths>`), and treat it as not selectable for Ship — it still appears in Phase 8, marked so, and a `Ship it` answer that picks it skips Phase 9 and reports (Phase 11) instead. The reason, in one sentence: the build agent is untrusted, and these files run in this session, where `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` live, so a candidate-authored `smoke.mjs` would receive the secret. Only when the guard prints nothing:
 
 ```
 node scripts/smoke.mjs --url https://<preview host> --out factory-reports/<key>
@@ -117,14 +127,20 @@ Record the answer as a PR comment on the chosen candidate: `_Approved via factor
 1. `gh pr ready <n> -R <owner>/<slug>`.
 2. Invoke the `merge-pr-with-gate` skill with `{ pr: <n>, repo: "<owner>/<slug>", execute: true }`. It gates on `mergeStateStatus` + the required-check rollup and never uses `--admin`. If the run was marked **ungated** in Phase 4, skip this step, leave the PR ready, and report which gate is missing — nothing merges without it.
 3. Background `until` loop on `gh pr view <n> -R <owner>/<slug> --json state --jq .state` = `MERGED`, ceiling 15 minutes. Not merged ⇒ report and stop; delete nothing.
-4. `git clone https://github.com/<owner>/<slug>.git "${TMPDIR:-/tmp}/factory/<slug>/release" && cd $_ && npm ci && npx wrangler deploy` — the production config, from merged `main`. Capture the `Current Version ID`.
+4. `git clone https://github.com/<owner>/<slug>.git "${TMPDIR:-/tmp}/factory/<slug>/release" && cd $_` — merged `main`. Run the tamper guard against it before anything from the clone executes:
+
+   ```
+   git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+   ```
+
+   `TAMPERED` ⇒ stop here: deploy nothing, delete nothing, and report per the autonomy boundary (the changed paths from `git diff --stat`, the merged PR, and that production was not touched). Otherwise `npm ci && npx wrangler deploy` — the production config. Capture the `Current Version ID`.
 5. Background `until` loop for TLS on `https://<slug>.$FACTORY_PROD_DOMAIN/` (a new hostname means a new certificate), then `curl -sS -o /dev/null -w '%{http_code}' -L` must print `200` with no `cloudflareaccess.com` hop (production is public).
 6. Cleanup, in this order: `gh pr close <n> -R <owner>/<slug> --comment "Not selected; see <winner PR>"` for each losing PR; then for **every** candidate, winner included (production now serves it), in its scratch clone: `npx wrangler delete --name factory-<slug>-<key> --force`.
 7. Report (Phase 11) with the production URL, the version id, and `npx wrangler rollback --name <slug>` as the rollback command.
 
 ## Phase 10 — Iterate ← check-in
 
-One `AskUserQuestion`: `Fix what the critic flagged` (feeds `requiredFixes` from `factory-reports/<key>/critic.json`) / Other (free text). Then invoke the `factory-build` skill again with the same args plus `iterate: { key, branch: "factory/<key>", feedback }`. The build agent commits on the same branch and redeploys the same Worker — hostname and certificate are unchanged, so skip Phase 6 and go to Phase 7, then Phase 8. Keep a round counter in the session: after the **second** iterate answer, do not ask a third time — report instead (Phase 11), with every preview still live.
+One `AskUserQuestion`: `Fix what the critic flagged` (feeds `requiredFixes` from `factory-reports/<key>/critic.json`) / Other (free text). Then invoke the `factory-build` skill again with the same args — including `fenceNonce: "<run nonce from Phase 0>"`, which matters most here because `feedback` is the one input a third party can shape — plus `iterate: { key, branch: "factory/<key>", feedback }`. The build agent commits on the same branch and redeploys the same Worker — hostname and certificate are unchanged, so skip Phase 6 and go to Phase 7, then Phase 8. Keep a round counter in the session: after the **second** iterate answer, do not ask a third time — report instead (Phase 11), with every preview still live.
 
 ## Phase 11 — Stop / report
 

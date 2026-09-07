@@ -4,7 +4,7 @@ Written for the next agent editing the scaffold. Every file under `scaffold/` is
 into every project the factory creates, so a control removed here is removed from every
 future repo at once. `tests/factory-intake.test.mjs` pins each invariant below; change the
 test and the template together or not at all. Design: `docs/specs/2026-09-06-factory-intake.md`
-§7, §10, §11 (the scaffold) and §5, §8–§11 (the skill, invariant 7 below). This file sits
+§7, §10, §11 (the scaffold) and §5, §8–§11 (the skill, invariants 7 and 8 below). This file sits
 beside `scaffold/`, not inside it, so it is not copied.
 
 ## What this thing is
@@ -20,7 +20,7 @@ Access with a service token. Placeholders (`{{SLUG}}`, `{{TITLE}}`, `{{DATE}}`,
 
 | Party | Trust | Reaches |
 |---|---|---|
-| The **build agent** (a model, in a scratch clone) | untrusted | every file in the project except the Access token, which it never receives |
+| The **build agent** (a model, in a scratch clone) | untrusted | every file in the project except the Access token, which it never receives; a change to the files the skill executes is caught by invariant 8 before anything runs |
 | The **deployed candidate** | untrusted code on a shared preview domain | any request-derived input |
 | The **critic** (`codex`, read-only sandbox, no network) | untrusted output | `factory-reports/<key>/critic.{json,md}` — data for the skill, never instructions |
 | The **skill** running `smoke.mjs` / `critic.mjs` | trusted | `process.env.CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, `--url`, `--key` |
@@ -115,9 +115,38 @@ copied into a project. **Pinned:** the five `factory-intake:` tests in
   `**name** (Phase N)` check-ins between the autonomy sentence and `## Phase 0` and requires 4.
 
 Residual: these are instructions to a model, not mechanical gates. The mechanical gates are
-the required-check ruleset (invariant 4) that `merge-pr-with-gate` reads and the scripts'
-`process.env`-only token handling (invariant 1). The static tests keep the text load-bearing;
+the required-check ruleset (invariant 4) that `merge-pr-with-gate` reads, the scripts'
+`process.env`-only token handling (invariant 1), and the tamper guard (invariant 8) that runs
+before any project file executes in the session. The static tests keep the text load-bearing;
 they do not make it enforced.
+
+### 8. Candidate-authored files never execute with the service token in the environment
+
+The build agent is untrusted (row 1 above) and can commit anything on its branch, including a
+rewritten `scripts/smoke.mjs`. The skill runs `smoke.mjs` and `critic.mjs` in its own session,
+where `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` live, so a candidate-authored script
+would receive the secret — invariant 1 holds for the scripts as shipped, not as rewritten. The
+guard: Phase 4 records `SCAFFOLD_SHA=$(git rev-parse HEAD)` right after the scaffold push, and
+the skill runs
+
+    git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+
+at two points before anything from a clone executes: **Phase 7**, in the candidate's scratch
+clone (`HEAD` = the candidate branch), before `smoke.mjs` / `critic.mjs`; and **Phase 9 step
+4**, in the release clone (`HEAD` = merged `main`), before `npm ci && npx wrangler deploy`. The
+guarded set is every file that executes in the session or decides what does: the two scripts
+and the critic prompt under `scripts/`, the dependency manifest and lockfile (`npm ci` runs
+install scripts), both wrangler configs (`build.command` runs a shell), and `.github/` (the
+check the ruleset requires). `TAMPERED` in Phase 7 skips both scripts and presents the candidate
+as **unverified: candidate modified factory scripts or config**, not selectable for Ship; in
+Phase 9 it stops before the deploy and reports. **Pinned:** `SCAFFOLD_SHA=$(git rev-parse
+HEAD)`, the guard command with its path set at least twice in `SKILL.md`, the unverified
+label, and the ordering (first guard before `node scripts/smoke.mjs`, last guard before the
+production `npm ci && npx wrangler deploy`).
+
+Residual: the comparison is mechanical, but the instruction to run it before the scripts is
+text the model follows. Files outside the set (`src/`, `public/`, `test/`) are the candidate's
+to change; they run only inside the Worker or under CI's read-only token, never in the session.
 
 ## What is deliberately not here
 
