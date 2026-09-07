@@ -3,10 +3,10 @@ name: factory-build
 description: The software factory's build step — implement ONE approved spec as up to four candidate Cloudflare Workers, each built in its own scratch clone of the project repo, deployed to an Access-gated preview hostname via its own wrangler.preview.<key>.jsonc, and opened as a draft PR. Returns the preview URLs for the factory-intake skill to score and present; it never waits for certificates, never merges, and never deploys production. Not a front door — with no candidates it returns needs_args and points at factory-intake, which is what to run for "build me this idea".
 ---
 
-Run the `factory-build` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
+Run the `factory-build` dynamic workflow bundled with this plugin. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-build.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-build.js",
+Workflow({ script: "<the file's exact contents>",
            args: { slug, repo, spec_path, previewDomain,
                    candidates: [{ key, brief, direction }] } })
 ```
