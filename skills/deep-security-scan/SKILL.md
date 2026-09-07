@@ -3,10 +3,10 @@ name: deep-security-scan
 description: Higher-recall security audit of a whole repo or a scoped path — prefilter + K threat-model-lensed workers → disprove-first validation → one HTML+markdown report. Use to audit a codebase/path for vulnerabilities (not a diff/PR).
 ---
 
-Run the `deep-security-scan` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
+Run the `deep-security-scan` dynamic workflow bundled with this plugin. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/deep-security-scan.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/deep-security-scan.js", args: { /* fill from the request */ } })
+Workflow({ script: "<the file's exact contents>", args: { /* fill from the request */ } })
 ```
 
 Fill `args` from the user's request. Common args: `target` (default `"."`), `scope`, `rounds`, `threshold` (default `low`), `tools`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/deep-security-scan.js`, or the repo README "Arguments" table. Read-only analysis; writes a report file.

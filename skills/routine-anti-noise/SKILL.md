@@ -4,10 +4,10 @@ description: Read-only skip/anti-duplicate GATE the fleet routines run FIRST on 
 argument-hint: <pr-or-issue-number>
 ---
 
-Run the `routine-anti-noise` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
+Run the `routine-anti-noise` dynamic workflow bundled with this plugin. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/routine-anti-noise.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/routine-anti-noise.js", args: { /* fill from the request */ } })
+Workflow({ script: "<the file's exact contents>", args: { /* fill from the request */ } })
 ```
 
 Fill `args` from the request. Required: `number` (the PR or issue to gate). Common args: `repo`, `intent` (the gist of the comment you plan to post — enables the anti-duplicate check), `labels` (override the skip-label set), `signature`, `commentLimit`, `readonlyAgent`. For the full, current argument list read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/routine-anti-noise.js`, or the repo README.

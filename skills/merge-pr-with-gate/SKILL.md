@@ -4,10 +4,10 @@ description: Gates ONE pull request and squash-merges it only if green (mergeSta
 argument-hint: <pr-number>
 ---
 
-Run the `merge-pr-with-gate` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
+Run the `merge-pr-with-gate` dynamic workflow bundled with this plugin. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/merge-pr-with-gate.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/merge-pr-with-gate.js", args: { /* fill from the request */ } })
+Workflow({ script: "<the file's exact contents>", args: { /* fill from the request */ } })
 ```
 
 Fill `args` from the user's request. Common args: `pr` (required — the PR number to gate), `repo`, `execute` (default `false` = stage/verify only; `true` = the caller's recorded gate decision: squash-merge if green — agent-decided when the deterministic gate passes, per the 2026-08-15 merge-authority policy), `readonlyAgent`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/merge-pr-with-gate.js`, or the repo README "Arguments" table. WRITES — needs write scope; it stages/gates by default and only squash-merges a green PR under `execute: true`. It does NOT rebase or resolve conflicts — a BEHIND/DIRTY/blocked PR escalates to a human (use `stacked-merge-walk` for a stack).
