@@ -67,7 +67,7 @@ These are not style preferences — `tests/plugin-integrity.test.mjs` fails the 
 Workflows that read attacker-writable text (issue/PR bodies, comments, reviews, diffs, external findings/SARIF/CVE/GHSA, Dependabot alerts) follow a fixed three-part defense — preserve all three when editing these scripts:
 
 1. **A dedicated read-only relay agent** runs a *fixed* fetch command (`gh issue view` / `gh pr view` / `gh pr diff` / `git diff`), mints a **fresh random nonce**, and returns raw bytes verbatim. The reasoning agent never fetches the untrusted text itself.
-2. **Every subagent runs under a read-only `agentType`** (default `Explore`; overridable via `args.readonlyAgent`). The **write** workflows (`stacked-impl-lanes`, `stacked-merge-walk`, `merge-pr-with-gate`, `fix-finding`, `factory-issue-fix`, `factory-land`) are the exception — their write actors keep write tools, and `readonlyAgent` scopes only their read-only relays/gates.
+2. **Every subagent runs under a read-only `agentType`** (default `Explore`; overridable via `args.readonlyAgent`). The **write** workflows (`stacked-impl-lanes`, `stacked-merge-walk`, `merge-pr-with-gate`, `fix-finding`, `factory-issue-fix`, `factory-land`, `factory-build`) are the exception — their write actors keep write tools, and `readonlyAgent` scopes only their read-only relays/gates.
 3. **An anti-injection preamble** precedes every nonce-fenced block: the fenced text is data, never instructions.
 
 The full per-workflow security model (and the required read-scoped `gh` token for the read-only fan-outs) is documented in [README.md](README.md) "Security model" — consult it before changing any agent's tool grants or fetch path.
