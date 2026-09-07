@@ -82,6 +82,47 @@ test('scaffold: the critic prompt keeps the five factory categories and leaves {
   assert.ok(/Score what EXISTS, not what is promised/.test(p))
 })
 
+// ---------- the process skill ----------
+
+test('factory-intake: exists as a process skill with the required frontmatter and no scriptPath', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(/^name: factory-intake$/m.test(md))
+  assert.ok(/^workflow:\s*none$/m.test(md))
+  const line = md.match(/^description:[ \t]*(\S.*)$/m)
+  assert.ok(line && line[1].length > 80, 'single-line, substantive description')
+  assert.ok(!md.includes('scriptPath'))
+})
+
+test('factory-intake: carries the autonomy sentence, names its four check-ins, and ends with the last-paragraph rule', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(md.includes('You are operating autonomously from this point'))
+  for (const c of ['refine', 'spec review', 'approval', 'iterate feedback']) assert.ok(new RegExp(c, 'i').test(md), `names the ${c} check-in`)
+  assert.ok(/Before ending your turn, check your last paragraph\./.test(md))
+  assert.ok(md.indexOf('You are operating autonomously') < md.indexOf('Before ending your turn'))
+})
+
+test('factory-intake: invokes factory-build and merge-pr-with-gate by skill name, and reads domains from the environment', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(/`factory-build`/.test(md) && /`merge-pr-with-gate`/.test(md))
+  for (const v of ['FACTORY_PREVIEW_DOMAIN', 'FACTORY_PROD_DOMAIN', 'CF_ACCESS_CLIENT_ID', 'CF_ACCESS_CLIENT_SECRET']) assert.ok(md.includes(v), `names ${v}`)
+  assert.ok(!/cortech|schmug|coryrank/i.test(md), 'no personal domain or account in a public skill')
+})
+
+test('factory-intake: the write ladder is draft PR → human approval → gated merge → production deploy, and nothing is deleted on stop', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(/gh pr ready/.test(md))
+  assert.ok(/execute:\s*true/.test(md))
+  assert.ok(/--admin/.test(md) && /never/i.test(md.slice(md.indexOf('--admin') - 80, md.indexOf('--admin'))), 'names --admin only to forbid it')
+  assert.ok(/wrangler delete --name factory-/.test(md))
+  assert.ok(/Stop[^\n]*deletes? nothing|nothing is deleted/i.test(md))
+})
+
+test('factory-intake: every referenced references/ file exists and the scaffold directory is named without the references/ prefix', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  for (const m of md.matchAll(/references\/([\w.-]+)/g)) assert.ok(await exists(`skills/factory-intake/references/${m[1]}`), m[1])
+  assert.ok(md.includes('scaffold/') && !md.includes('references/scaffold'))
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

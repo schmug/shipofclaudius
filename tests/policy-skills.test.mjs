@@ -11,7 +11,7 @@ const ROOT = new URL('../', import.meta.url)
 const read = (rel) => readFile(new URL(rel, ROOT), 'utf8')
 const skill = (name) => read(`skills/${name}/SKILL.md`)
 
-const POLICY_SKILLS = ['ship', 'pr-workflow', 'implement-issue']
+const POLICY_SKILLS = ['ship', 'pr-workflow', 'implement-issue', 'factory-intake']
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -121,6 +121,15 @@ test('critic-gated-build: defines what "autonomy begins" means and names its exc
   assert.ok(/first-deploy/i.test(md), 'names the first-deploy check-in exception')
   assert.ok(/platform-setting/i.test(md), 'names the platform-setting decision exception')
   assert.ok(/Before ending your turn, check your last paragraph\./.test(md), 'the last-paragraph rule is present')
+})
+
+test('factory-intake: exists as a process skill and its autonomy block names exactly four check-ins', async () => {
+  const md = await skill('factory-intake')
+  assert.ok(/^workflow:\s*none$/m.test(md))
+  assert.ok(md.includes("You are operating autonomously from this point"))
+  const block = md.slice(md.indexOf('You are operating autonomously'), md.indexOf('## Phase 0'))
+  assert.equal((block.match(/\*\*[a-z ]+\*\* \(Phase \d+\)/g) || []).length, 4, 'four bolded, phase-numbered check-ins')
+  assert.ok(/Before ending your turn, check your last paragraph\./.test(md))
 })
 
 test('sanitized: no personal references in any policy skill', async () => {

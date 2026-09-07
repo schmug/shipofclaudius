@@ -4,7 +4,8 @@ Written for the next agent editing the scaffold. Every file under `scaffold/` is
 into every project the factory creates, so a control removed here is removed from every
 future repo at once. `tests/factory-intake.test.mjs` pins each invariant below; change the
 test and the template together or not at all. Design: `docs/specs/2026-09-06-factory-intake.md`
-§7, §10, §11. This file sits beside `scaffold/`, not inside it, so it is not copied.
+§7, §10, §11 (the scaffold) and §5, §8–§11 (the skill, invariant 7 below). This file sits
+beside `scaffold/`, not inside it, so it is not copied.
 
 ## What this thing is
 
@@ -77,9 +78,50 @@ The plugin is public. Hostnames arrive as `{{PROD_DOMAIN}}` / `{{PREVIEW_DOMAIN}
 filled from the skill's environment. **Pinned:** the acceptance grep in issue #199; the
 suite's placeholder regexes fail on a literal hostname.
 
+### 7. The skill half (`SKILL.md`, `references/`) keeps the write ladder behind a human answer
+
+The skill runs in the user's session with the user's tools, so its controls are text the
+model follows plus the static checks that keep that text load-bearing. Nothing under it is
+copied into a project. **Pinned:** the five `factory-intake:` tests in
+`tests/factory-intake.test.mjs`, the `factory-intake:` and `sanitized` tests in
+`tests/policy-skills.test.mjs`, and the process-skill rules in `tests/plugin-integrity.test.mjs`.
+
+- **Write ladder.** Phase 5 opens draft PRs only (via the `factory-build` skill, by name).
+  Phase 9 runs `gh pr ready` and then `merge-pr-with-gate` with `execute: true` only **after**
+  the Ship answer; a run marked **ungated** in Phase 4 stops at the ready PR and names the
+  missing gate. `--admin` appears only as a prohibition. The one push to `main` is the
+  scaffold's, into the repository the run just created. Pinned: `gh pr ready`,
+  `execute: true`, "never" within 80 chars before the first `--admin`.
+- **Stop deletes nothing.** Phase 11 lists the delete commands
+  (`npx wrangler delete --name factory-<slug>-<key> --force`) instead of running them;
+  deletions run only in Phase 9 step 6, after Ship. Pinned: the delete-command string and the
+  `nothing is deleted` sentence.
+- **The service token never leaves `process.env`.** `SKILL.md` names `CF_ACCESS_CLIENT_ID` /
+  `CF_ACCESS_CLIENT_SECRET` only to say which two scripts read them and that they are never
+  printed; no secret goes through a prompt, a PR body, or a commit (invariant 1 covers the
+  scripts). Pinned: the four environment names are present, so the contract cannot drift
+  silently.
+- **Research output is data.** `references/research-brief.md` mints a fresh
+  `crypto.randomUUID()` nonce per run, confines verbatim web text to the
+  `<<<UNTRUSTED_WEB_<nonce>>>>` fence, and Phase 3 writes the spec with links only — nothing
+  from inside the fence is copied. The research agent is read-only (`Explore`). Same
+  three-part defense as the fetch relays in `.claude/workflows/`.
+- **Configuration is environment-only.** Domains arrive as `FACTORY_PREVIEW_DOMAIN` /
+  `FACTORY_PROD_DOMAIN`; the owner defaults to `gh api user --jq .login`. Pinned: the
+  personal-name grep in `tests/factory-intake.test.mjs` and the `sanitized` policy test.
+- **Exactly four check-ins.** Anything the autonomy paragraph does not pre-approve — a new
+  credential, a Cloudflare setting beyond one Worker, a push to an existing repository's
+  `main`, `--admin` — is reported, not done. Pinned: the policy test counts the bolded
+  `**name** (Phase N)` check-ins between the autonomy sentence and `## Phase 0` and requires 4.
+
+Residual: these are instructions to a model, not mechanical gates. The mechanical gates are
+the required-check ruleset (invariant 4) that `merge-pr-with-gate` reads and the scripts'
+`process.env`-only token handling (invariant 1). The static tests keep the text load-bearing;
+they do not make it enforced.
+
 ## What is deliberately not here
 
 - `devDependencies`: the skill installs `wrangler@latest` and `playwright@latest` at
   scaffold time so the project's lockfile, not this template, pins them.
-- `SKILL.md` / `references/`: the skill half lands separately; this directory is only the
-  template set.
+- The skill half (`SKILL.md`, `references/`) sits beside this directory, not inside it —
+  see invariant 7; nothing from it is copied into a project.
