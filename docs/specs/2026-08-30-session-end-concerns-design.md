@@ -5,6 +5,10 @@
 `schmug/dotclaude` as of 2026-08-30)
 **Status:** Design approved in chat 2026-08-30. Mechanism verified end-to-end the same day (§10).
 This doc is the handoff source of truth for a fresh agent.
+**2026-09-07 update (#204):** §4.4's "Set and verified 2026-08-30" claim that the cap holds does
+not generalize — measurement over 504 real sessions found 27 with 3+ consecutive blocks despite
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2`, one with 13. §4.4 now carries a revised finding; do not cite
+the 2026-08-30 paragraph alone.
 
 ---
 
@@ -236,6 +240,94 @@ unsatisfiable condition that ran to 9 and 14 evaluations on the default terminat
 Nothing in this repo can enforce it — `~/.claude` is outside the tree — so the weekly triage
 task checks for evidence of longer loops and reports prominently if the setting has been lost.
 
+#### 4.4.1 Update 2026-09-07 (#204): the cap is real and generic, but its counter is not durable
+
+Issue #204 measured 504 real sessions and found 27 with 3+ *consecutive* blocks despite
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=2` — one with 13 — contradicting the "terminated at 3" claim
+above. The issue's leading hypothesis was that the cap might apply only to `command`-type Stop
+hooks and not to this hook's `type: "prompt"`. That hypothesis is **refuted**, but the symptom is
+real, for a different reason. Both findings below come from static analysis of the shipped
+Claude Code CLI binary — string-extracted, not from a live reproduction, and the caveat that
+matters is in the last paragraph of this subsection.
+
+**Binary examined:** `claude --version` → `2.1.263 (Claude Code)`; ELF 64-bit executable,
+`sha256` prefix `26d020351e8112f4`, built 2026-09-06 (per file mtime). This drifts from both
+figures already on record in this doc — the mechanism verification in §10 pins `2.1.251`, and
+`CLAUDE.md`'s vent-server note pins the *deployed* client at `2.1.241` — so treat all three as
+one data point each on a moving target, not as agreement.
+
+**Finding 1 — the cap check does not branch on hook `type`.** The block-cap logic sits after the
+point where the harness has already collected `blockingErrors` from whichever hooks fired; the
+check itself (paraphrased from the minified source, one assignment) is:
+
+```
+let dc = env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP ?? 8;
+if (dc > 0 && Kd > dc) { /* emit tengu_stop_hook_block_count{hit_cap:true}, override, end turn */ }
+```
+
+`Kd` (`stopHookBlockingCount + 1`) and `dc` (the cap) are both hook-type-agnostic — nothing in
+this path reads `hooks.Stop[].hooks[].type`. So the cap **does** apply to a `type: "prompt"`
+entry exactly as it applies to `command` or `agent`. The default is `8` (not documented anywhere
+in this repo before now), consistent with §10's observed 9-evaluation default run (8 blocks
+tolerated, the 9th ends the turn).
+
+**Finding 2 — the counter the cap checks is turn-loop state, not a durable per-session tally, and
+several unrelated transitions silently zero it.** `stopHookBlockingCount` lives in the same
+in-memory loop state (`Ie`) as `turnCount` and `compactTracking`, and is reset to `0` on every
+transition *except* the one literally named `stop_hook_blocking`:
+
+| Transition | Resets counter to 0 |
+|---|---|
+| `stop_hook_blocking` (the block itself) | No — this is the increment path (`stopHookBlockingCount: Kd`) |
+| `next_turn` (a genuinely new turn) | Yes — correct; a new turn should not inherit the old count |
+| `reactive_compact_retry` / `precomputed_compact_swap` | **Yes** |
+| `thinking_only_retry` | Yes |
+| `malformed_tool_use_retry` | Yes |
+| `max_output_tokens_recovery` | Yes |
+| `truncated_response_recovery` | Yes |
+
+The compaction row is the one that matters here. Compaction is reachable from *inside* the same
+turn-continuation loop a stop-hook block runs in (same `while` iteration, same `Ie` object, same
+`continue`) — it is not scoped to "between user turns." A block loop that is long enough to
+matter is, by construction, the exact scenario most likely to inflate the transcript enough to
+trigger a reactive compaction mid-loop: each block cycle appends the hook's `reason` text plus a
+full model turn. When that happens, `stopHookBlockingCount` returns to `0` and the cap's
+`Kd > dc` check starts counting from zero again — while the *transcript* keeps accumulating block
+messages with nothing but tool_results and assistant turns between them, i.e. exactly what #204's
+measurement script (and a human skimming the transcript) reads as one unbroken consecutive run.
+A cap of 2 can never fire again in that run once a single compaction has reset it, no matter how
+many further blocks follow. This is consistent with, though not proven identical to, the worked
+example in #204 (four consecutive blocks at indices 56/62/65/68) and with the 13-block outlier.
+
+**What this means for the two open questions:**
+- Acceptance #1 (does the cap apply to `prompt`-type hooks): **yes**, with the evidence above.
+- Acceptance #4 (harness limitation vs. hook bug): this is a **harness limitation** — the loop
+  counter's lifetime is shorter than a "consecutive block" as any external observer (a transcript
+  reader, or this very condition string) would define it. Observed on Claude Code `2.1.263`.
+
+**What was not, and could not be, done from here.** This container is itself a remote/cloud
+session, and static analysis of this same binary confirms §10's open item 4: a
+`type: "prompt"` Stop hook does not run at all outside the REPL — the dispatcher's non-REPL path
+returns `"Prompt stop hooks are not yet supported outside REPL"` and never reaches the counter
+logic above. So the specific 27-session, 13-consecutive-block finding could not be independently
+re-run or attributed to compaction (vs. one of the other five reset transitions in the table)
+from this session — that requires the real local transcripts referenced in #204's Pointers, which
+this environment does not have. The mechanism above is the most evidence-supported explanation on
+offer, not a confirmed root cause for every one of the 27 sessions.
+
+**Fix — proposed, not implemented here.** Per #204's own constraint ("Any change to the Stop hook
+is a guardrail change ... propose it and get Cory's go-ahead before landing"), this update stops
+at a proposal. A `command`-type Stop hook can read `stop_hook_active` directly (§4.3) and is the
+only hook type that can maintain its own state; the shape that would give this feature a bound
+the harness's internal reset cannot undermine is a small counter file keyed by `session_id`
+(mirroring the spool's rotate-then-file discipline in §4.5, not a bare counter that a reset could
+corrupt), incremented on every invocation where `stop_hook_active` is `true` and read back on
+each invocation to decide whether to still block — independent of whatever the harness's own
+`stopHookBlockingCount` is doing. That is a real redesign of the trigger (§2's "Trigger" row), not
+a wording change, and needs the sign-off the issue asks for before it lands. A fresh measurement
+after any such change — confirming no session exceeds the configured bound — also has to happen
+against real local sessions, which this environment cannot produce either.
+
 ### 4.5 Never fail the turn
 
 The `gh` call can fail: offline, expired auth, rate limit, repo unreachable. On any failure the
@@ -431,6 +523,12 @@ harness lives in this session's scratchpad and is disposable.
 12. **The `concern` label does not exist on `schmug/agent-notes`.** The repo carries only the
     nine GitHub defaults, so `gh issue create --label concern` **fails until the label is
     created**. Creating it is a prerequisite step, not an assumption.
+13. **(2026-09-07, #204) The block cap does not branch on hook `type`, and its counter is reset
+    by compaction and four other transitions.** Re-verified on Claude Code `2.1.263` by static
+    string analysis (§4.4.1) rather than a live probe — `hook_type_unsupported` and "Prompt stop
+    hooks are not yet supported outside REPL" both still present, corroborating item 4 across the
+    `2.1.251` → `2.1.263` drift. Supersedes item 9's "3 evaluations" as a general guarantee: that
+    result holds only for a run short enough, or context-light enough, never to hit compaction.
 
 **Still open — check before relying on these:**
 
