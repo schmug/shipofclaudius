@@ -225,6 +225,13 @@ test('the build prompt never carries the service-token values and names the vari
   assert.ok(/never read, print, or commit CF_ACCESS_CLIENT_ID or CF_ACCESS_CLIENT_SECRET/.test(b.prompt), 'and only in the prohibition')
 })
 
+test('the build prompt forbids editing the factory scripts and config the intake skill runs in-session', async () => {
+  const { calls } = await runScript({ args: baseArgs() })
+  const b = byPrefix(calls, 'build:')[0]
+  assert.ok(/Do NOT edit scripts\/, \.github\/, package\.json, package-lock\.json, wrangler\.jsonc/.test(b.prompt), 'names the files the intake session runs while holding the Access token')
+  assert.ok(/refuses to score or ship/.test(b.prompt), 'and says the intake skill rejects a candidate that touched them')
+})
+
 test('the last-paragraph rule and the followups guidance are present on the write actor', async () => {
   const { calls } = await runScript({ args: baseArgs() })
   const b = byPrefix(calls, 'build:')[0]
