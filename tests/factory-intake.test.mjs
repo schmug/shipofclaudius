@@ -122,10 +122,19 @@ test('scaffold: critic.mjs launches the critic with both Access variables delete
 test('scaffold: critic.mjs strips AGENTS.md from the evidence clone, disables project docs, and writes a capped, secret-scrubbed verdict', async () => {
   const src = await read(S + 'scripts/critic.mjs')
   assert.ok(/"exec", "-c", "project_doc_max_bytes=0"/.test(src), 'project_doc_max_bytes=0 right after exec')
-  // B1 (round 6): MCP servers declared in ~/.codex/config.toml run as child processes of codex and
-  // therefore sit outside `--sandbox read-only` — a `js`-style tool reaches the network and the disk.
-  // The critic is launched with none.
-  assert.ok(src.includes('mcp_servers={}'), 'the critic is launched with no MCP servers')
+  // B1 (round 6, re-fixed): MCP servers declared in ~/.codex/config.toml run as child processes of
+  // codex and therefore sit outside `--sandbox read-only` — a `js`-style tool reaches the network
+  // and the disk. `-c mcp_servers={}` was a silent no-op: the override MERGES into the host config
+  // (measured — `codex mcp list` shows the same servers with and without it), so the runner now
+  // gives codex a scratch CODEX_HOME whose config has every [mcp_servers.*] table stripped.
+  // These assert the effect, not the string; the behavioural check of the stripper is its own test.
+  assert.ok(!src.includes('"-c", "mcp_servers={}"'), 'the merged-not-replaced flag is gone')
+  const criticArgs = src.match(/const CRITIC = \{[^\n]*/)[0]
+  assert.ok(!criticArgs.includes('mcp_servers'), 'no mcp_servers override left in CRITIC.args')
+  assert.ok(/env\.CODEX_HOME = codexHome/.test(src), 'the critic env points at the scratch codex home')
+  assert.ok(/const codexHome = join\(tmpdir\(\), `critic-codex-/.test(src), 'the scratch home is created under tmpdir()')
+  assert.ok(src.indexOf('env.CODEX_HOME = codexHome') > src.indexOf("for (const k of ['PATH'"), 'assigned after the allowlist loop, so the scratch value wins')
+  assert.ok(/rmSync\(codexHome, \{ recursive: true, force: true \}\)/.test(src), 'the scratch codex home is removed')
   assert.ok(src.includes('AGENTS.md'), 'names AGENTS.md')
   assert.ok(/readdirSync\(work, \{ recursive: true \}\)/.test(src) && /rmSync\(/.test(src), 'walks the clone and removes each copy')
   assert.ok(src.indexOf('rmSync(') < src.indexOf('execFileSync(CRITIC.cmd'), 'stripped before the critic runs')
@@ -142,6 +151,27 @@ test('scaffold: critic.mjs strips AGENTS.md from the evidence clone, disables pr
   assert.ok(/scores: Object\.fromEntries\(\['design','mobile_ux','completeness','performance','code_quality'\]\.filter\(\(k\) => typeof scores\[k\] === 'number'\)/.test(src), 'only numeric values under the allowlisted keys survive')
   assert.ok(!/Object\.entries\(scores\)/.test(src), 'no pass-through of model-supplied keys')
   assert.ok(src.includes('agents.override.md'), 'AGENTS.override.md is stripped too')
+})
+
+// B1 (round 6, re-fixed): the mitigation is now code, not a flag, so pin its BEHAVIOUR — extract
+// stripMcpServers from the scaffold file and run it. A regression here silently hands the critic a
+// sandbox-escaping tool, which is exactly how `-c mcp_servers={}` failed without anyone noticing.
+test('scaffold: critic.mjs stripMcpServers removes every [mcp_servers.*] table and leaves the rest of the config intact', async () => {
+  const src = await read(S + 'scripts/critic.mjs')
+  const fnSource = src.match(/function stripMcpServers\(tomlText\) \{[\s\S]*?\n\}/)
+  assert.ok(fnSource, 'stripMcpServers is defined in the scaffold runner')
+  // The evaluated text is this repo's own committed source, the same trust level as the
+  // AsyncFunction wrap the workflow sims already use — never anything a caller supplies.
+  const stripMcpServers = new Function('return ' + fnSource[0])()
+
+  const stripped = stripMcpServers('[mcp_servers.node_repl]\ncommand = "x"\n[other]\nkeep = 1')
+  assert.ok(stripped.includes('[other]'), 'unrelated tables survive')
+  assert.ok(stripped.includes('keep = 1'), 'their keys survive')
+  assert.ok(!stripped.includes('mcp_servers'), 'the mcp_servers table header is gone')
+  assert.ok(!stripped.includes('command = "x"'), 'the keys under it are gone too')
+
+  const clean = 'model = "gpt-5"\n[tui]\ntheme = "dark"\n'
+  assert.equal(stripMcpServers(clean), clean, 'a config with no mcp_servers is unchanged')
 })
 
 test('scaffold: package.json pins no devDependency versions itself (the skill installs latest at scaffold time) and the test script is node --test', async () => {

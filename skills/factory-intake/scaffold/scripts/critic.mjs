@@ -8,16 +8,17 @@
  * Executes nothing the candidate wrote (THREAT_MODEL.md invariant 9): the only child processes
  * are git, gh, and the critic command. Gate evidence is CI's, read with `gh run list --commit`.
  * The critic runs with an allowlisted environment (no Access variable, no session credential),
- * reads no candidate instruction file (every AGENTS.md is removed from the evidence clone and
- * project docs are disabled), and its verdict is written only as a capped shape that matched no
- * secret pattern.
+ * under a scratch CODEX_HOME whose config has every MCP server table stripped (so no MCP child
+ * process escapes the read-only sandbox), reads no candidate instruction file (every AGENTS.md is
+ * removed from the evidence clone and project docs are disabled), and its verdict is written only
+ * as a capped shape that matched no secret pattern.
  *
  * Usage: node scripts/critic.mjs --url https://<preview-host> --key <key>
  * Exits 2 when no JSON verdict could be extracted, or when the verdict text matched a secret pattern.
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > -1 ? process.argv[i + 1] : dflt; };
@@ -30,8 +31,8 @@ const CAPTURE_PATHS = [["/", "index.html.txt"], ["/health", "health.txt"]];
 const COPY_DIRS = [`factory-reports/${KEY}`];          // smoke already ran; its artifacts are copied below
 // `-c project_doc_max_bytes=0`: codex loads no AGENTS.md or other project doc from the clone (codex
 // 0.153.4 accepts `-c key=value`). The files themselves are also removed after the clone, below.
-// `-c mcp_servers={}`: MCP servers are child processes of codex and are not covered by its sandbox, so the critic is launched with none.
-const CRITIC = { cmd: "codex", args: ["exec", "-c", "project_doc_max_bytes=0", "-c", "mcp_servers={}", "--skip-git-repo-check", "--sandbox", "read-only"] };
+// MCP servers are handled by the scratch CODEX_HOME built below, not by a `-c` override.
+const CRITIC = { cmd: "codex", args: ["exec", "-c", "project_doc_max_bytes=0", "--skip-git-repo-check", "--sandbox", "read-only"] };
 const ACCESS_HEADERS = {};
 if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
   ACCESS_HEADERS["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
@@ -43,7 +44,24 @@ const env = {};
 for (const k of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'TERM', 'CODEX_HOME', 'SHELL', 'USER']) if (process.env[k] !== undefined) env[k] = process.env[k];
 delete env.CF_ACCESS_CLIENT_ID;      // no-ops under the allowlist; kept so the invariant reads the same
 delete env.CF_ACCESS_CLIENT_SECRET;
+// CODEX_HOME is allowlisted above only so the host's value can be READ (to find auth.json and the
+// config to strip); the scratch value assigned before the critic launch, below, overwrites it.
 // ─────────────────────────────────────────────────────────────────────────
+
+// Strip every [mcp_servers.*] table from a codex config. MCP servers are child processes of
+// codex and run OUTSIDE its --sandbox read-only, so a host that has any configured would hand
+// the critic a network- and disk-capable tool. `-c mcp_servers={}` does NOT remove them (the
+// override merges into the host config), so the runner gives codex a CODEX_HOME of its own.
+function stripMcpServers(tomlText) {
+  const out = [];
+  let skipping = false;
+  for (const line of String(tomlText).split("\n")) {
+    const header = line.match(/^\s*\[\[?([^\]]+)\]?\]/);
+    if (header) skipping = /^mcp_servers(\.|$)/.test(header[1].trim());
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n");
+}
 
 const repoRoot = process.cwd();
 const work = join(tmpdir(), `critic-${KEY}-${Date.now()}`);
@@ -96,6 +114,17 @@ for (const dir of COPY_DIRS) {
 }
 
 const prompt = readFileSync("scripts/critic-prompt.md", "utf8").replaceAll("{{LIVE_URL}}", BASE);
+
+// The critic's own codex home: a copy of the host's auth.json (so it is still logged in) plus the
+// host's config with every [mcp_servers.*] table removed. Assigned after the allowlist loop, so the
+// scratch path — not the host's CODEX_HOME — is what codex reads.
+const codexHome = join(tmpdir(), `critic-codex-${KEY}-${Date.now()}`);
+mkdirSync(codexHome, { recursive: true });
+const hostHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+try { copyFileSync(join(hostHome, "auth.json"), join(codexHome, "auth.json")); } catch { /* not logged in: codex will say so */ }
+try { writeFileSync(join(codexHome, "config.toml"), stripMcpServers(readFileSync(join(hostHome, "config.toml"), "utf8"))); } catch { writeFileSync(join(codexHome, "config.toml"), ""); }
+env.CODEX_HOME = codexHome;
+
 console.error(`[critic] candidate ${KEY}: running ${CRITIC.cmd} in ${work}`);
 let out = "";
 try {
@@ -105,6 +134,8 @@ try {
 } catch (err) {
   out = err.stdout ?? "";
   if (!out) throw err;
+} finally {
+  rmSync(codexHome, { recursive: true, force: true });   // holds a copy of auth.json: gone on both paths
 }
 
 const blocks = [...out.matchAll(/```json\s*([\s\S]*?)```/g)];
