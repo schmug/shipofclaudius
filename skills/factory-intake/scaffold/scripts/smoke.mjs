@@ -41,7 +41,8 @@ writeFileSync(join(out, 'index.html.txt'), body.slice(0, 60_000));
 
 try {
   const { chromium } = await import('playwright');
-  const browser = await chromium.launch();
+  // Playwright defaults the browser process environment to the launching process's, which would put the Access token in the renderer's environment; the page is untrusted, so the browser gets only PATH and keeps its own sandbox.
+  const browser = await chromium.launch({ env: { PATH: process.env.PATH }, chromiumSandbox: true });
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
   // The service token is attached only to requests for the candidate's own origin. Cross-origin
   // subresources are aborted so a candidate page cannot pull the token out to another host.

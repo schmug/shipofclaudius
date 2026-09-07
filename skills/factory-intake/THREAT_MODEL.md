@@ -41,11 +41,14 @@ handler adds them to same-origin requests and aborts every cross-origin one, so 
 cannot make the browser carry the token to another host. The handler fetches each same-origin
 request itself with `maxRedirects: 0` and aborts any 3xx answer, because Chromium carries headers
 added at the first hop onto redirect targets — a candidate Worker answering `302` to a foreign
-host would otherwise receive the token. **Pinned:** the suite greps every `console.log/error`,
+host would otherwise receive the token. The browser process itself gets a minimal environment —
+`chromium.launch({ env: { PATH: process.env.PATH } })`, not Playwright's default of the launching
+process's environment — and keeps `chromiumSandbox: true`, so a renderer compromise on the
+untrusted page finds no token in its environment. **Pinned:** the suite greps every `console.log/error`,
 `writeFileSync`, and `process.stdout` line for the secret's name, requires both
 `delete env.CF_ACCESS_CLIENT_*` lines plus `env` in the critic call's options, and requires
-`page.route(`, `route.abort()`, and `maxRedirects: 0` with no `extraHTTPHeaders` and no
-`route.continue(` in `smoke.mjs`.
+`page.route(`, `route.abort()`, `maxRedirects: 0`, `chromiumSandbox: true`, and
+`env: { PATH: process.env.PATH }` with no `extraHTTPHeaders` and no `route.continue(` in `smoke.mjs`.
 
 Residual: the token goes to whatever host `--url` names. The skill derives that URL from
 the build result's contract, never from model- or web-supplied text. If Access forwards the
@@ -235,7 +238,7 @@ config — in the session with the token in the environment, and invariant 8's g
 `test/` or `src/` without making them unbuildable. The gate evidence is now CI's: `gh run list
 --commit <sha> --json name,conclusion,url` for the revision under review, plus the recent run
 list. The runner's only child processes are `git` (the evidence clone and `rev-parse`), `gh`, and
-the critic command; the file contains no `npm`, `npx`, or `wrangler` invocation. Three further
+the critic command; the file contains no `npm`, `npx`, or `wrangler` invocation. Four further
 controls keep a prompt-injected critic (the candidate's own page and repository are its evidence)
 from being instructed by the candidate or from carrying anything out:
 
@@ -249,6 +252,11 @@ from being instructed by the candidate or from carrying anything out:
   file named `AGENTS.md` or `AGENTS.override.md` in any case, and launches `codex exec -c project_doc_max_bytes=0` so no
   project doc is loaded even if a copy were missed. The candidate's page and repository stay
   evidence, never instructions.
+- **No MCP tools.** A host with the Codex desktop app declares MCP servers in `~/.codex/config.toml`
+  (`node_repl` and the like). Those servers run as child processes of `codex`, not inside it, so
+  `--sandbox read-only` does not cover them: a `js`-style tool reaches the network and the user's
+  disk. The runner launches the critic with `-c mcp_servers={}`, so whatever the host has configured,
+  the critic gets no tools.
 - **A capped, scrubbed verdict.** `critic.json` keeps only `scores` — an allowlist of the five
   rubric keys (`design`, `mobile_ux`, `completeness`, `performance`, `code_quality`), numeric
   values only, so the model cannot add a key — `verdict`, and `requiredFixes` entries reduced to `severity`, `category`, `title` (120 chars), and `detail`
@@ -263,13 +271,15 @@ from being instructed by the candidate or from carrying anything out:
 (the `tryRun` body's pass-through is checked separately); no `npm`, `npx`, or `wrangler` token
 anywhere in the file; the `for (const k of ['PATH'` allowlist loop and no `{ ...process.env }`;
 both `delete env.…` lines and `env` in the critic call's options; `project_doc_max_bytes=0`
-right after `exec`; the `readdirSync(work, { recursive: true })` walk with `rmSync` before the
+right after `exec` and `mcp_servers={}` in the critic's args; the `readdirSync(work, { recursive: true })` walk with `rmSync` before the
 critic runs, naming `agents.override.md`; the five-key `scores` allowlist literal; the
 `oauth_token|refresh_token` pattern fragment, the withheld message, the 120/400 caps, no
 `summary`, and the scrub before the `critic.json` write.
 
-Residual: `codex` is whatever binary is on `PATH`; its sandbox, and its own MCP and network
-behavior, are its configuration, not ours. Inside that sandbox it can still read the disk — the
+Residual: `codex` is whatever binary is on `PATH`. Its MCP servers are child processes of `codex`
+and sit outside `--sandbox read-only`, which is why the runner launches the critic with
+`mcp_servers={}` rather than leaving them to the host's configuration; what remains outside our
+control is codex's own binary and its sandbox implementation. Inside that sandbox it can still read the disk — the
 evidence clone and whatever else the sandbox exposes — so the scrub and the capped shape that is
 committed are the mitigations, not the sandbox. The `requiredFixes` strings (at most 20 entries
 of about 600 chars) remain a free-text channel from model output over candidate evidence into a

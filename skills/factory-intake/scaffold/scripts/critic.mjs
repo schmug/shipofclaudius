@@ -30,7 +30,8 @@ const CAPTURE_PATHS = [["/", "index.html.txt"], ["/health", "health.txt"]];
 const COPY_DIRS = [`factory-reports/${KEY}`];          // smoke already ran; its artifacts are copied below
 // `-c project_doc_max_bytes=0`: codex loads no AGENTS.md or other project doc from the clone (codex
 // 0.153.4 accepts `-c key=value`). The files themselves are also removed after the clone, below.
-const CRITIC = { cmd: "codex", args: ["exec", "-c", "project_doc_max_bytes=0", "--skip-git-repo-check", "--sandbox", "read-only"] };
+// `-c mcp_servers={}`: MCP servers are child processes of codex and are not covered by its sandbox, so the critic is launched with none.
+const CRITIC = { cmd: "codex", args: ["exec", "-c", "project_doc_max_bytes=0", "-c", "mcp_servers={}", "--skip-git-repo-check", "--sandbox", "read-only"] };
 const ACCESS_HEADERS = {};
 if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
   ACCESS_HEADERS["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
@@ -121,10 +122,10 @@ if (!verdict) {
 }
 
 // The verdict is model output over candidate-controlled evidence, and codex can read the disk inside
-// its sandbox. Only the fields the skill reads survive (`scores` is a five-key allowlist, so the model
-// cannot add a key), every string is capped, and the JSON text is refused outright if it matches a
-// secret pattern — those two steps, plus the fact that only the
-// capped shape is ever committed, are what keep a leak out of the repository.
+// its sandbox. Three protections apply before anything is written: `scores` is a five-key allowlist so
+// the model cannot add a key, every string is capped, and the JSON text is refused outright if it
+// matches a secret pattern. Those three, plus the fact that only the capped shape is ever committed,
+// are what keep a leak out of the repository.
 const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const scores = verdict.scores && typeof verdict.scores === "object" ? verdict.scores : {};
 const shaped = {

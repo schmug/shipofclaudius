@@ -76,6 +76,11 @@ test('scaffold: smoke.mjs sends the service token only to the candidate origin a
   assert.ok(/r\.status\(\) >= 300 && r\.status\(\) < 400\) return route\.abort\(\)/.test(src), 'a 3xx answer is aborted')
   assert.ok(src.includes('route.fulfill({ response: r })'), 'the fetched response is what the page sees')
   assert.ok(!src.includes('route.continue('), 'no request is continued (a continued request would carry the headers through a redirect)')
+  // W1 (round 6): Playwright defaults the browser process environment to the launching process's,
+  // which would put the Access token in the renderer's environment. The page is untrusted, so the
+  // browser gets only PATH and keeps its own sandbox.
+  assert.ok(src.includes('chromiumSandbox: true'), 'the browser keeps its own sandbox')
+  assert.ok(src.includes('env: { PATH: process.env.PATH }'), 'the browser process gets a minimal environment (PATH only)')
   // W-5 (round 4): at most 20 console/pageerror entries of 200 chars each reach smoke.json.
   assert.ok(/errors\.length < 20/.test(src) && /\.slice\(0, 200\)/.test(src), 'console/pageerror text is capped')
 })
@@ -117,6 +122,10 @@ test('scaffold: critic.mjs launches the critic with both Access variables delete
 test('scaffold: critic.mjs strips AGENTS.md from the evidence clone, disables project docs, and writes a capped, secret-scrubbed verdict', async () => {
   const src = await read(S + 'scripts/critic.mjs')
   assert.ok(/"exec", "-c", "project_doc_max_bytes=0"/.test(src), 'project_doc_max_bytes=0 right after exec')
+  // B1 (round 6): MCP servers declared in ~/.codex/config.toml run as child processes of codex and
+  // therefore sit outside `--sandbox read-only` — a `js`-style tool reaches the network and the disk.
+  // The critic is launched with none.
+  assert.ok(src.includes('mcp_servers={}'), 'the critic is launched with no MCP servers')
   assert.ok(src.includes('AGENTS.md'), 'names AGENTS.md')
   assert.ok(/readdirSync\(work, \{ recursive: true \}\)/.test(src) && /rmSync\(/.test(src), 'walks the clone and removes each copy')
   assert.ok(src.indexOf('rmSync(') < src.indexOf('execFileSync(CRITIC.cmd'), 'stripped before the critic runs')
