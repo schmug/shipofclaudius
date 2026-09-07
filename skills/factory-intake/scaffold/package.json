@@ -1,0 +1,12 @@
+{
+  "name": "{{SLUG}}",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "node --test",
+    "smoke": "node scripts/smoke.mjs",
+    "critic": "node scripts/critic.mjs",
+    "deploy": "wrangler deploy"
+  }
+}

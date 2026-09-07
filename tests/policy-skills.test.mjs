@@ -1,6 +1,7 @@
-// Content-contract test for the gate-merge policy process skills (ship,
-// pr-workflow, implement-issue). Node built-ins only; zero token cost.
-// Asserts each skill exists as a `workflow: none` process skill, carries the
+// Content-contract test for the gate-merge policy process skills — the skills in
+// POLICY_SKILLS below — plus the autonomy-block checks on parallel-build-orchestrator
+// and critic-gated-build. Node built-ins only; zero token cost.
+// Asserts each POLICY_SKILLS entry exists as a `workflow: none` process skill, carries the
 // load-bearing gate-merge policy language (agents merge through a server-side
 // ruleset/protection with required CI checks; UNKNOWN/detection failure fails
 // closed to stop-at-the-open-PR), and stays sanitized for public consumption.
@@ -11,7 +12,7 @@ const ROOT = new URL('../', import.meta.url)
 const read = (rel) => readFile(new URL(rel, ROOT), 'utf8')
 const skill = (name) => read(`skills/${name}/SKILL.md`)
 
-const POLICY_SKILLS = ['ship', 'pr-workflow', 'implement-issue']
+const POLICY_SKILLS = ['ship', 'pr-workflow', 'implement-issue', 'factory-intake']
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -121,6 +122,15 @@ test('critic-gated-build: defines what "autonomy begins" means and names its exc
   assert.ok(/first-deploy/i.test(md), 'names the first-deploy check-in exception')
   assert.ok(/platform-setting/i.test(md), 'names the platform-setting decision exception')
   assert.ok(/Before ending your turn, check your last paragraph\./.test(md), 'the last-paragraph rule is present')
+})
+
+test('factory-intake: exists as a process skill and its autonomy block names exactly four check-ins', async () => {
+  const md = await skill('factory-intake')
+  assert.ok(/^workflow:\s*none$/m.test(md))
+  assert.ok(md.includes("You are operating autonomously from this point"))
+  const block = md.slice(md.indexOf('You are operating autonomously'), md.indexOf('## Phase 0'))
+  assert.equal((block.match(/\*\*[a-z ]+\*\* \(Phase \d+\)/g) || []).length, 4, 'four bolded, phase-numbered check-ins')
+  assert.ok(/Before ending your turn, check your last paragraph\./.test(md))
 })
 
 test('sanitized: no personal references in any policy skill', async () => {
