@@ -252,16 +252,21 @@ interleave cleanly:
 
 **Retraction record.** A concern can resolve itself before the session ends. The spool is
 append-only, so there is no in-place edit — a session that determines an already-spooled
-concern no longer holds appends a second line using the same envelope, with `retracts` in
-place of `concerns`:
+concern no longer holds appends a second line using the same envelope, with `retracts` and
+`reason` in place of `concerns`:
 
 ```json
-{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner/name|null>","retracts":["…"]}
+{"ts":"<ISO8601>","session":"<id>","cwd":"<path>","repo":"<owner/name|null>","retracts":["…"],"reason":"<what fixed it>"}
 ```
 
 Each entry in `retracts` matches a `concerns` entry by exact string equality — that is the
-only link between the two lines. A retraction carries no reason, severity, or category (§8);
-it is a lifecycle marker, not a classification.
+only link between the two lines. `reason` is required and states what actually fixed the
+concern, mirroring the issue-side convention of `- [x] RESOLVED — <what fixed it>` so both
+channels read the same way (#206). It is not a severity or category (§8) — those stay out of
+scope — and it exists to keep the bar for retraction where §2 put it: a retraction is for "I
+fixed it in this same session", not "on reflection this wasn't worth recording". A reason that
+does not name a fix is a misuse of the record, not a shortcut around the no-bar-at-write-time
+design.
 
 **Drain is rotate-then-file, never truncate-in-place.** A drainer — the next session-end write
 that succeeds, or the weekly triage as a backstop — first `mv`s the live spool to
@@ -342,8 +347,8 @@ Required cases:
 - The issue body renders as a checklist with one box per concern.
 - A simulated `gh` failure appends exactly one parseable spool line with the §4.5 fields and
   does not throw.
-- A retraction record uses the same envelope with `retracts` in place of `concerns`, and the
-  emitted shape fails the test if a field is dropped.
+- A retraction record uses the same envelope with `retracts` and `reason` in place of
+  `concerns`, and the emitted shape fails the test if a field is dropped.
 - The spool rotates (never truncates) before draining; a concern appended after the rotate
   read but before disposal survives in the rotated file, where a bare truncate would destroy
   it. The rotated file is deleted only on a successful file; a failed file leaves it in place.
