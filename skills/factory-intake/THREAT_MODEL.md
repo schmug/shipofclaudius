@@ -38,10 +38,14 @@ no credential material, and launches `codex` with an allowlisted environment tha
 neither Access variable (invariant 9). `smoke.mjs` attaches the headers to its own `fetch` of
 `--url` and, in the browser, only to requests whose origin equals `--url`'s: a `page.route`
 handler adds them to same-origin requests and aborts every cross-origin one, so a candidate page
-cannot make the browser carry the token to another host. **Pinned:** the suite greps every
-`console.log/error`, `writeFileSync`, and `process.stdout` line for the secret's name, requires
-both `delete env.CF_ACCESS_CLIENT_*` lines plus `env` in the critic call's options, and requires
-`page.route(` and `route.abort()` with no `extraHTTPHeaders` in `smoke.mjs`.
+cannot make the browser carry the token to another host. The handler fetches each same-origin
+request itself with `maxRedirects: 0` and aborts any 3xx answer, because Chromium carries headers
+added at the first hop onto redirect targets — a candidate Worker answering `302` to a foreign
+host would otherwise receive the token. **Pinned:** the suite greps every `console.log/error`,
+`writeFileSync`, and `process.stdout` line for the secret's name, requires both
+`delete env.CF_ACCESS_CLIENT_*` lines plus `env` in the critic call's options, and requires
+`page.route(`, `route.abort()`, and `maxRedirects: 0` with no `extraHTTPHeaders` and no
+`route.continue(` in `smoke.mjs`.
 
 Residual: the token goes to whatever host `--url` names. The skill derives that URL from
 the build result's contract, never from model- or web-supplied text. If Access forwards the
@@ -147,9 +151,11 @@ controls, in this order:
 - **The tamper guard.** Phase 4 records `SCAFFOLD_SHA=$(git rev-parse HEAD)` right after the
   scaffold push, and the skill runs
 
-      git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json npm-shrinkwrap.json .npmrc '.env*' '.dev.vars*' .gitignore wrangler.jsonc wrangler.json wrangler.toml wrangler.preview.template.jsonc .github/ || echo TAMPERED
+      git diff --quiet "$SCAFFOLD_SHA" HEAD -- ':(icase)scripts/' ':(icase)package.json' ':(icase)package-lock.json' ':(icase)npm-shrinkwrap.json' ':(icase).npmrc' ':(icase).env*' ':(icase).dev.vars*' ':(icase).gitignore' ':(icase)wrangler.jsonc' ':(icase)wrangler.json' ':(icase)wrangler.toml' ':(icase)wrangler.preview.template.jsonc' ':(icase).github/' || echo TAMPERED
 
-  at two points before anything from a clone executes: **Phase 7**, in `score-<key>` (`HEAD` =
+  at two points before anything from a clone executes (every pathspec carries the `:(icase)`
+  magic because git pathspecs are case-sensitive even on a case-insensitive volume, so a
+  candidate's `Scripts/` would otherwise land in `scripts/` on disk unseen by the diff): **Phase 7**, in `score-<key>` (`HEAD` =
   the candidate branch), before `npm ci`, `smoke.mjs`, and `critic.mjs`; and **Phase 9 step 4**,
   in the release clone (`HEAD` = merged `main`), before `npm ci && npx wrangler deploy --config
   wrangler.jsonc`. The guarded set is every file that executes in the session or decides what
@@ -171,17 +177,23 @@ controls, in this order:
   out on APFS, which folds case and some look-alike letters (and treats Unicode normalization
   forms as one name). A candidate path such as `Scripts/smoke.mjs`, or one spelled with a
   non-ASCII look-alike, is a different tree entry that the pathspec never matches, yet it lands
-  on the same bytes on disk as the guarded file and overwrites it. Three lines follow each guard,
+  on the same bytes on disk as the guarded file and overwrites it. Four lines follow each guard,
   with the same `TAMPERED` handling:
 
       git ls-tree -r --name-only -z HEAD | LC_ALL=C grep -qz '[^ -~]' && echo TAMPERED      # no non-ASCII path (case-folding look-alikes)
       git ls-tree -r --name-only HEAD | tr 'A-Z' 'a-z' | sort | uniq -d | grep -q . && echo TAMPERED   # no case-insensitive path collision
       git status --porcelain | grep -q . && echo TAMPERED                                   # a fresh clone must be clean
+      git ls-tree -r HEAD | grep -q '^120000 ' && echo TAMPERED                             # no symlinks in the tree
 
   The first rejects any path with a byte outside printable ASCII (`-z`, so git prints the raw
   name rather than its quoted form); the second rejects two tree paths that fold to one name;
   the third rejects a clone that is not clean at `HEAD`, which is what a collision leaves behind
-  and what nothing else should.
+  and what nothing else should; the fourth rejects any symlink (mode `120000`) in the tree,
+  because a symlinked `factory-reports/` or `public/` would redirect the scripts' writes, or the
+  deploy's asset upload, to a path the candidate chose. Each block ends with `echo GUARD_DONE`
+  and is read by its output — any line printing `TAMPERED` — not by its exit code: the
+  `grep -q … && echo TAMPERED` lines exit non-zero on an honest tree, and `; true` is deliberately
+  not appended, because it would also hide a real failure of the diff command.
 - **The instance check.** `wrangler.preview.<key>.jsonc` is the build agent's rendering of the
   guarded template and cannot be in the diff set (it did not exist at `SCAFFOLD_SHA`), so Phase 7
   compares it against a fresh rendering: `diff <(sed "s/{{KEY}}/<key>/g"
@@ -200,8 +212,9 @@ command); a hit commits nothing and presents the candidate as unverified. Only `
 `critic.json`, and the screenshot are committed; the critic transcript (`critic.md`) stays local.
 **Pinned:** `SCAFFOLD_SHA=$(git rev-parse HEAD)`, the `git clone --branch factory/<key>
 --single-branch` before Phase 7's guard and the `score-<key>` path, the guard command with its
-full path set at least twice in `SKILL.md`, each of the three checkout lines at least twice —
-between the guard and the instance check in Phase 7, before the deploy in Phase 9 — the instance
+full path set at least twice in `SKILL.md`, each of the four checkout lines at least twice —
+between the guard and the instance check in Phase 7, before the deploy in Phase 9 — `echo
+GUARD_DONE` closing each block and the output-not-exit-code sentence in Phase 7, the instance
 check's `sed` rendering between the guard and the smoke run, the unverified label, the `rm -rf`
 between the guard and `npm ci`, both scrub lines before `git add`, the `ok`-booleans sentence,
 and the ordering (first guard before `npm ci` and `node scripts/smoke.mjs`, last guard before the
@@ -233,11 +246,12 @@ from being instructed by the candidate or from carrying anything out:
   `delete env.CF_ACCESS_CLIENT_*` lines stay as no-ops so the invariant reads the same.
 - **No candidate instructions.** `codex` treats `AGENTS.md` as trusted instructions. After the
   evidence clone, the runner walks it (`readdirSync(work, { recursive: true })`) and removes every
-  file named `AGENTS.md` in any case, and launches `codex exec -c project_doc_max_bytes=0` so no
+  file named `AGENTS.md` or `AGENTS.override.md` in any case, and launches `codex exec -c project_doc_max_bytes=0` so no
   project doc is loaded even if a copy were missed. The candidate's page and repository stay
   evidence, never instructions.
-- **A capped, scrubbed verdict.** `critic.json` keeps only `scores` (numeric values), `verdict`,
-  and `requiredFixes` entries reduced to `severity`, `category`, `title` (120 chars), and `detail`
+- **A capped, scrubbed verdict.** `critic.json` keeps only `scores` — an allowlist of the five
+  rubric keys (`design`, `mobile_ux`, `completeness`, `performance`, `code_quality`), numeric
+  values only, so the model cannot add a key — `verdict`, and `requiredFixes` entries reduced to `severity`, `category`, `title` (120 chars), and `detail`
   (400 chars), at most 20 of them; `summary` and every other model field are dropped. Before the
   write, the JSON text is matched against a secret pattern (`-----BEGIN`, `oauth_token`,
   `refresh_token`, `ghp_` / `gho_` / `github_pat_`, `AKIA…`, `CF_ACCESS_CLIENT`, `Bearer `); a
@@ -250,13 +264,20 @@ from being instructed by the candidate or from carrying anything out:
 anywhere in the file; the `for (const k of ['PATH'` allowlist loop and no `{ ...process.env }`;
 both `delete env.…` lines and `env` in the critic call's options; `project_doc_max_bytes=0`
 right after `exec`; the `readdirSync(work, { recursive: true })` walk with `rmSync` before the
-critic runs; the `oauth_token|refresh_token` pattern fragment, the withheld message, the 120/400
-caps, no `summary`, and the scrub before the `critic.json` write.
+critic runs, naming `agents.override.md`; the five-key `scores` allowlist literal; the
+`oauth_token|refresh_token` pattern fragment, the withheld message, the 120/400 caps, no
+`summary`, and the scrub before the `critic.json` write.
 
-Residual: `codex` is whatever binary is on `PATH`, and its sandbox is its own control, not ours.
-Inside that sandbox it can still read the disk — the evidence clone and whatever else the sandbox
-exposes — so the scrub and the capped shape that is committed (scores as numbers, the fix list
-bounded to short strings) are the mitigations, not the sandbox.
+Residual: `codex` is whatever binary is on `PATH`; its sandbox, and its own MCP and network
+behavior, are its configuration, not ours. Inside that sandbox it can still read the disk — the
+evidence clone and whatever else the sandbox exposes — so the scrub and the capped shape that is
+committed are the mitigations, not the sandbox. The `requiredFixes` strings (at most 20 entries
+of about 600 chars) remain a free-text channel from model output over candidate evidence into a
+public commit, bounded only by the pattern scrub and by the stated assumption (trust-boundary row
+1) that the build agent could commit host files to `public/` directly anyway. And `src/` is
+bundled by esbuild from the session's disk at the Phase 9 deploy — esbuild follows absolute
+imports — which the tamper guard does not cover; `src/` is the candidate's to change (invariant
+8), so this is a residual the guard leaves open by design, not one it closes.
 
 ## What is deliberately not here
 

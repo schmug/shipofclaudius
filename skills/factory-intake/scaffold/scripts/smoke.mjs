@@ -45,11 +45,16 @@ try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true });
   // The service token is attached only to requests for the candidate's own origin. Cross-origin
   // subresources are aborted so a candidate page cannot pull the token out to another host.
+  // Same-origin requests are fetched here with maxRedirects: 0 and any 3xx is aborted: Chromium
+  // carries headers added at the first hop onto redirect targets, so a candidate Worker answering
+  // 302 to a foreign host would receive the token.
   const origin = new URL(url).origin;
-  await page.route('**/*', (route) => {
+  await page.route('**/*', async (route) => {
     const req = route.request();
-    if (new URL(req.url()).origin === origin) return route.continue({ headers: { ...req.headers(), ...headers } });
-    return route.abort();
+    if (new URL(req.url()).origin !== origin) return route.abort();
+    const r = await route.fetch({ headers: { ...req.headers(), ...headers }, maxRedirects: 0 });
+    if (r.status() >= 300 && r.status() < 400) return route.abort();
+    return route.fulfill({ response: r });
   });
   // Console and pageerror text is page-controlled: keep at most 20 entries of 200 chars each. The
   // skill reads only the `ok` booleans from smoke.json.

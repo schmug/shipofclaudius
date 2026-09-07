@@ -47,10 +47,12 @@ delete env.CF_ACCESS_CLIENT_SECRET;
 const repoRoot = process.cwd();
 const work = join(tmpdir(), `critic-${KEY}-${Date.now()}`);
 execFileSync("git", ["clone", "--depth", "1", "--quiet", `file://${repoRoot}`, work]);
-// codex treats AGENTS.md as trusted instructions, and the candidate can commit one anywhere in its
-// tree. Remove every copy (any case) from the evidence clone before the critic reads it.
+// codex treats AGENTS.md (and AGENTS.override.md) as trusted instructions, and the candidate can
+// commit one anywhere in its tree. Remove every copy (any case) from the evidence clone before the
+// critic reads it.
+const INSTRUCTION_FILES = new Set(["agents.md", "agents.override.md"]);
 for (const rel of readdirSync(work, { recursive: true })) {
-  if (basename(rel).toLowerCase() === "agents.md") rmSync(join(work, rel), { force: true, recursive: true });
+  if (INSTRUCTION_FILES.has(basename(rel).toLowerCase())) rmSync(join(work, rel), { force: true, recursive: true });
 }
 
 function tryRun(cmd, args, timeout = 300_000) {
@@ -119,8 +121,9 @@ if (!verdict) {
 }
 
 // The verdict is model output over candidate-controlled evidence, and codex can read the disk inside
-// its sandbox. Only the fields the skill reads survive, every string is capped, and the JSON text is
-// refused outright if it matches a secret pattern — those two steps, plus the fact that only the
+// its sandbox. Only the fields the skill reads survive (`scores` is a five-key allowlist, so the model
+// cannot add a key), every string is capped, and the JSON text is refused outright if it matches a
+// secret pattern — those two steps, plus the fact that only the
 // capped shape is ever committed, are what keep a leak out of the repository.
 const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
 const scores = verdict.scores && typeof verdict.scores === "object" ? verdict.scores : {};
@@ -128,7 +131,7 @@ const shaped = {
   candidate: KEY,
   revision: sha,
   capturedAt: new Date().toISOString(),
-  scores: Object.fromEntries(Object.entries(scores).filter(([, v]) => typeof v === "number")),
+  scores: Object.fromEntries(['design','mobile_ux','completeness','performance','code_quality'].filter((k) => typeof scores[k] === 'number').map((k) => [k, scores[k]])),
   verdict: str(verdict.verdict, 40),
   requiredFixes: (Array.isArray(verdict.requiredFixes) ? verdict.requiredFixes : []).slice(0, 20).map((f) => ({
     severity: str(f?.severity, 40), category: str(f?.category, 40), title: str(f?.title, 120), detail: str(f?.detail, 400),

@@ -66,8 +66,16 @@ test('scaffold: smoke.mjs sends the service token only to the candidate origin a
   const src = await read(S + 'scripts/smoke.mjs')
   assert.ok(!src.includes('extraHTTPHeaders'), 'no context-wide header')
   assert.ok(src.includes('page.route(') && src.includes('route.abort()'), 'same-origin routing with cross-origin abort')
-  assert.ok(/new URL\(req\.url\(\)\)\.origin === origin/.test(src), 'the origin comparison is exact')
+  assert.ok(/new URL\(req\.url\(\)\)\.origin !== origin\) return route\.abort\(\)/.test(src), 'the origin comparison is exact and a mismatch aborts')
   assert.ok(src.indexOf('page.route(') < src.indexOf('page.goto('), 'the route is installed before navigation')
+  // F1 (round 5): Chromium carries headers added at the first hop onto redirect targets, so a
+  // candidate Worker answering 302 to a foreign host would receive the token. The handler fetches
+  // same-origin requests itself with maxRedirects: 0, aborts any 3xx, and continues nothing.
+  assert.ok(src.includes('maxRedirects: 0'), 'the same-origin fetch follows no redirect')
+  assert.ok(/route\.fetch\(\{ headers: \{ \.\.\.req\.headers\(\), \.\.\.headers \}, maxRedirects: 0 \}\)/.test(src), 'the token rides only on the handler fetch')
+  assert.ok(/r\.status\(\) >= 300 && r\.status\(\) < 400\) return route\.abort\(\)/.test(src), 'a 3xx answer is aborted')
+  assert.ok(src.includes('route.fulfill({ response: r })'), 'the fetched response is what the page sees')
+  assert.ok(!src.includes('route.continue('), 'no request is continued (a continued request would carry the headers through a redirect)')
   // W-5 (round 4): at most 20 console/pageerror entries of 200 chars each reach smoke.json.
   assert.ok(/errors\.length < 20/.test(src) && /\.slice\(0, 200\)/.test(src), 'console/pageerror text is capped')
 })
@@ -119,6 +127,12 @@ test('scaffold: critic.mjs strips AGENTS.md from the evidence clone, disables pr
   const scrubAt = src.indexOf('SECRET_PATTERN.test(')
   const writeAt = src.indexOf('"critic.json"')
   assert.ok(scrubAt > -1 && writeAt > -1 && scrubAt < writeAt, 'the scrub precedes the critic.json write')
+  // F3 (round 5): scores is a five-key allowlist (the model cannot add a key), and
+  // AGENTS.override.md is stripped alongside AGENTS.md.
+  assert.ok(src.includes("['design','mobile_ux','completeness','performance','code_quality']"), 'scores is the five-key allowlist')
+  assert.ok(/scores: Object\.fromEntries\(\['design','mobile_ux','completeness','performance','code_quality'\]\.filter\(\(k\) => typeof scores\[k\] === 'number'\)/.test(src), 'only numeric values under the allowlisted keys survive')
+  assert.ok(!/Object\.entries\(scores\)/.test(src), 'no pass-through of model-supplied keys')
+  assert.ok(src.includes('agents.override.md'), 'AGENTS.override.md is stripped too')
 })
 
 test('scaffold: package.json pins no devDependency versions itself (the skill installs latest at scaffold time) and the test script is node --test', async () => {
@@ -207,7 +221,9 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
     // and registry; wrangler.json / wrangler.toml can be picked over wrangler.jsonc by config discovery.
     // B-3 (round 4): wrangler loads `.env` from the project directory, so a committed `.env*` /
     // `.dev.vars*` (or a `.gitignore` edit that lets one in) redirects every wrangler command.
-    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json npm-shrinkwrap\.json \.npmrc '\.env\*' '\.dev\.vars\*' \.gitignore wrangler\.jsonc wrangler\.json wrangler\.toml wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
+    // F2 (round 5): git pathspecs are case-sensitive even on a case-insensitive volume, so without
+    // `:(icase)` a candidate's `Scripts/` lands in `scripts/` on disk unseen by the diff.
+    assert.ok(/ HEAD -- ':\(icase\)scripts\/' ':\(icase\)package\.json' ':\(icase\)package-lock\.json' ':\(icase\)npm-shrinkwrap\.json' ':\(icase\)\.npmrc' ':\(icase\)\.env\*' ':\(icase\)\.dev\.vars\*' ':\(icase\)\.gitignore' ':\(icase\)wrangler\.jsonc' ':\(icase\)wrangler\.json' ':\(icase\)wrangler\.toml' ':\(icase\)wrangler\.preview\.template\.jsonc' ':\(icase\)\.github\/' \|\| echo TAMPERED/.test(line), `guard names the full path set, every pathspec :(icase): ${line}`)
   }
   assert.ok(md.includes('unverified: candidate modified factory scripts'), 'a tampered candidate is presented as unverified')
   // B1: Phase 7 scores in a clone the session made itself. The build agent's directory holds
@@ -228,11 +244,14 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
   const deploy = md.lastIndexOf('npm ci && npx wrangler deploy --config wrangler.jsonc')
   assert.ok(deploy > 0 && guards[guards.length - 1].index < deploy, 'the last guard precedes the production deploy, which names its config explicitly')
   // B-1 (round 4): APFS folds case and some look-alike letters, so a candidate path can overwrite a
-  // guarded file on disk while the tree diff stays clean. Three checkout checks follow each guard.
+  // guarded file on disk while the tree diff stays clean. Four checkout checks follow each guard;
+  // the fourth (F2, round 5) rejects any symlink, because a symlinked factory-reports/ or public/
+  // would redirect the scripts' writes or the deploy's asset upload.
   const CHECKOUT_CHECKS = [
     "git ls-tree -r --name-only -z HEAD | LC_ALL=C grep -qz '[^ -~]' && echo TAMPERED",
     "git ls-tree -r --name-only HEAD | tr 'A-Z' 'a-z' | sort | uniq -d | grep -q . && echo TAMPERED",
     'git status --porcelain | grep -q . && echo TAMPERED',
+    "git ls-tree -r HEAD | grep -q '^120000 ' && echo TAMPERED",
   ]
   for (const c of CHECKOUT_CHECKS) {
     const n = md.split(c).length - 1
@@ -242,6 +261,18 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
     const i9 = md.indexOf(c, guards[guards.length - 1].index)
     assert.ok(i9 > -1 && i9 < deploy, `Phase 9 runs it before the production deploy: ${c}`)
   }
+  // F4 (round 5): every `grep -q … && echo TAMPERED` line exits non-zero on an honest tree, so the
+  // block is read by its output (any TAMPERED line), not by its exit code, and closes with
+  // `echo GUARD_DONE`. Not `; true`, which would also hide a real failure of the diff command.
+  const doneCount = md.split('echo GUARD_DONE').length - 1
+  assert.ok(doneCount >= 2, `echo GUARD_DONE closes each guard block (found ${doneCount})`)
+  const done7 = p7.indexOf('echo GUARD_DONE')
+  assert.ok(done7 > inst && done7 < npmci, 'Phase 7: GUARD_DONE after the instance check, before npm ci')
+  const done9 = md.indexOf('echo GUARD_DONE', guards[guards.length - 1].index)
+  assert.ok(done9 > -1 && done9 < deploy, 'Phase 9: GUARD_DONE before the production deploy')
+  for (const c of CHECKOUT_CHECKS) assert.ok(md.indexOf(c, guards[guards.length - 1].index) < done9, `Phase 9: GUARD_DONE is the last guard line: ${c}`)
+  assert.ok(/Read the block by its output, not by its exit code/.test(p7), 'Phase 7 states the output-not-exit-code rule')
+  assert.ok(!/echo TAMPERED; true/.test(md), 'no `; true` masking the diff command')
 })
 
 // W2 + B4: the evidence commit is scrubbed for the token value first (naming the variable, never
