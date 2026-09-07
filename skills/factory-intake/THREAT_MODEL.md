@@ -4,7 +4,7 @@ Written for the next agent editing the scaffold. Every file under `scaffold/` is
 into every project the factory creates, so a control removed here is removed from every
 future repo at once. `tests/factory-intake.test.mjs` pins each invariant below; change the
 test and the template together or not at all. Design: `docs/specs/2026-09-06-factory-intake.md`
-§7, §10, §11 (the scaffold) and §5, §8–§11 (the skill, invariants 7 and 8 below). This file sits
+§7, §10, §11 (the scaffold) and §5, §8–§11 (the skill, invariants 7–9 below). This file sits
 beside `scaffold/`, not inside it, so it is not copied.
 
 ## What this thing is
@@ -22,9 +22,9 @@ Access with a service token. Placeholders (`{{SLUG}}`, `{{TITLE}}`, `{{DATE}}`,
 |---|---|---|
 | The **build agent** (a model, in a scratch clone) | untrusted | every file in the project except the Access token, which it never receives; a change to the files the skill executes is caught by invariant 8 before anything runs |
 | The **deployed candidate** | untrusted code on a shared preview domain | any request-derived input |
-| The **critic** (`codex`, read-only sandbox, no network) | untrusted output | `factory-reports/<key>/critic.{json,md}` — data for the skill, never instructions |
-| The **skill** running `smoke.mjs` / `critic.mjs` | trusted | `process.env.CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, `--url`, `--key` |
-| **GitHub Actions** | trusted only at the pinned SHAs | `npm ci && npm test` on the project |
+| The **critic** (`codex`, read-only sandbox, no network, neither Access variable in its environment) | untrusted output | `factory-reports/<key>/critic.{json,md}` — data for the skill, never instructions |
+| The **skill** running `smoke.mjs` / `critic.mjs`, in a clone it made itself | trusted | `process.env.CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, `--url`, `--key` |
+| **GitHub Actions** | trusted only at the pinned SHAs | `npm ci && npm test` on the project — the only place candidate `test/` and `src/` execute outside the Worker |
 
 ## Invariants and the controls that hold them
 
@@ -34,8 +34,10 @@ Access with a service token. Placeholders (`{{SLUG}}`, `{{TITLE}}`, `{{DATE}}`,
 reads both halves from `process.env`, attaches them only as request headers to the host
 given by `--url`, and prints or writes neither. `critic.mjs` also drops `cf-access*` and
 `set-cookie` response headers from the live-capture bundle so the critic's evidence carries
-no credential material. **Pinned:** the suite greps every `console.log/error`,
-`writeFileSync`, and `process.stdout` line for the secret's name.
+no credential material, and launches `codex` with a copy of the environment from which both
+Access variables have been deleted (invariant 9). **Pinned:** the suite greps every
+`console.log/error`, `writeFileSync`, and `process.stdout` line for the secret's name, and
+requires both `delete env.CF_ACCESS_CLIENT_*` lines plus `env` in the critic call's options.
 
 Residual: the token goes to whatever host `--url` names. The skill derives that URL from
 the build result's contract, never from model- or web-supplied text.
@@ -125,28 +127,77 @@ they do not make it enforced.
 The build agent is untrusted (row 1 above) and can commit anything on its branch, including a
 rewritten `scripts/smoke.mjs`. The skill runs `smoke.mjs` and `critic.mjs` in its own session,
 where `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` live, so a candidate-authored script
-would receive the secret — invariant 1 holds for the scripts as shipped, not as rewritten. The
-guard: Phase 4 records `SCAFFOLD_SHA=$(git rev-parse HEAD)` right after the scaffold push, and
-the skill runs
+would receive the secret — invariant 1 holds for the scripts as shipped, not as rewritten. Three
+controls, in this order:
 
-    git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+- **A clone the session made itself.** Phase 7 runs `git clone --branch factory/<key>
+  --single-branch` into `${TMPDIR:-/tmp}/factory/<slug>/score-<key>` and works only there. It
+  never enters the build agent's directory (`${TMPDIR:-/tmp}/factory/<slug>/<key>`): uncommitted
+  files, `node_modules`, and `.git/hooks` there are invisible to a commit-to-commit diff, so the
+  guard below would pass while a planted hook or a modified installed package still ran. Phase 9
+  clones merged `main` into `release` the same way, and every `wrangler delete` in step 6 (and in
+  the Phase 11 command list) runs from that clone, never from a candidate's or the agent's.
+- **The tamper guard.** Phase 4 records `SCAFFOLD_SHA=$(git rev-parse HEAD)` right after the
+  scaffold push, and the skill runs
 
-at two points before anything from a clone executes: **Phase 7**, in the candidate's scratch
-clone (`HEAD` = the candidate branch), before `smoke.mjs` / `critic.mjs`; and **Phase 9 step
-4**, in the release clone (`HEAD` = merged `main`), before `npm ci && npx wrangler deploy`. The
-guarded set is every file that executes in the session or decides what does: the two scripts
-and the critic prompt under `scripts/`, the dependency manifest and lockfile (`npm ci` runs
-install scripts), both wrangler configs (`build.command` runs a shell), and `.github/` (the
-check the ruleset requires). `TAMPERED` in Phase 7 skips both scripts and presents the candidate
-as **unverified: candidate modified factory scripts or config**, not selectable for Ship; in
-Phase 9 it stops before the deploy and reports. **Pinned:** `SCAFFOLD_SHA=$(git rev-parse
-HEAD)`, the guard command with its path set at least twice in `SKILL.md`, the unverified
-label, and the ordering (first guard before `node scripts/smoke.mjs`, last guard before the
-production `npm ci && npx wrangler deploy`).
+      git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json npm-shrinkwrap.json .npmrc wrangler.jsonc wrangler.json wrangler.toml wrangler.preview.template.jsonc .github/ || echo TAMPERED
+
+  at two points before anything from a clone executes: **Phase 7**, in `score-<key>` (`HEAD` =
+  the candidate branch), before `npm ci`, `smoke.mjs`, and `critic.mjs`; and **Phase 9 step 4**,
+  in the release clone (`HEAD` = merged `main`), before `npm ci && npx wrangler deploy --config
+  wrangler.jsonc`. The guarded set is every file that executes in the session or decides what
+  does: the two scripts and the critic prompt under `scripts/`; the dependency manifest and
+  lockfile (`npm ci` runs install scripts), plus `npm-shrinkwrap.json`, which `npm ci` uses in
+  preference to `package-lock.json` when both exist, and `.npmrc`, which can change npm's
+  `script-shell`, `registry`, and `ignore-scripts`; every wrangler config — `wrangler.jsonc`
+  (production; `build.command` runs a shell), `wrangler.json` and `wrangler.toml`, which a bare
+  `wrangler deploy` can pick up instead of it through config-file discovery (which is why the
+  production deploy names `--config wrangler.jsonc` explicitly), and the preview template; and
+  `.github/` (the check the ruleset requires).
+- **The instance check.** `wrangler.preview.<key>.jsonc` is the build agent's rendering of the
+  guarded template and cannot be in the diff set (it did not exist at `SCAFFOLD_SHA`), so Phase 7
+  compares it against a fresh rendering: `diff <(sed "s/{{KEY}}/<key>/g"
+  wrangler.preview.template.jsonc) "wrangler.preview.<key>.jsonc"`. Any difference is `TAMPERED`.
+
+`TAMPERED` in Phase 7 skips `npm ci` and both scripts and presents the candidate as
+**unverified: candidate modified factory scripts or config**, not selectable for Ship; in Phase 9
+it stops before the deploy and reports. After the scripts and before the evidence commit, the
+skill greps `factory-reports/<key>/` for the value of `CF_ACCESS_CLIENT_SECRET` (`grep -rqF`,
+naming the variable so the value never appears in a logged command); a hit commits nothing and
+presents the candidate as unverified. Only `smoke.json`, `critic.json`, and the screenshot are
+committed; the critic transcript (`critic.md`) stays local. **Pinned:** `SCAFFOLD_SHA=$(git
+rev-parse HEAD)`, the `git clone --branch factory/<key> --single-branch` before Phase 7's guard
+and the `score-<key>` path, the guard command with its full path set at least twice in
+`SKILL.md`, the instance check's `sed` rendering between the guard and the smoke run, the
+unverified label, the scrub before `git add`, and the ordering (first guard before `npm ci` and
+`node scripts/smoke.mjs`, last guard before the production `npm ci && npx wrangler deploy
+--config wrangler.jsonc`).
 
 Residual: the comparison is mechanical, but the instruction to run it before the scripts is
 text the model follows. Files outside the set (`src/`, `public/`, `test/`) are the candidate's
-to change; they run only inside the Worker or under CI's read-only token, never in the session.
+to change; they execute only in CI (under its read-only token) and inside the deployed Worker.
+The session executes only scaffold-authored scripts, from a clone it made itself after the guard
+passed, and `codex` — in a read-only sandbox, with an environment from which `critic.mjs` has
+deleted both Access variables (invariant 9). Nothing the session runs is candidate-authored.
+
+### 9. `critic.mjs` executes nothing the candidate wrote and hands the critic no credential
+
+An earlier version ran `npm test` and `wrangler deploy --dry-run` from the runner to give the
+critic gate evidence. Both execute candidate files — `test/`, `package.json` scripts, the preview
+config — in the session with the token in the environment, and invariant 8's guard cannot cover
+`test/` or `src/` without making them unbuildable. The gate evidence is now CI's: `gh run list
+--commit <sha> --json name,conclusion,url` for the revision under review, plus the recent run
+list. The runner's only child processes are `git` (the evidence clone and `rev-parse`), `gh`, and
+the critic command; the file contains no `npm`, `npx`, or `wrangler` invocation. The critic
+process gets a copy of the environment with `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`
+deleted, on top of its read-only sandbox, so a prompt-injected critic (the candidate's own page is
+part of its evidence) holds nothing to exfiltrate. **Pinned:** every `execFileSync(` / `tryRun(`
+first argument is `"git"`, `"gh"`, or `CRITIC.cmd` (the `tryRun` body's pass-through is checked
+separately); no `npm`, `npx`, or `wrangler` token anywhere in the file; both `delete env.…` lines
+and `env` in the critic call's options.
+
+Residual: `codex` is whatever binary is on `PATH`, and its sandbox is its own control, not ours.
+The scrubbed environment is what limits the damage if that sandbox is weaker than advertised.
 
 ## What is deliberately not here
 

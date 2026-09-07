@@ -22,9 +22,9 @@ Read these from the environment; stop with a setup message naming the missing on
 | `FACTORY_PROJECTS_ROOT` | optional; a colon-separated list of directories the research agent may scan for reusable local projects — one level deep, never a dot-directory, never `.env*` / `.dev.vars` / `~/.claude`. Unset ⇒ the local scan is skipped and the brief says so. |
 | `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` | an Access **service token** with a Service Auth policy on the preview application. Optional: without it Phase 7 presents candidates as **unverified** instead of scoring them. Never print or echo these; only `scripts/smoke.mjs` and `scripts/critic.mjs` read them, from `process.env`. |
 
-Then: `gh auth status` (write scope), `codex --version` and the smoke `codex exec --skip-git-repo-check --sandbox read-only "Reply with exactly: CRITIC_ONLINE" < /dev/null` (a failure is not fatal — record "critic unavailable" and continue; Phase 7 will skip scoring). `git rev-parse --abbrev-ref HEAD && pwd` to know where you are; nothing below writes to the session's own repository.
+Then: `gh auth status` (write scope), `npx --yes wrangler@latest whoami` (must succeed — Phase 2's Worker-namespace check and every deploy depend on it; a failure stops the run with the error), `codex --version` and the smoke `codex exec --skip-git-repo-check --sandbox read-only "Reply with exactly: CRITIC_ONLINE" < /dev/null` (a failure is not fatal — record "critic unavailable" and continue; Phase 7 will skip scoring). `git rev-parse --abbrev-ref HEAD && pwd` to know where you are; nothing below writes to the session's own repository.
 
-Mint the run nonce once: `node -e 'console.log(crypto.randomUUID())'`.
+Mint the research nonce: `node -e 'console.log(crypto.randomUUID())'`. It is the `<NONCE>` for Phase 1's research fence only; Phase 5 and Phase 10 each mint their own `fenceNonce` when they invoke `factory-build`.
 
 ## Phase 1 — Research (no user contact)
 
@@ -37,10 +37,10 @@ Derive the slug from the idea's title: lowercase, non-alphanumerics → `-`, col
 ```
 gh repo view <owner>/<slug>                                 # must fail (404)
 dig +short <slug>.$FACTORY_PROD_DOMAIN                      # must be empty
-npx --yes wrangler@latest deployments list --name <slug>    # must FAIL (no such Worker)
+npx --yes wrangler@latest deployments list --name <slug> 2>&1 | grep -qiE 'not found|does not exist|10007' && echo FREE    # must print FREE
 ```
 
-The third command is the only Worker-namespace check there is: `wrangler deploy --dry-run` (Phase 4) validates the config and does not check whether the name exists. Slug precondition: any slug you or the user choose — the derived one, `<slug>-2`, or a free-text answer — must match `^[a-z0-9][a-z0-9-]{1,23}$` (the `factory-build` contract). A user-supplied slug goes through all three checks again before Phase 4; if it fails the regex or any check, create nothing and report it (Phase 11) — the slug names the repo, the Worker, and the hostname, so a silent substitute is not yours to pick.
+The third command is the only Worker-namespace check there is: `wrangler deploy --dry-run` (Phase 4) validates the config and does not check whether the name exists. Only the specific not-found outcome (`not found`, `does not exist`, or Cloudflare error code `10007`) means the name is free. Any other failure — authentication, network, a rate limit, an unexpected message — is NOT "free": stop the run and report the error verbatim rather than treating a name you could not check as available. Slug precondition: any slug you or the user choose — the derived one, `<slug>-2`, or a free-text answer — must match `^[a-z0-9][a-z0-9-]{1,23}$` (the `factory-build` contract). A user-supplied slug goes through all three checks again before Phase 4; if it fails the regex or any check, create nothing and report it (Phase 11) — the slug names the repo, the Worker, and the hostname, so a silent substitute is not yours to pick.
 
 Ask at most three `AskUserQuestion` rounds from `references/intake-questions.md` — Round 1 is mandatory, Round 3 (budget) is always last. Record every answer verbatim.
 
@@ -63,7 +63,7 @@ npm install --save-dev wrangler@latest playwright@latest && npx playwright insta
 npm test && npx wrangler whoami && npx wrangler deploy --dry-run
 git add -A && git commit -m "chore: scaffold from the software factory" && git push origin main
 SCAFFOLD_SHA=$(git rev-parse HEAD)   # every later guard compares against this commit
-gh api -X POST "repos/$OWNER/<slug>/rulesets" --input "$CLAUDE_PLUGIN_ROOT/skills/factory-intake/scaffold/ruleset.json"
+gh api -X POST "repos/$OWNER/<slug>/rulesets" --input "${CLAUDE_PLUGIN_ROOT}/skills/factory-intake/scaffold/ruleset.json"
 gh api "repos/$OWNER/<slug>/rules/branches/main" --jq '[.[] | select(.type=="required_status_checks")] | length'
 ```
 
@@ -76,11 +76,11 @@ Invoke the `factory-build` skill with:
 ```
 { slug, repo: "<owner>/<slug>", base: "main", spec_path: "docs/specs/<date>-<slug>.md",
   previewDomain: "$FACTORY_PREVIEW_DOMAIN",
-  fenceNonce: "<run nonce from Phase 0>",
+  fenceNonce: "<fresh for this invocation: node -e 'console.log(crypto.randomUUID())'>",
   candidates: [{ key: "a", brief: "<the spec's one-paragraph summary>", direction: "<Round 1 direction>" }, …] }
 ```
 
-One candidate per direction the user chose; keys `a`, `b`, `c`, `d`. `fenceNonce` is not optional here: without it the callee falls back to a predictable content-derived nonce, one that whoever wrote the fenced text can compute. Wait for the Workflow notification. Do nothing else that could race it.
+One candidate per direction the user chose; keys `a`, `b`, `c`, `d`. `fenceNonce` is not optional here, and it is minted fresh for this invocation (`node -e 'console.log(crypto.randomUUID())'` — not the Phase 0 research nonce): without it the callee falls back to a predictable content-derived nonce, one that whoever wrote the fenced text can compute. Wait for the Workflow notification. Do nothing else that could race it.
 
 ## Phase 6 — Wait (no user contact)
 
@@ -96,20 +96,38 @@ Ceiling 10 minutes. On the ceiling the candidate is presented as **unverified**,
 
 ## Phase 7 — Score (no user contact)
 
-Per verified candidate, in its scratch clone `${TMPDIR:-/tmp}/factory/<slug>/<key>` on its branch, the tamper guard runs first:
+Per verified candidate, the session makes its **own** clone of the candidate branch and works only there:
 
 ```
-git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+git clone --branch factory/<key> --single-branch "https://github.com/$OWNER/<slug>.git" "${TMPDIR:-/tmp}/factory/<slug>/score-<key>"
+cd "${TMPDIR:-/tmp}/factory/<slug>/score-<key>"
 ```
 
-If it prints `TAMPERED`, do NOT run either script below: present the candidate as **unverified: candidate modified factory scripts or config**, list the changed paths (`git diff --stat "$SCAFFOLD_SHA" HEAD -- <the same paths>`), and treat it as not selectable for Ship — it still appears in Phase 8, marked so, and a `Ship it` answer that picks it skips Phase 9 and reports (Phase 11) instead. The reason, in one sentence: the build agent is untrusted, and these files run in this session, where `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` live, so a candidate-authored `smoke.mjs` would receive the secret. Only when the guard prints nothing:
+The session never `cd`s into `${TMPDIR:-/tmp}/factory/<slug>/<key>` (the build agent's directory), because uncommitted files, `node_modules`, and `.git/hooks` there are invisible to a commit-to-commit diff — the guard below would pass while a planted hook or a modified installed package still ran. In `score-<key>`, the tamper guard runs first, then the instance check on the candidate's preview config (the template is in the guarded set; the instance the build agent rendered from it is not, so it is compared against a fresh rendering):
 
 ```
+git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json npm-shrinkwrap.json .npmrc wrangler.jsonc wrangler.json wrangler.toml wrangler.preview.template.jsonc .github/ || echo TAMPERED
+diff <(sed "s/{{KEY}}/<key>/g" wrangler.preview.template.jsonc) "wrangler.preview.<key>.jsonc" >/dev/null || echo TAMPERED
+```
+
+If either line prints `TAMPERED`, do NOT run `npm ci` or either script below: present the candidate as **unverified: candidate modified factory scripts or config**, list the changed paths (`git diff --stat "$SCAFFOLD_SHA" HEAD -- <the same paths>`, or the `diff` output for the preview config), and treat it as not selectable for Ship — it still appears in Phase 8, marked so, and a `Ship it` answer that picks it skips Phase 9 and reports (Phase 11) instead. The reason, in one sentence: the build agent is untrusted, and these files run in this session, where `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` live, so a candidate-authored `smoke.mjs` would receive the secret. Only when both lines print nothing, still in `score-<key>`:
+
+```
+npm ci
 node scripts/smoke.mjs --url https://<preview host> --out factory-reports/<key>
 node scripts/critic.mjs --url https://<preview host> --key <key>
-git add factory-reports/<key> && git commit -m "chore(factory): smoke + critic evidence for candidate <key>" && git push
+```
+
+Then commit the evidence from the same clone. Scrub it first — the scripts never write the token, and this check is what makes that a fact rather than a claim. The command names the variable, never the value, so a logged command line carries no secret:
+
+```
+[ -n "$CF_ACCESS_CLIENT_SECRET" ] && grep -rqF -- "$CF_ACCESS_CLIENT_SECRET" factory-reports/<key>/ && { echo "SECRET LEAKED into evidence; not committing"; }
+git add factory-reports/<key>/smoke.json factory-reports/<key>/critic.json factory-reports/<key>/screenshot-mobile.png
+git commit -m "chore(factory): smoke + critic evidence for candidate <key>" && git push origin factory/<key>
 gh pr edit <pr> --body-file <body with the preview URL, the five scores, and the gate status appended>
 ```
+
+Run the scrub as its own command and read its output before `git add`. On `SECRET LEAKED`: commit nothing from `factory-reports/<key>/`, present the candidate as **unverified: evidence contained the service token**, and say the token must be rotated before the next run. Only those three files are ever committed; `critic.md` (the critic's transcript) and `index.html.txt` stay local in `score-<key>` — the transcript is model output, not evidence, and the page capture is already in the screenshot.
 
 Smoke exit 3 means Access blocked the service token — present the candidate as **unverified** and say the token is missing or not authorized. Critic exit 2 or a missing codex means **no scores**; present the candidate anyway with the reason. Never block the approval on a scoring failure.
 
@@ -127,24 +145,24 @@ Record the answer as a PR comment on the chosen candidate: `_Approved via factor
 1. `gh pr ready <n> -R <owner>/<slug>`.
 2. Invoke the `merge-pr-with-gate` skill with `{ pr: <n>, repo: "<owner>/<slug>", execute: true }`. It gates on `mergeStateStatus` + the required-check rollup and never uses `--admin`. If the run was marked **ungated** in Phase 4, skip this step, leave the PR ready, and report which gate is missing — nothing merges without it.
 3. Background `until` loop on `gh pr view <n> -R <owner>/<slug> --json state --jq .state` = `MERGED`, ceiling 15 minutes. Not merged ⇒ report and stop; delete nothing.
-4. `git clone https://github.com/<owner>/<slug>.git "${TMPDIR:-/tmp}/factory/<slug>/release" && cd $_` — merged `main`. Run the tamper guard against it before anything from the clone executes:
+4. `git clone https://github.com/<owner>/<slug>.git "${TMPDIR:-/tmp}/factory/<slug>/release" && cd "${TMPDIR:-/tmp}/factory/<slug>/release"` — merged `main`, in a clone the session made itself. Run the tamper guard against it before anything from the clone executes:
 
    ```
-   git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json wrangler.jsonc wrangler.preview.template.jsonc .github/ || echo TAMPERED
+   git diff --quiet "$SCAFFOLD_SHA" HEAD -- scripts/ package.json package-lock.json npm-shrinkwrap.json .npmrc wrangler.jsonc wrangler.json wrangler.toml wrangler.preview.template.jsonc .github/ || echo TAMPERED
    ```
 
-   `TAMPERED` ⇒ stop here: deploy nothing, delete nothing, and report per the autonomy boundary (the changed paths from `git diff --stat`, the merged PR, and that production was not touched). Otherwise `npm ci && npx wrangler deploy` — the production config. Capture the `Current Version ID`.
+   `TAMPERED` ⇒ stop here: deploy nothing, delete nothing, and report per the autonomy boundary (the changed paths from `git diff --stat`, the merged PR, and that production was not touched). Otherwise `npm ci && npx wrangler deploy --config wrangler.jsonc` — the production config, named explicitly so wrangler's own config discovery (`wrangler.json` / `wrangler.toml` / `wrangler.jsonc`) never chooses for you. Capture the `Current Version ID`.
 5. Background `until` loop for TLS on `https://<slug>.$FACTORY_PROD_DOMAIN/` (a new hostname means a new certificate), then `curl -sS -o /dev/null -w '%{http_code}' -L` must print `200` with no `cloudflareaccess.com` hop (production is public).
-6. Cleanup, in this order: `gh pr close <n> -R <owner>/<slug> --comment "Not selected; see <winner PR>"` for each losing PR; then for **every** candidate, winner included (production now serves it), in its scratch clone: `npx wrangler delete --name factory-<slug>-<key> --force`.
+6. Cleanup, in this order, and every command **from the release clone** — `cd "${TMPDIR:-/tmp}/factory/<slug>/release"`, the guarded merged `main`; never from a candidate's `score-<key>` clone and never from the build agent's `${TMPDIR:-/tmp}/factory/<slug>/<key>`, whose files would decide what `wrangler` reads: `gh pr close <n> -R <owner>/<slug> --comment "Not selected; see <winner PR>"` for each losing PR; then for **every** candidate, winner included (production now serves it): `npx wrangler delete --name factory-<slug>-<key> --force`.
 7. Report (Phase 11) with the production URL, the version id, and `npx wrangler rollback --name <slug>` as the rollback command.
 
 ## Phase 10 — Iterate ← check-in
 
-One `AskUserQuestion`: `Fix what the critic flagged` (feeds `requiredFixes` from `factory-reports/<key>/critic.json`) / Other (free text). Then invoke the `factory-build` skill again with the same args — including `fenceNonce: "<run nonce from Phase 0>"`, which matters most here because `feedback` is the one input a third party can shape — plus `iterate: { key, branch: "factory/<key>", feedback }`. The build agent commits on the same branch and redeploys the same Worker — hostname and certificate are unchanged, so skip Phase 6 and go to Phase 7, then Phase 8. Keep a round counter in the session: after the **second** iterate answer, do not ask a third time — report instead (Phase 11), with every preview still live.
+One `AskUserQuestion`: `Fix what the critic flagged` (feeds `requiredFixes` from `factory-reports/<key>/critic.json`) / Other (free text). Then invoke the `factory-build` skill again with the same args — including a fresh `fenceNonce` minted for this invocation (`node -e 'console.log(crypto.randomUUID())'`; never Phase 5's and never the Phase 0 research nonce), which matters most here because `feedback` is the one input a third party can shape — plus `iterate: { key, branch: "factory/<key>", feedback }`. The build agent commits on the same branch and redeploys the same Worker — hostname and certificate are unchanged, so skip Phase 6 and go to Phase 7, then Phase 8. Keep a round counter in the session: after the **second** iterate answer, do not ask a third time — report instead (Phase 11), with every preview still live.
 
 ## Phase 11 — Stop / report
 
-On Stop, on the iterate cap, on the wait ceiling, or on any error: **nothing is deleted**. The final report lists, per candidate: branch, PR, preview URL, Worker name, scores or the reason there are none, status; then the exact commands to delete each preview Worker (`npx wrangler delete --name factory-<slug>-<key> --force`) and close each PR; and after a Ship, the production URL and the rollback command. If the Workflow threw mid-run, list every Worker that may be live (`npx wrangler deployments list --name factory-<slug>-<key>` per expected name) with its delete command rather than guessing. Record unresolved items with `file-concerns`. Never claim a check that did not run.
+On Stop, on the iterate cap, on the wait ceiling, or on any error: **nothing is deleted**. The final report lists, per candidate: branch, PR, preview URL, Worker name, scores or the reason there are none, status; then the exact commands to delete each preview Worker (`npx wrangler delete --name factory-<slug>-<key> --force`, run from the release clone or any fresh clone of `main` — never from a candidate's or the build agent's directory) and close each PR; and after a Ship, the production URL and the rollback command. If the Workflow threw mid-run, list every Worker that may be live (`npx wrangler deployments list --name factory-<slug>-<key>` per expected name) with its delete command rather than guessing. Record unresolved items with `file-concerns`. Never claim a check that did not run.
 
 ## Autonomy boundary
 

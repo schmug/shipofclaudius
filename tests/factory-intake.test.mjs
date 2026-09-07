@@ -60,6 +60,34 @@ test('scaffold: smoke.mjs and critic.mjs read the service token from process.env
   }
 })
 
+// B2/B3 (PR #203 re-review): the runner used to run `npm test` and `wrangler deploy --dry-run`,
+// which execute candidate files in the session with the token present and outside the tamper
+// guard's reach. Gate evidence is CI's now. THREAT_MODEL.md invariant 9.
+test('scaffold: critic.mjs executes only git, gh, and the critic command — never npm, npx, wrangler, or anything candidate-authored', async () => {
+  const src = await read(S + 'scripts/critic.mjs')
+  assert.ok(!/\b(npm|npx|wrangler)\b/.test(src), 'no npm/npx/wrangler token anywhere in the file')
+  // tryRun is the one wrapper; its body forwards its own (cmd, args) and is checked on its own.
+  const wrapper = src.match(/function tryRun\(cmd, args[^\n]*\n[\s\S]*?\n\}/)
+  assert.ok(wrapper && /execFileSync\(cmd, args,/.test(wrapper[0]), 'tryRun forwards (cmd, args) to execFileSync')
+  const rest = src.replace(wrapper[0], '')
+  const firstArgs = [...rest.matchAll(/\b(?:execFileSync|tryRun)\(\s*([^,)]+)/g)].map((m) => m[1].trim())
+  assert.ok(firstArgs.length >= 4, `found the call sites (${firstArgs.length})`)
+  for (const a of firstArgs) assert.ok(['"git"', '"gh"', 'CRITIC.cmd'].includes(a), `disallowed child process: ${a}`)
+  for (const a of ['"git"', '"gh"', 'CRITIC.cmd']) assert.ok(firstArgs.includes(a), `${a} is still invoked`)
+  assert.ok(/tryRun\("gh", \["run", "list", "--commit", sha, "--json", "name,conclusion,url"/.test(rest), 'CI evidence comes from gh run list --commit <sha>')
+  assert.ok(/tryRun\("git", \["rev-parse", "HEAD"\]\)/.test(rest), 'the revision under review is still recorded')
+})
+
+// W1: the critic's own sandbox is codex's control, not ours; the scrubbed environment is what
+// keeps a prompt-injected critic from holding the token at all.
+test('scaffold: critic.mjs launches the critic with both Access variables deleted from its environment', async () => {
+  const src = await read(S + 'scripts/critic.mjs')
+  assert.ok(src.includes('delete env.CF_ACCESS_CLIENT_ID') && src.includes('delete env.CF_ACCESS_CLIENT_SECRET'), 'both halves are deleted from the env copy')
+  const call = src.match(/execFileSync\(CRITIC\.cmd,[\s\S]*?\}\);/)
+  assert.ok(call && /\benv\b\s*[,}]/.test(call[0]), 'the critic execFileSync options carry the scrubbed env')
+  assert.ok(src.indexOf('delete env.CF_ACCESS_CLIENT_SECRET') < src.indexOf('execFileSync(CRITIC.cmd'), 'scrubbed before the critic runs')
+})
+
 test('scaffold: package.json pins no devDependency versions itself (the skill installs latest at scaffold time) and the test script is node --test', async () => {
   const p = JSON.parse(await read(S + 'package.json'))
   assert.equal(p.devDependencies, undefined, 'devDependencies are added by `npm install --save-dev` during scaffold')
@@ -142,12 +170,62 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
   assert.ok(guards.length >= 2, `the guard appears at least twice (found ${guards.length})`)
   for (const g of guards) {
     const line = md.slice(g.index, md.indexOf('\n', g.index))
-    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json wrangler\.jsonc wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
+    // B5: npm-shrinkwrap.json overrides package-lock.json for npm ci; .npmrc sets npm's script shell
+    // and registry; wrangler.json / wrangler.toml can be picked over wrangler.jsonc by config discovery.
+    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json npm-shrinkwrap\.json \.npmrc wrangler\.jsonc wrangler\.json wrangler\.toml wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
   }
   assert.ok(md.includes('unverified: candidate modified factory scripts'), 'a tampered candidate is presented as unverified')
+  // B1: Phase 7 scores in a clone the session made itself. The build agent's directory holds
+  // uncommitted files, node_modules, and .git/hooks that a commit-to-commit diff cannot see.
+  const p7 = md.slice(md.indexOf('## Phase 7'), md.indexOf('## Phase 8'))
+  const clone = p7.indexOf('git clone --branch factory/<key> --single-branch')
+  const p7guard = p7.indexOf('git diff --quiet "$SCAFFOLD_SHA"')
+  assert.ok(clone > -1 && p7guard > -1 && clone < p7guard, 'Phase 7 clones the candidate branch itself before its guard')
+  assert.ok(p7.includes('score-<key>'), 'the session-made clone is score-<key>')
+  assert.ok(/never `cd`s into `\$\{TMPDIR:-\/tmp\}\/factory\/<slug>\/<key>`/.test(p7), 'the build agent directory is named as off-limits')
+  // B3: the rendered preview config is not in the diff set (it did not exist at SCAFFOLD_SHA), so
+  // it is compared against a fresh rendering, between the guard and anything that executes.
+  const inst = p7.indexOf('diff <(sed "s/{{KEY}}/<key>/g" wrangler.preview.template.jsonc) "wrangler.preview.<key>.jsonc" >/dev/null || echo TAMPERED')
+  const npmci = p7.indexOf('npm ci')
+  const smoke = p7.indexOf('node scripts/smoke.mjs')
+  assert.ok(inst > p7guard && inst < npmci && npmci < smoke, 'guard → instance check → npm ci → smoke, in that order')
   assert.ok(guards[0].index < md.indexOf('node scripts/smoke.mjs'), 'the first guard precedes the smoke run')
-  const deploy = md.lastIndexOf('npm ci && npx wrangler deploy')
-  assert.ok(deploy > 0 && guards[guards.length - 1].index < deploy, 'the last guard precedes the production deploy')
+  const deploy = md.lastIndexOf('npm ci && npx wrangler deploy --config wrangler.jsonc')
+  assert.ok(deploy > 0 && guards[guards.length - 1].index < deploy, 'the last guard precedes the production deploy, which names its config explicitly')
+})
+
+// W2 + B4: the evidence commit is scrubbed for the token value first (naming the variable, never
+// the value, so a logged command carries no secret) and only the three evidence files are
+// committed; every wrangler delete runs from the release clone, whose files passed the guard.
+test('factory-intake: scrubs evidence for the service token before committing, keeps the critic transcript local, and deletes previews only from the release clone', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  const p7 = md.slice(md.indexOf('## Phase 7'), md.indexOf('## Phase 8'))
+  const scrub = p7.indexOf('grep -rqF -- "$CF_ACCESS_CLIENT_SECRET" factory-reports/<key>/')
+  const add = p7.indexOf('git add factory-reports/<key>/')
+  assert.ok(scrub > -1 && add > -1 && scrub < add, 'the scrub precedes git add')
+  assert.ok(p7.includes('SECRET LEAKED into evidence; not committing'))
+  const addLine = p7.slice(add, p7.indexOf('\n', add))
+  assert.ok(addLine.includes('smoke.json') && addLine.includes('critic.json') && addLine.includes('screenshot-mobile.png'), `the three evidence files: ${addLine}`)
+  assert.ok(!addLine.includes('critic.md') && /`critic\.md`[^\n]*stay(s)? local/.test(p7), 'the critic transcript is not committed')
+  const p9 = md.slice(md.indexOf('## Phase 9'), md.indexOf('## Phase 10'))
+  const step6 = p9.slice(p9.indexOf('6. Cleanup'), p9.indexOf('7. Report'))
+  assert.ok(step6.includes('cd "${TMPDIR:-/tmp}/factory/<slug>/release"') && step6.includes('npx wrangler delete --name factory-<slug>-<key> --force'), 'step 6 deletes from the release clone')
+  assert.ok(!/in its scratch clone/.test(step6), 'no delete from a candidate clone')
+  const p11 = md.slice(md.indexOf('## Phase 11'))
+  assert.ok(/wrangler delete --name factory-<slug>-<key> --force`, run from the release clone or any fresh clone of `main`/.test(p11), 'the Phase 11 command list says where to run the deletes')
+})
+
+// W4 + W5: the plugin-root variable is braced everywhere (the repo convention), preflight proves
+// wrangler auth, and the Worker-namespace check accepts only the specific not-found outcome.
+test('factory-intake: braces CLAUDE_PLUGIN_ROOT, requires wrangler whoami at preflight, and treats only a not-found Worker as free', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  assert.ok(md.includes('${CLAUDE_PLUGIN_ROOT}/skills/factory-intake/scaffold/ruleset.json'))
+  assert.ok(!/\$CLAUDE_PLUGIN_ROOT\b/.test(md), 'no braceless $CLAUDE_PLUGIN_ROOT')
+  const p0 = md.slice(md.indexOf('## Phase 0'), md.indexOf('## Phase 1'))
+  assert.ok(p0.includes('`npx --yes wrangler@latest whoami` (must succeed'), 'preflight requires wrangler whoami')
+  const p2 = md.slice(md.indexOf('## Phase 2'), md.indexOf('## Phase 3'))
+  assert.ok(p2.includes("npx --yes wrangler@latest deployments list --name <slug> 2>&1 | grep -qiE 'not found|does not exist|10007' && echo FREE"), 'the Worker check requires the not-found outcome')
+  assert.ok(/any other failure[^\n]*is NOT "free"/i.test(p2), 'auth/network failures are not "free"')
 })
 
 // Without a caller-minted nonce factory-build falls back to a content-derived one that whoever
@@ -159,6 +237,11 @@ test('factory-intake: passes the run nonce to factory-build as fenceNonce on bot
   const p5 = md.slice(md.indexOf('## Phase 5'), md.indexOf('## Phase 6'))
   const p10 = md.slice(md.indexOf('## Phase 10'), md.indexOf('## Phase 11'))
   assert.ok(p5.includes('fenceNonce') && p10.includes('fenceNonce'), 'both factory-build invocations carry it')
+  // W3: each invocation mints its own nonce; Phase 0's is for the research fence only.
+  assert.ok(p5.includes('crypto.randomUUID()') && p10.includes('crypto.randomUUID()'), 'each invocation mints a fresh nonce')
+  assert.ok(!md.includes('run nonce from Phase 0'), 'no invocation reuses the Phase 0 nonce')
+  const p0 = md.slice(md.indexOf('## Phase 0'), md.indexOf('## Phase 1'))
+  assert.ok(/research fence only/.test(p0), 'Phase 0 scopes its nonce to the research fence')
 })
 
 // ---- runner ----

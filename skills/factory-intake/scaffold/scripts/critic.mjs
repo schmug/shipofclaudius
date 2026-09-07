@@ -5,6 +5,10 @@
  * Cloudflare Access with the service token → codex in a read-only sandbox with a fresh context
  * → verdict JSON + transcript under factory-reports/<key>/.
  *
+ * Executes nothing the candidate wrote (THREAT_MODEL.md invariant 9): the only child processes
+ * are git, gh, and the critic command. Gate evidence is CI's, read with `gh run list --commit`.
+ * The critic runs with an environment copy that carries neither Access variable.
+ *
  * Usage: node scripts/critic.mjs --url https://<preview-host> --key <key>
  * Exits 2 when no JSON verdict could be extracted.
  */
@@ -20,14 +24,17 @@ if (!BASE) { console.error("usage: critic.mjs --url <https://host> --key <key>")
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────
 const CAPTURE_PATHS = [["/", "index.html.txt"], ["/health", "health.txt"]];
-const EVIDENCE = [];                                   // smoke already ran; its artifacts are copied below
-const COPY_DIRS = [`factory-reports/${KEY}`];
+const COPY_DIRS = [`factory-reports/${KEY}`];          // smoke already ran; its artifacts are copied below
 const CRITIC = { cmd: "codex", args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only"] };
 const ACCESS_HEADERS = {};
 if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
   ACCESS_HEADERS["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
   ACCESS_HEADERS["CF-Access-Client-Secret"] = process.env.CF_ACCESS_CLIENT_SECRET;
 }
+// The critic never sees the token: its process gets a copy of the environment with both halves removed.
+const env = { ...process.env };
+delete env.CF_ACCESS_CLIENT_ID;
+delete env.CF_ACCESS_CLIENT_SECRET;
 // ─────────────────────────────────────────────────────────────────────────
 
 const repoRoot = process.cwd();
@@ -45,14 +52,15 @@ function tryRun(cmd, args, timeout = 300_000) {
 const cap = join(work, "live-capture");
 mkdirSync(cap, { recursive: true });
 
+// Gate evidence comes from CI, which is the only place the candidate's own test suite runs
+// outside the Worker. Nothing from the candidate's package.json or config executes here.
 const sha = tryRun("git", ["rev-parse", "HEAD"]).trim();
 writeFileSync(
   join(cap, "gates.txt"),
   [
     `revision under review: ${sha}`,
-    `\n$ npm test\n${tryRun("npm", ["test"])}`,
-    `\n$ npx wrangler deploy --dry-run --config wrangler.preview.${KEY}.jsonc\n${tryRun("npx", ["wrangler", "deploy", "--dry-run", "--config", `wrangler.preview.${KEY}.jsonc`])}`,
-    `\n$ gh run list (GitHub Actions CI)\n${tryRun("gh", ["run", "list", "--limit", "8"])}`,
+    `\n$ gh run list --commit ${sha} (GitHub Actions CI for this revision; the gate is the "test" check concluding "success")\n${tryRun("gh", ["run", "list", "--commit", sha, "--json", "name,conclusion,url", "--limit", "10"])}`,
+    `\n$ gh run list (recent GitHub Actions CI)\n${tryRun("gh", ["run", "list", "--limit", "8"])}`,
   ].join("\n"),
 );
 
@@ -68,7 +76,6 @@ for (const [path, name] of CAPTURE_PATHS) {
 }
 writeFileSync(join(cap, "timings.json"), JSON.stringify(timings, null, 2));
 
-for (const step of EVIDENCE) writeFileSync(join(cap, step.file), tryRun(step.cmd, step.args, 600_000));
 for (const dir of COPY_DIRS) {
   try { cpSync(dir, join(cap, dir.split("/").pop()), { recursive: true }); } catch { /* optional */ }
 }
@@ -78,7 +85,7 @@ console.error(`[critic] candidate ${KEY}: running ${CRITIC.cmd} in ${work}`);
 let out = "";
 try {
   out = execFileSync(CRITIC.cmd, [...CRITIC.args, "--cd", work, "-"], {
-    input: prompt, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 30 * 60 * 1000, stdio: ["pipe", "pipe", "ignore"],
+    input: prompt, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, timeout: 30 * 60 * 1000, stdio: ["pipe", "pipe", "ignore"], env,
   });
 } catch (err) {
   out = err.stdout ?? "";
