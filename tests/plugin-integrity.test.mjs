@@ -86,120 +86,69 @@ test('process skills: declared explicitly, self-consistent, and never Workflow w
   }
 })
 
-// The chip watch in implement-issue hangs on two facts that are invisible at author
-// time and that a well-meaning edit would quietly re-break.
-//
-// (1) ADDRESSING. A locally-clicked chip becomes a session that `ListAgents` lists by
-//     its WORKTREE SLUG (`clever-stonebraker-04a95a-f0`), not by the chip title —
-//     only Remote Control / cloud rows carry titles. That listing also collides names
-//     (seven concurrent rows named "Daily morning podcast") and self-truncates past
-//     the first pages. So a name-addressed channel cannot reliably reach the spawned
-//     session — it reaches SOME session, silently, or none. Only a sessionId addresses
-//     it, and only `ccd_session_mgmt` speaks sessionId.
-// (2) BOUNDEDNESS. A `persistent: true` monitor outlives the work it was watching and
-//     sits armed for the rest of the session.
-test('implement-issue: the chip watch is sessionId-addressed and bounded', async () => {
+// implement-issue hands work to a `claude -p` CHILD PROCESS, not to a chip that becomes a
+// session. That swap deleted a whole class of hazard (joining the right session by title,
+// a watch that outlives its work, transcript paging) and replaced it with one property
+// that a well-meaning edit would quietly re-break: the child's EXIT is the completion
+// signal, so the launch must be backgrounded and nothing may poll for it.
+test('implement-issue: the child is backgrounded and its exit is the completion signal', async () => {
   const md = await read('skills/implement-issue/SKILL.md')
-  assert.match(md, /mcp__ccd_session_mgmt__list_sessions/,
-    'discovery must go through list_sessions (sessionId + title + cwd + prState), not ListAgents')
-  assert.match(md, /mcp__ccd_session_mgmt__send_message/,
-    'the handshake must address the spawned session by sessionId, never by name')
-  assert.match(md, /persistent:\s*false/,
-    'the watch Monitor must be bounded — a persistent watch outlives the chip it watches')
+  assert.match(md, /run_in_background/,
+    'the launch must be backgrounded so the harness re-invokes on exit')
+  assert.ok(/exit\b[\s\S]{0,120}(signal|completion)|(signal|completion)[\s\S]{0,120}\bexits?\b/i.test(md),
+    'the body must state that the process exit is what reports completion')
+  assert.ok(/nothing to poll|no polling|do not poll|nothing to join/i.test(md),
+    'the body must rule out polling — the old chip watch is what that replaced')
 })
 
-// The name-addressed primitives are not banned words: the body documents them as the
-// WRONG channel, and that rationale is the whole reason the watch uses sessionIds. If
-// one ever appears as an instruction rather than as a hazard, the rationale is gone.
+// Same rationale as before the mechanism changed, one scope wider: the name-addressed
+// primitives are not banned words, but they may only ever appear framed as the WRONG
+// channel. Paragraph-scoped rather than line-scoped, because prose wraps and a mention's
+// disclaimer routinely lands on the neighbouring line.
 test('implement-issue: name-addressed session channels appear only as prohibitions', async () => {
   const md = await read('skills/implement-issue/SKILL.md')
-  for (const line of md.split('\n')) {
-    if (!/notify_when_idle|\bListAgents\b|\bSendMessage\b/.test(line)) continue
-    assert.match(line, /never|not\b|do not|don't|cannot|can't|fragile|unreliable|wrong/i,
-      `name-addressed channel cited as usable rather than as a hazard: ${line.trim()}`)
+  for (const para of md.split(/\n\s*\n/)) {
+    if (!/notify_when_idle|\bListAgents\b|\bSendMessage\b/.test(para)) continue
+    assert.match(para, /never|\bnot\b|\bno\b|none|do not|don't|cannot|can't|fragile|unreliable|wrong/i,
+      `name-addressed channel cited as usable rather than as a hazard: ${para.trim().slice(0, 120)}`)
   }
 })
 
-// `mcp__ccd_session_mgmt__send_message` is documented unavailable in unattended
-// sessions (scheduled-task runs and remote-dispatched sessions). A watch phase that
-// attempts it there fails partway instead of declining up front, so the skip has to be
-// stated in the body rather than discovered at runtime.
-test('implement-issue: the watch phase is skipped, not attempted, in unattended runs', async () => {
+// A `claude -p` child is an ordinary background process, so — unlike the chip watch it
+// replaced, which needed session tools that are unavailable in scheduled and
+// remote-dispatched runs — it behaves identically unattended. That equivalence is the
+// reason the old unattended carve-out could be deleted, so it has to be stated.
+test('implement-issue: the reporting path has no unattended carve-out', async () => {
   const md = await read('skills/implement-issue/SKILL.md')
-  assert.ok(/unattended[\s\S]{0,300}skip|skip[\s\S]{0,300}unattended/i.test(md),
-    'the body must tie unattended runs to skipping the watch phase')
+  assert.ok(/unattended/i.test(md), 'the body must address unattended runs')
+  assert.ok(/no attended session|needs no attended|same behavior|same report|Nothing here is skipped/i.test(md),
+    'unattended runs must be stated as equivalent, not as a skip')
 })
 
-// `list_events` returns a transcript MOST RECENT LAST. Intent — what the spawned session
-// understood the brief to be — lives in its FIRST turns, so a small `limit` returns
-// precisely the wrong end. Observed live on the first real chip: `limit: 14` against a
-// 52-message session returned two lines, both the bare `(called Bash)` that tool calls
-// render as, and no intent signal whatsoever; `limit: 45` was needed to reach the opening
-// turn. The instruction shipped in #134 said to use a small limit, which is backwards.
-//
-// This is the one defect class the other assertions in this file structurally cannot
-// catch: addressing, boundedness and the unattended skip are claims about SHAPE, and a
-// shape check cannot notice that a step is simply wrong about how a tool behaves.
-test('implement-issue: intent is read from the EARLIEST turns, not the tail', async () => {
-  const md = await read('skills/implement-issue/SKILL.md')
-  const step6 = md.slice(md.indexOf('## Step 6'), md.indexOf('## Step 7'))
-  assert.ok(step6.length > 0, 'Step 6 section is present')
-
-  // Ban the wrong CLAIM, not the words: the body must still be free to warn that a small
-  // limit lands on the tail. What must never return is the instruction that a small limit
-  // is how you reach the opening moves.
-  assert.doesNotMatch(step6, /small `limit`[^.]{0,80}opening moves/,
-    'a small limit returns the TAIL - it cannot be the route to the opening moves')
-  // The ordering is the fact that makes the correction load-bearing: any rewrite that
-  // still states it cannot coherently re-derive the original mistake.
-  assert.match(step6, /most recent last/i,
-    'Step 6 must state that list_events returns the transcript most recent last')
-  assert.match(step6, /before_uuid/,
-    'Step 6 must name the paging mechanism that actually reaches the start')
-  assert.match(step6, /earliest turns|opening turns|first turns/i,
-    'Step 6 must say intent lives in the session\'s first turns')
-  // Tool calls render as a bare "(called Bash)" line, so a transcript window can look
-  // populated while carrying no intent at all. The body has to warn about that.
-  assert.match(step6, /called Bash|assistant prose|tool-call lines/i,
-    'Step 6 must warn that tool-call lines carry no intent signal')
-})
-
-// The pre-plugin copy under ~/.claude/skills/ claimed the bare `/implement-issue` and
-// silently out-triggered the plugin (CLAUDE.md, "This plugin is canonical"). Retiring it
-// is a manual step no test can see, so what IS testable is that its one genuinely better
-// asset — the trigger surface in its `description` — came across before it was deleted.
-// These three phrasings are the ones the plugin's own description never had (#135):
-// casual delegation wording, the /issue companion framing, and the explicit negative list.
-//
-// The description is ALSO deliberately capped: it is a matcher, not a feature list. The
-// watch phase (#134) is machinery the skill runs AFTER it triggers, never a reason to
-// trigger, so naming it here would only dilute the match against unrelated prompts.
-// Two rules in Step 7 that a session will otherwise talk itself out of.
+// Two rules in the outcome step that a session will otherwise talk itself out of.
 //
 // (1) THE PUSH IS UNCONDITIONAL. The original wording ("the one event worth interrupting
 //     for") reads as a judgement call, and on the first live run this session used it to
 //     skip the push because the user happened to be watching. The user's call is that the
-//     push always fires on a terminal outcome: a missed push on a spawn-and-leave run is
-//     silent, while a redundant push to a present user is merely noise. So the body must
-//     say so in a way that leaves no room for the "they're clearly here" exception.
-// (2) THE OUTCOME OUTLIVES THE WATCH. The watch dies with the session, but GitHub does
-//     not: the chip's PR closes the originating issue, so the outcome is recoverable on
-//     demand forever after. Step 7 must name that command, or a dead watch reads as "you
-//     get nothing" when it actually means "you get it whenever you next look".
-test('implement-issue: Step 7 pushes unconditionally and names the post-hoc recovery path', async () => {
+//     push always fires on a terminal outcome: a missed push on a launch-and-leave run is
+//     silent, while a redundant push to a present user is merely noise.
+// (2) THE OUTCOME OUTLIVES THE SESSION. The child's PR closes the originating issue, so
+//     the outcome is recoverable on demand forever after. The step must name that command,
+//     or a session that ended early reads as "you get nothing" when it actually means
+//     "you get it whenever you next look".
+test('implement-issue: the outcome step pushes unconditionally and names the post-hoc recovery path', async () => {
   const md = await read('skills/implement-issue/SKILL.md')
-  const step7 = md.slice(md.indexOf('## Step 7'), md.indexOf('## What the watch'))
-  assert.ok(step7.length > 0, 'Step 7 section is present')
+  const step = md.slice(md.indexOf('## Step 6'), md.indexOf('## What the child'))
+  assert.ok(step.length > 0, 'the outcome step is present')
 
-  assert.match(step7, /PushNotification/, 'Step 7 still sends a PushNotification')
-  assert.match(step7, /always|unconditional|even (if|when)|regardless/i,
+  assert.match(step, /PushNotification/, 'the outcome step still sends a PushNotification')
+  assert.match(step, /always|unconditional|even (if|when)|regardless/i,
     'the push must be stated as unconditional - "worth interrupting for" invites a skip')
-  // The specific loophole that was actually used, closed by name.
-  assert.match(step7, /present|watching|attended|in the conversation/i,
-    'Step 7 must close the "the user is clearly here" exception explicitly')
+  assert.match(step, /present|watching|attended|in the conversation/i,
+    'the step must close the "the user is clearly here" exception explicitly')
 
-  assert.match(step7, /closedByPullRequestsReferences/,
-    'Step 7 must name the command that recovers the outcome after the watch has died')
+  assert.match(step, /closedByPullRequestsReferences/,
+    'the step must name the command that recovers the outcome after the session has died')
 })
 
 test('implement-issue: the description keeps the recovered casual + /issue-companion triggers', async () => {
