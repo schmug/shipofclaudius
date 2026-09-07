@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "{{SLUG}}",
+  "main": "src/index.js",
+  "compatibility_date": "{{DATE}}",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "{{SLUG}}.{{PROD_DOMAIN}}", "custom_domain": true }]
+}
