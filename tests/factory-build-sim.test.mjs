@@ -214,6 +214,7 @@ test('every wrangler deploy in the build prompt carries --config wrangler.previe
   assert.ok(deploys.length >= 2, 'a dry-run gate and the real deploy are both present')
   for (const d of deploys) assert.ok(/--config wrangler\.preview\.a\.jsonc/.test(d), `deploy carries the preview config: ${d}`)
   assert.ok(/wrangler\.preview\.template\.jsonc/.test(b.prompt) && /\{\{KEY\}\}/.test(b.prompt), 'generated from the template by replacing {{KEY}}')
+  assert.ok(b.prompt.includes('sed "s/{{KEY}}/a/g" wrangler.preview.template.jsonc > wrangler.preview.a.jsonc'), 'generated with the exact sed the intake skill byte-compares against (a hand-edited copy is marked TAMPERED)')
   assert.ok(b.prompt.includes('factory-demo-a') && b.prompt.includes('demo-a.preview.example.test'), 'names the Worker and the hostname')
 })
 
@@ -228,8 +229,9 @@ test('the build prompt never carries the service-token values and names the vari
 test('the build prompt forbids editing the factory scripts and config the intake skill runs in-session', async () => {
   const { calls } = await runScript({ args: baseArgs() })
   const b = byPrefix(calls, 'build:')[0]
-  assert.ok(/Do NOT edit scripts\/, \.github\/, package\.json, package-lock\.json, npm-shrinkwrap\.json, \.npmrc, wrangler\.jsonc, wrangler\.json, wrangler\.toml, or wrangler\.preview\.template\.jsonc/.test(b.prompt), 'names the files the intake session runs while holding the Access token')
-  assert.ok(/npm-shrinkwrap\.json, \.npmrc, wrangler\.jsonc, wrangler\.json, wrangler\.toml/.test(b.prompt), 'including the files that shadow the guarded ones (npm-shrinkwrap.json, .npmrc, wrangler.json, wrangler.toml)')
+  assert.ok(/Do NOT edit scripts\/, \.github\/, package\.json, package-lock\.json, npm-shrinkwrap\.json, \.npmrc, \.env\* and \.dev\.vars\* files, \.gitignore, wrangler\.jsonc, wrangler\.json, wrangler\.toml, or wrangler\.preview\.template\.jsonc/.test(b.prompt), 'names the files the intake session runs while holding the Access token')
+  assert.ok(/npm-shrinkwrap\.json, \.npmrc, .*wrangler\.jsonc, wrangler\.json, wrangler\.toml/.test(b.prompt), 'including the files that shadow the guarded ones (npm-shrinkwrap.json, .npmrc, wrangler.json, wrangler.toml)')
+  assert.ok(/\.env\* and \.dev\.vars\* files, \.gitignore/.test(b.prompt), 'and the env files + .gitignore (an actor could otherwise un-ignore or plant a secrets file the intake session would load)')
   assert.ok(/refuses to score or ship/.test(b.prompt), 'and says the intake skill rejects a candidate that touched them')
 })
 
