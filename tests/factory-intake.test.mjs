@@ -60,6 +60,18 @@ test('scaffold: smoke.mjs and critic.mjs read the service token from process.env
   }
 })
 
+// B-2 (round 4): a header set on the browser context goes out with every request the page makes,
+// to any host. Routing attaches the token only to same-origin requests and aborts the rest.
+test('scaffold: smoke.mjs sends the service token only to the candidate origin and caps page-controlled text', async () => {
+  const src = await read(S + 'scripts/smoke.mjs')
+  assert.ok(!src.includes('extraHTTPHeaders'), 'no context-wide header')
+  assert.ok(src.includes('page.route(') && src.includes('route.abort()'), 'same-origin routing with cross-origin abort')
+  assert.ok(/new URL\(req\.url\(\)\)\.origin === origin/.test(src), 'the origin comparison is exact')
+  assert.ok(src.indexOf('page.route(') < src.indexOf('page.goto('), 'the route is installed before navigation')
+  // W-5 (round 4): at most 20 console/pageerror entries of 200 chars each reach smoke.json.
+  assert.ok(/errors\.length < 20/.test(src) && /\.slice\(0, 200\)/.test(src), 'console/pageerror text is capped')
+})
+
 // B2/B3 (PR #203 re-review): the runner used to run `npm test` and `wrangler deploy --dry-run`,
 // which execute candidate files in the session with the token present and outside the tamper
 // guard's reach. Gate evidence is CI's now. THREAT_MODEL.md invariant 9.
@@ -86,6 +98,27 @@ test('scaffold: critic.mjs launches the critic with both Access variables delete
   const call = src.match(/execFileSync\(CRITIC\.cmd,[\s\S]*?\}\);/)
   assert.ok(call && /\benv\b\s*[,}]/.test(call[0]), 'the critic execFileSync options carry the scrubbed env')
   assert.ok(src.indexOf('delete env.CF_ACCESS_CLIENT_SECRET') < src.indexOf('execFileSync(CRITIC.cmd'), 'scrubbed before the critic runs')
+  // B-4b (round 4): the environment is an allowlist, not a scrubbed copy of process.env.
+  assert.ok(/for \(const k of \['PATH'/.test(src), 'the critic env is built from an allowlist')
+  assert.ok(!src.includes('{ ...process.env }'), 'no copy of the whole session environment')
+})
+
+// B-4a/c (round 4): codex treats AGENTS.md as trusted instructions, and its verdict is model output
+// over candidate-controlled evidence (it can read the disk inside its sandbox). The runner strips the
+// files, disables project docs, and writes only a capped, secret-scrubbed shape.
+test('scaffold: critic.mjs strips AGENTS.md from the evidence clone, disables project docs, and writes a capped, secret-scrubbed verdict', async () => {
+  const src = await read(S + 'scripts/critic.mjs')
+  assert.ok(/"exec", "-c", "project_doc_max_bytes=0"/.test(src), 'project_doc_max_bytes=0 right after exec')
+  assert.ok(src.includes('AGENTS.md'), 'names AGENTS.md')
+  assert.ok(/readdirSync\(work, \{ recursive: true \}\)/.test(src) && /rmSync\(/.test(src), 'walks the clone and removes each copy')
+  assert.ok(src.indexOf('rmSync(') < src.indexOf('execFileSync(CRITIC.cmd'), 'stripped before the critic runs')
+  assert.ok(/oauth_token\|refresh_token/.test(src), 'the secret-pattern scrub is present')
+  assert.ok(src.includes('verdict withheld: evidence matched a secret pattern'))
+  assert.ok(/title: str\(f\?\.title, 120\)/.test(src) && /detail: str\(f\?\.detail, 400\)/.test(src), 'title and detail are capped')
+  assert.ok(!/\bsummary\b/.test(src), 'summary is dropped (never named)')
+  const scrubAt = src.indexOf('SECRET_PATTERN.test(')
+  const writeAt = src.indexOf('"critic.json"')
+  assert.ok(scrubAt > -1 && writeAt > -1 && scrubAt < writeAt, 'the scrub precedes the critic.json write')
 })
 
 test('scaffold: package.json pins no devDependency versions itself (the skill installs latest at scaffold time) and the test script is node --test', async () => {
@@ -172,7 +205,9 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
     const line = md.slice(g.index, md.indexOf('\n', g.index))
     // B5: npm-shrinkwrap.json overrides package-lock.json for npm ci; .npmrc sets npm's script shell
     // and registry; wrangler.json / wrangler.toml can be picked over wrangler.jsonc by config discovery.
-    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json npm-shrinkwrap\.json \.npmrc wrangler\.jsonc wrangler\.json wrangler\.toml wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
+    // B-3 (round 4): wrangler loads `.env` from the project directory, so a committed `.env*` /
+    // `.dev.vars*` (or a `.gitignore` edit that lets one in) redirects every wrangler command.
+    assert.ok(/ HEAD -- scripts\/ package\.json package-lock\.json npm-shrinkwrap\.json \.npmrc '\.env\*' '\.dev\.vars\*' \.gitignore wrangler\.jsonc wrangler\.json wrangler\.toml wrangler\.preview\.template\.jsonc \.github\/ \|\| echo TAMPERED/.test(line), `guard names the full path set: ${line}`)
   }
   assert.ok(md.includes('unverified: candidate modified factory scripts'), 'a tampered candidate is presented as unverified')
   // B1: Phase 7 scores in a clone the session made itself. The build agent's directory holds
@@ -192,6 +227,21 @@ test('factory-intake: runs the SCAFFOLD_SHA tamper guard before any candidate-au
   assert.ok(guards[0].index < md.indexOf('node scripts/smoke.mjs'), 'the first guard precedes the smoke run')
   const deploy = md.lastIndexOf('npm ci && npx wrangler deploy --config wrangler.jsonc')
   assert.ok(deploy > 0 && guards[guards.length - 1].index < deploy, 'the last guard precedes the production deploy, which names its config explicitly')
+  // B-1 (round 4): APFS folds case and some look-alike letters, so a candidate path can overwrite a
+  // guarded file on disk while the tree diff stays clean. Three checkout checks follow each guard.
+  const CHECKOUT_CHECKS = [
+    "git ls-tree -r --name-only -z HEAD | LC_ALL=C grep -qz '[^ -~]' && echo TAMPERED",
+    "git ls-tree -r --name-only HEAD | tr 'A-Z' 'a-z' | sort | uniq -d | grep -q . && echo TAMPERED",
+    'git status --porcelain | grep -q . && echo TAMPERED',
+  ]
+  for (const c of CHECKOUT_CHECKS) {
+    const n = md.split(c).length - 1
+    assert.ok(n >= 2, `checkout check appears at least twice (found ${n}): ${c}`)
+    const i7 = p7.indexOf(c)
+    assert.ok(i7 > p7guard && i7 < inst, `Phase 7 runs it between the tree diff and the instance check: ${c}`)
+    const i9 = md.indexOf(c, guards[guards.length - 1].index)
+    assert.ok(i9 > -1 && i9 < deploy, `Phase 9 runs it before the production deploy: ${c}`)
+  }
 })
 
 // W2 + B4: the evidence commit is scrubbed for the token value first (naming the variable, never
@@ -207,6 +257,15 @@ test('factory-intake: scrubs evidence for the service token before committing, k
   const addLine = p7.slice(add, p7.indexOf('\n', add))
   assert.ok(addLine.includes('smoke.json') && addLine.includes('critic.json') && addLine.includes('screenshot-mobile.png'), `the three evidence files: ${addLine}`)
   assert.ok(!addLine.includes('critic.md') && /`critic\.md`[^\n]*stay(s)? local/.test(p7), 'the critic transcript is not committed')
+  // W-4 (round 4): both halves of the token are scrubbed, each on its own line, before git add.
+  const scrubId = p7.indexOf('grep -rqF -- "$CF_ACCESS_CLIENT_ID" factory-reports/<key>/')
+  assert.ok(scrubId > -1 && scrubId < add, 'the client-id scrub precedes git add')
+  // W-2 (round 4): the candidate may have pre-committed evidence or a symlink at factory-reports/<key>;
+  // it is removed after the guard passes and before npm ci writes anything there.
+  assert.ok(p7.includes('rm -rf "factory-reports/<key>"\nnpm ci\nnode scripts/smoke.mjs'), 'rm -rf, then npm ci, then smoke')
+  assert.ok(p7.indexOf('rm -rf "factory-reports/<key>"') > p7.indexOf('git diff --quiet "$SCAFFOLD_SHA"'), 'the rm comes after the guard')
+  // W-5 (round 4): smoke.json's free text is page-controlled; the session reads only the ok booleans.
+  assert.ok(/only the `ok` booleans from `smoke\.json`/.test(p7), 'the session reads only the ok booleans')
   const p9 = md.slice(md.indexOf('## Phase 9'), md.indexOf('## Phase 10'))
   const step6 = p9.slice(p9.indexOf('6. Cleanup'), p9.indexOf('7. Report'))
   assert.ok(step6.includes('cd "${TMPDIR:-/tmp}/factory/<slug>/release"') && step6.includes('npx wrangler delete --name factory-<slug>-<key> --force'), 'step 6 deletes from the release clone')

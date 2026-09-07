@@ -7,15 +7,18 @@
  *
  * Executes nothing the candidate wrote (THREAT_MODEL.md invariant 9): the only child processes
  * are git, gh, and the critic command. Gate evidence is CI's, read with `gh run list --commit`.
- * The critic runs with an environment copy that carries neither Access variable.
+ * The critic runs with an allowlisted environment (no Access variable, no session credential),
+ * reads no candidate instruction file (every AGENTS.md is removed from the evidence clone and
+ * project docs are disabled), and its verdict is written only as a capped shape that matched no
+ * secret pattern.
  *
  * Usage: node scripts/critic.mjs --url https://<preview-host> --key <key>
- * Exits 2 when no JSON verdict could be extracted.
+ * Exits 2 when no JSON verdict could be extracted, or when the verdict text matched a secret pattern.
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const arg = (name, dflt) => { const i = process.argv.indexOf(name); return i > -1 ? process.argv[i + 1] : dflt; };
 const BASE = arg("--url");
@@ -25,21 +28,30 @@ if (!BASE) { console.error("usage: critic.mjs --url <https://host> --key <key>")
 // ─── CONFIG ──────────────────────────────────────────────────────────────
 const CAPTURE_PATHS = [["/", "index.html.txt"], ["/health", "health.txt"]];
 const COPY_DIRS = [`factory-reports/${KEY}`];          // smoke already ran; its artifacts are copied below
-const CRITIC = { cmd: "codex", args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only"] };
+// `-c project_doc_max_bytes=0`: codex loads no AGENTS.md or other project doc from the clone (codex
+// 0.153.4 accepts `-c key=value`). The files themselves are also removed after the clone, below.
+const CRITIC = { cmd: "codex", args: ["exec", "-c", "project_doc_max_bytes=0", "--skip-git-repo-check", "--sandbox", "read-only"] };
 const ACCESS_HEADERS = {};
 if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
   ACCESS_HEADERS["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
   ACCESS_HEADERS["CF-Access-Client-Secret"] = process.env.CF_ACCESS_CLIENT_SECRET;
 }
-// The critic never sees the token: its process gets a copy of the environment with both halves removed.
-const env = { ...process.env };
-delete env.CF_ACCESS_CLIENT_ID;
+// The critic's environment is an allowlist, not a scrubbed copy: nothing from the session (the Access
+// token, gh or cloud credentials, proxies) reaches codex unless it is named here.
+const env = {};
+for (const k of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'TERM', 'CODEX_HOME', 'SHELL', 'USER']) if (process.env[k] !== undefined) env[k] = process.env[k];
+delete env.CF_ACCESS_CLIENT_ID;      // no-ops under the allowlist; kept so the invariant reads the same
 delete env.CF_ACCESS_CLIENT_SECRET;
 // ─────────────────────────────────────────────────────────────────────────
 
 const repoRoot = process.cwd();
 const work = join(tmpdir(), `critic-${KEY}-${Date.now()}`);
 execFileSync("git", ["clone", "--depth", "1", "--quiet", `file://${repoRoot}`, work]);
+// codex treats AGENTS.md as trusted instructions, and the candidate can commit one anywhere in its
+// tree. Remove every copy (any case) from the evidence clone before the critic reads it.
+for (const rel of readdirSync(work, { recursive: true })) {
+  if (basename(rel).toLowerCase() === "agents.md") rmSync(join(work, rel), { force: true, recursive: true });
+}
 
 function tryRun(cmd, args, timeout = 300_000) {
   try {
@@ -100,14 +112,33 @@ for (let i = blocks.length - 1; i >= 0 && !verdict; i--) {
 
 const outDir = `factory-reports/${KEY}`;
 mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, "critic.md"), out);
-if (verdict) {
-  verdict.candidate = KEY;
-  verdict.revision = sha;
-  verdict.capturedAt = new Date().toISOString();
-  writeFileSync(join(outDir, "critic.json"), JSON.stringify(verdict, null, 2));
-  console.log(JSON.stringify(verdict, null, 2));
-} else {
+writeFileSync(join(outDir, "critic.md"), out);   // the transcript stays local (SKILL.md Phase 7); never committed
+if (!verdict) {
   console.error(`[critic] FAILED to extract a JSON verdict — see ${outDir}/critic.md`);
   process.exit(2);
 }
+
+// The verdict is model output over candidate-controlled evidence, and codex can read the disk inside
+// its sandbox. Only the fields the skill reads survive, every string is capped, and the JSON text is
+// refused outright if it matches a secret pattern — those two steps, plus the fact that only the
+// capped shape is ever committed, are what keep a leak out of the repository.
+const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+const scores = verdict.scores && typeof verdict.scores === "object" ? verdict.scores : {};
+const shaped = {
+  candidate: KEY,
+  revision: sha,
+  capturedAt: new Date().toISOString(),
+  scores: Object.fromEntries(Object.entries(scores).filter(([, v]) => typeof v === "number")),
+  verdict: str(verdict.verdict, 40),
+  requiredFixes: (Array.isArray(verdict.requiredFixes) ? verdict.requiredFixes : []).slice(0, 20).map((f) => ({
+    severity: str(f?.severity, 40), category: str(f?.category, 40), title: str(f?.title, 120), detail: str(f?.detail, 400),
+  })),
+};
+const SECRET_PATTERN = /-----BEGIN|oauth_token|refresh_token|ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|github_pat_|AKIA[0-9A-Z]{16}|CF_ACCESS_CLIENT|Bearer /;
+const text = JSON.stringify(shaped, null, 2);
+if (SECRET_PATTERN.test(text)) {
+  console.error("[critic] verdict withheld: evidence matched a secret pattern");
+  process.exit(2);
+}
+writeFileSync(join(outDir, "critic.json"), text);
+console.log(text);
