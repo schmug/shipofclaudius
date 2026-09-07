@@ -228,7 +228,8 @@ test('the build prompt never carries the service-token values and names the vari
 test('the build prompt forbids editing the factory scripts and config the intake skill runs in-session', async () => {
   const { calls } = await runScript({ args: baseArgs() })
   const b = byPrefix(calls, 'build:')[0]
-  assert.ok(/Do NOT edit scripts\/, \.github\/, package\.json, package-lock\.json, wrangler\.jsonc/.test(b.prompt), 'names the files the intake session runs while holding the Access token')
+  assert.ok(/Do NOT edit scripts\/, \.github\/, package\.json, package-lock\.json, npm-shrinkwrap\.json, \.npmrc, wrangler\.jsonc, wrangler\.json, wrangler\.toml, or wrangler\.preview\.template\.jsonc/.test(b.prompt), 'names the files the intake session runs while holding the Access token')
+  assert.ok(/npm-shrinkwrap\.json, \.npmrc, wrangler\.jsonc, wrangler\.json, wrangler\.toml/.test(b.prompt), 'including the files that shadow the guarded ones (npm-shrinkwrap.json, .npmrc, wrangler.json, wrangler.toml)')
   assert.ok(/refuses to score or ship/.test(b.prompt), 'and says the intake skill rejects a candidate that touched them')
 })
 
