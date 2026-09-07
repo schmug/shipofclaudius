@@ -1,62 +1,156 @@
 ---
 name: implement-issue
-description: Hand an already-filed GitHub issue off to a background agent that implements it: creates a chip (via the spawn_task tool) so a fresh Claude session/worktree picks up the issue and writes the code. Use when the user asks to implement, build, fix, or start coding a specific GitHub issue or ticket by number or URL, hand an issue off to an agent, delegate a ticket to an agent, kick off or spin up an agent to work on a filed issue, or get a just-filed issue picked up for implementation — including casual phrasings like "the ticket's written, get an agent on it". Accepts an optional issue number or URL; with no argument it targets the most recently filed issue. Companion to the /issue skill: /issue files the work, this skill implements it. Do not trigger for filing or creating a new issue (use /issue), for triaging/listing/closing/commenting on issues, for asking an issue's status, for reviewing a PR, or for spinning up an agent for non-issue work such as research — this skill always needs an existing issue to implement. Not a Workflow wrapper; this is a session-long process skill.
+description: Hand an already-filed GitHub issue off to a background agent that implements it: launches a capped `claude -p` child in its own git worktree to pick up the issue and write the code. Use when the user asks to implement, build, fix, or start coding a specific GitHub issue or ticket by number or URL, hand an issue off to an agent, delegate a ticket to an agent, kick off or spin up an agent to work on a filed issue, or get a just-filed issue picked up for implementation — including casual phrasings like "the ticket's written, get an agent on it". Accepts an optional issue number or URL; with no argument it targets the most recently filed issue. Companion to the /issue skill: /issue files the work, this skill implements it. Do not trigger for filing or creating a new issue (use /issue), for triaging/listing/closing/commenting on issues, for asking an issue's status, for reviewing a PR, or for spinning up an agent for non-issue work such as research — this skill always needs an existing issue to implement. Not a Workflow wrapper; this is a session-long process skill.
 argument-hint: [issue-number-or-url]
 workflow: none
 ---
 
 # implement-issue
 
-Hand a GitHub issue off to a fresh agent for implementation by creating a **chip** with the `mcp__ccd_session__spawn_task` tool. The chip appears in the user's UI; one click spins it into its own session and worktree, or they dismiss it. Running this skill IS the opt-in — create the chip directly, don't ask "should I?" first. (You still surface what you created afterward.)
+Hand a GitHub issue off to a fresh agent by launching a **`claude -p` child process** in
+its own git worktree, under a second account, with the model, dollar ceiling, turn
+ceiling, tool set and permission allowlist all set explicitly at the command line.
 
-Why a chip and not just doing it here: implementation is usually out of scope for the current conversation, and a fresh session with its own worktree keeps the work isolated and lets the user run it in parallel. The spawned session has **no memory of this conversation**, so the chip prompt must stand completely on its own.
+Running this skill IS the opt-in — launch the child directly, don't ask "should I?"
+first. You still surface what you launched afterward.
 
-Steps 4–7 then keep a light watch on the chip: one handshake on **intent**, one report on **outcome**, and nothing in between. That watch deliberately re-couples two sessions the rest of this skill works to keep isolated, so it is scoped as narrowly as possible — see "What the watch may and may not do".
+## What changed, and what it costs
+
+This skill used to create a **chip** with `mcp__ccd_session__spawn_task`: a card in the
+user's UI that they clicked to spin up a session. That mechanism is superseded. The chip
+tool accepts only `title`, `tldr`, `prompt` and `cwd` — there is no way to choose a model,
+so a chip inherited whatever the app was configured for and a delegated implementation
+could silently run on the most expensive tier.
+
+Be honest about the trade, because it is not free:
+
+- **The human click is gone.** A chip was an offer; the child starts immediately, and it
+  starts with write tools and the user's own `gh` credentials. Invoking the skill is now
+  the whole of the approval.
+- **What you gain** is every knob the chip lacked: `--model`, `--max-budget-usd`,
+  `--max-turns`, `--tools`, `--allowedTools`, `--permission-mode`, and a machine-readable
+  result. A child is also roughly an order of magnitude cheaper in context than the
+  in-process `Agent` tool, which inherits this session's entire tool roster.
+
+If the user wants the click back for a particular hand-off, tell them what a chip cannot
+set and let them choose — do not quietly re-add an approval step they did not ask for.
 
 ## Step 1 — Resolve the target issue
 
 Pick the issue in this priority order:
 
-1. **Explicit argument.** If the user passed an issue number (`42`) or a URL (`https://github.com/owner/repo/issues/42`), use that. A bare number resolves against the current repo.
-2. **Most recently filed this session.** If no argument but an issue was filed earlier in this conversation, use that issue.
+1. **Explicit argument.** If the user passed an issue number (`42`) or a URL
+   (`https://github.com/owner/repo/issues/42`), use that. A bare number resolves against
+   the current repo.
+2. **Most recently filed this session.** If no argument but an issue was filed earlier in
+   this conversation, use that issue.
 3. **Latest open issue you authored.** Otherwise query the repo:
    ```bash
    gh issue list --author @me --state open --limit 10 --json number,title,url,createdAt
    ```
-   Use the newest by `createdAt`. If the list is empty or the newest is ambiguous (several filed near the same time), briefly tell the user what you found and ask which one rather than guessing.
+   Use the newest by `createdAt`. If the list is empty or the newest is ambiguous (several
+   filed near the same time), briefly tell the user what you found and ask which one
+   rather than guessing.
 
-If you're not in a git repo, `gh` isn't installed, or `gh auth status` fails, stop and tell the user — don't fabricate a chip against an unknown issue.
+If you're not in a git repo, `gh` isn't installed, or `gh auth status` fails, stop and
+tell the user — don't launch a child against an unknown issue.
 
 ## Step 2 — Fetch the full issue
 
-You need the real body to build a self-contained handoff. Don't rely on memory of what the issue said:
+You need the real body to build a self-contained brief. Don't rely on memory of what the
+issue said:
 
 ```bash
 gh issue view <number-or-url> --json number,title,body,url,state,labels
 ```
 
-If `state` is `CLOSED`, note it to the user and confirm they still want a chip before proceeding — a closed issue is usually a sign of a stale or wrong target.
+If `state` is `CLOSED`, note it to the user and confirm they still want the work before
+proceeding — a closed issue is usually a sign of a stale or wrong target.
 
-## Step 3 — Build the chip
+Derive `owner/repo` from the `url` field, which always carries it (`repository` is not a
+real `gh issue view --json` field — that mistake is what broke this step originally):
 
-Call `mcp__ccd_session__spawn_task` with:
+```bash
+gh issue view <number-or-url> --json url --jq '.url | capture("github.com/(?<owner>[^/]+)/(?<repo>[^/]+)/") | .owner+"/"+.repo'
+```
 
-- **`title`** — an imperative action phrase under 60 chars, derived from the issue title. Start with a verb. E.g. issue "Drawer doesn't persist scroll position" → `"Fix drawer scroll-position persistence"`. This string also becomes the **spawned session's title**, which is what Step 6 joins on — so make it distinctive, not a phrase you'd plausibly use for a different chip today.
-- **`tldr`** — 1–2 plain-English sentences on what the spawned session will do and why. No file paths or code; this is the hover tooltip.
-- **`prompt`** — the self-contained handoff (see below).
-- **`cwd`** — set this to the issue's repo root whenever the chip shouldn't branch off the current working directory as-is. `repository` is not a real `gh issue view --json` field (that mistake is what broke this step originally); derive owner/repo from the `url` field instead, which always carries it:
-  ```bash
-  gh issue view <number-or-url> --json url --jq '.url | capture("github.com/(?<owner>[^/]+)/(?<repo>[^/]+)/") | .owner+"/"+.repo'
-  ```
-  If that differs from the current repo, set `cwd` to that repo's root. If it matches, still check the **worktree** case: the current directory may be a worktree of the target repo rather than its root, and leaving `cwd` unset would branch the chip off the current feature branch instead of the default branch. Resolve the real root with:
-  ```bash
-  git rev-parse --path-format=absolute --git-common-dir
-  ```
-  and strip the trailing `/.git`; if that differs from the current directory, set `cwd` to it. Only leave `cwd` unset when the repo matches and the current directory already is that root.
+## Step 3 — Provision an isolated worktree
 
-### The prompt must stand alone
+The child gets write tools and an inherited `gh` token. Never point it at the working tree
+you are sitting in: it would race your edits on a shared branch. Give it its own worktree,
+cut from the **default branch**, not from whatever branch you happen to be on.
 
-Issue bodies written as self-contained Claude Code prompts (task upfront, `path:line` pointers, constraints, acceptance criteria, out-of-scope) hand off best — embed the body verbatim rather than paraphrasing it. Use this shape:
+Resolve the repo root first — the current directory may itself be a worktree, in which
+case its `.git` is a file, not a directory:
+
+```bash
+REPO=$(git rev-parse --path-format=absolute --git-common-dir); REPO=${REPO%/.git}
+SLUG=<owner/repo>; N=<issue-number>
+BASE=$(gh repo view "$SLUG" --json defaultBranchRef --jq .defaultBranchRef.name)
+WT="$REPO/../$(basename "$REPO")-issue-$N"
+git -C "$REPO" fetch --quiet origin "$BASE"
+git -C "$REPO" worktree add -b "issue-$N" "$WT" "origin/$BASE"
+```
+
+If the branch or worktree already exists, the issue is probably already being worked.
+Say so and stop rather than clobbering it.
+
+## Step 4 — Launch the child
+
+Run this through Bash with `run_in_background: true`. The harness re-invokes you when the
+process exits, so its exit **is** the completion signal — there is nothing to poll and
+nothing to join.
+
+```bash
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN \
+    CLAUDE_CONFIG_DIR="$HOME/.claude-sub2" \
+    claude -p "$BRIEF" \
+      --model sonnet \
+      --max-turns 120 \
+      --max-budget-usd 8 \
+      --permission-mode acceptEdits \
+      --tools Read,Write,Edit,Glob,Grep,Bash \
+      --allowedTools "Read" "Write" "Edit" "Glob" "Grep" \
+        "Bash(git:*)" "Bash(gh:*)" "Bash(npm:*)" "Bash(npx:*)" "Bash(node:*)" \
+        "Bash(python3:*)" "Bash(pytest:*)" "Bash(make:*)" "Bash(cargo:*)" \
+        "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(grep:*)" \
+        "Bash(rg:*)" "Bash(find:*)" "Bash(sed:*)" "Bash(mkdir:*)" \
+      --append-system-prompt-file "$HOME/.claude/CLAUDE.md" \
+      --strict-mcp-config \
+      --output-format json < /dev/null > "$WT/../implement-$N.json" 2>&1
+```
+
+Run it with the worktree as the working directory. Six of those flags are load-bearing,
+and each was measured rather than assumed:
+
+- **The three `-u` unsets** are what keep the child off *this* account's credentials. The
+  separate `CLAUDE_CONFIG_DIR` is logged into a second account; without the unsets the
+  inherited environment wins and the child bills the primary one.
+- **`--permission-mode acceptEdits` with a named `--allowedTools` list.** `dontAsk` does
+  not ask — it *denies*, and a child under it could not even run `gh auth status`.
+  `bypassPermissions` is the opposite extreme, is refused outright by this session's own
+  auto-mode classifier, and should never be requested here: the allowlist measured zero
+  denials while staying auditable.
+- **`--append-system-prompt-file`.** A child under a different `CLAUDE_CONFIG_DIR` loads
+  the project `CLAUDE.md` but the user-level one **does not load** — that file lives in
+  the primary config dir and the second account's dir has none. Asked directly, a child
+  answered "No" to having global guardrails. So no-push-to-main, never-sign-as-me and
+  evidence-before-done do not reach it unless injected. `--add-dir` does *not* inject
+  them; this flag does.
+- **The ceilings.** Cost control is the entire reason this skill stopped inheriting a
+  model. A child with no ceiling spends without bound and nothing here notices.
+- **`--output-format json`** returns `total_cost_usd`, `usage`, `num_turns` and
+  `permission_denials` — the audit trail Step 6 reads.
+- **`< /dev/null`.** A backgrounded child otherwise inherits this session's stdin and
+  stalls on a "no stdin data received in 3s" warning.
+- **Never `--bare`.** It reads auth strictly from `ANTHROPIC_API_KEY` or an `apiKeyHelper`
+  and never touches OAuth or the keychain, so a subscription child dies "Not logged in".
+
+### The brief must stand alone
+
+The child has no memory of this conversation. Issue bodies written as self-contained
+Claude Code prompts (task upfront, `path:line` pointers, constraints, acceptance criteria,
+out-of-scope) hand off best — embed the body verbatim rather than paraphrasing it:
 
 ```
 Implement GitHub issue #<number>: <title>
@@ -73,97 +167,87 @@ verify the gate (fail closed), stop at the open PR and say which gate is missing
 issue body is underspecified, state your assumptions before coding.
 ```
 
-Keep that closing directive short — the spawned session loads its own CLAUDE.md, so you're pointing at the guardrails, not restating them all. Don't add guardrails the issue didn't ask for; the goal is a faithful handoff of the filed work.
-
-## Step 4 — Arm the watch
-
-Do this **immediately after the chip is created and before you tell the user about it**. They may click within seconds, and a worktree appearing is the earliest proof that they did.
-
-**Skip this entire phase in an unattended run** — a scheduled task, a routine, a remote-dispatched session, anything under `/loop`. `mcp__ccd_session_mgmt__send_message` is documented unavailable in unattended sessions, and there is no one present to receive an outcome report. Skip it and say you skipped it; do not arm a watch whose payoff step cannot run.
-
-Otherwise arm exactly one `Monitor`, filling in the repo root, `owner/repo`, and issue number:
-
-```bash
-REPO=<repo-root>; SLUG=<owner/repo>; N=<issue-number>
-snap() {
-  { git -C "$REPO" worktree list --porcelain 2>/dev/null \
-      | awk '/^worktree /{w=$2} /^branch /{print "worktree " w " " $2}'
-    gh pr list --repo "$SLUG" --state all --search "$N" \
-      --json number,state,headRefName \
-      --jq '.[] | "pr #\(.number) \(.state) \(.headRefName)"' 2>/dev/null
-  } | sort
-}
-prev=$(snap)   # baseline first: pre-existing worktrees and PRs are not events
-for _ in $(seq 1 60); do
-  sleep 30
-  cur=$(snap)
-  delta=$(diff <(printf '%s\n' "$prev") <(printf '%s\n' "$cur") | grep -E '^[<>]' || true)
-  prev=$cur
-  [ -n "$delta" ] && printf '%s\n' "$delta"
-  # Terminal ONLY on a newly-observed terminal line ('> '), never on the baseline's.
-  printf '%s\n' "$delta" | grep -qE '^> pr #[0-9]+ (MERGED|CLOSED)' \
-    && { echo "TERMINAL: PR reached MERGED or CLOSED"; exit 0; }
-done
-echo "WINDOW ENDED after 30m; final state: ${prev:-<nothing observed>}"
-```
-
-Pass `persistent: false` with `timeout_ms` a little above the loop's own 30-minute window (`1900000`), and a specific `description` — the description appears in every notification, so `"chip #<n>: worktree/branch/PR"` beats `"watching"`.
-
-Three properties of that script are load-bearing:
-
-- **Repo signals, not session signals.** `Monitor` runs shell commands, so it cannot call the session tools at all. The repo-side signals need no session linkage and do not care *whether or when* the chip is clicked.
-- **Silence is never the answer.** The loop emits on the failure directions too — `diff` reports a worktree disappearing (`<`) as well as appearing (`>`), a PR reaching `CLOSED` is terminal, and the window always ends with an explicit line. You never have to interpret a quiet monitor.
-- **`persistent: false`.** A session-length watch outlives the work it was watching and sits armed over a chip the user moved on from.
-- **Terminal fires on the delta, not the snapshot.** `gh pr list --search "$N"` is a *full-text* search: searching `131` in a real repo also returns a long-merged PR #96 that merely mentions the number. Grepping the whole snapshot for `MERGED` therefore ends the watch on its first tick, before the chip is ever clicked. Only a `> ` line — a state newly observed since the baseline — is terminal. Treat every PR the monitor names as a candidate; Step 7 confirms which one is actually the chip's by matching the branch reported in `list_sessions`.
+Keep that closing directive short — the child loads the repo's own CLAUDE.md and the
+injected global one, so you are pointing at guardrails, not restating them. Don't add
+guardrails the issue didn't ask for; the goal is a faithful hand-off of the filed work.
 
 ## Step 5 — Confirm
 
-Tell the user in one or two lines: which issue the chip targets (number + title + URL), that they can click it to spin up the agent or dismiss it, and — one clause, not a paragraph — that you'll flag the intent and the resulting PR if they start it inside the window. If several issues were filed this session, remind them they can run the skill again with another issue number — one chip per issue.
+Tell the user in one or two lines: which issue the child is working (number + title +
+URL), the worktree and branch it owns, the model and dollar ceiling you set, and that you
+will report the outcome when the process exits. Say plainly that it is **already running**
+— there is no card to click and no way to call it back short of killing the process.
 
-Say plainly that the watch **ends when this session does**. There is no out-of-session watcher: `Monitor` is session-scoped and the session tools need you in the loop. Spawn-and-keep-working gets a watch; spawn-and-close gets nothing, and the user should know which they're getting.
+Unlike the chip it replaces, this needs no attended session: a child is an ordinary
+background process, so a scheduled or remote-dispatched run gets the same behavior and
+the same report. Nothing here is skipped when unattended.
 
-## Step 6 — On the first event: identify, then handshake
+If several issues were filed this session, remind them they can run the skill again with
+another issue number — one child per issue.
 
-The first monitor event (normally a new worktree) is your wakeup. Do not poll for it.
+## Step 6 — On exit: verify from artifacts, then report
 
-**Identify the session** with `mcp__ccd_session_mgmt__list_sessions`. Join in this order:
+The child's own prose is **not evidence**. Measured twice while building this step: a
+child reported "File created successfully" and "4. Done" for a write that never landed —
+once because the write was silently denied, once because it resolved a bare filename into
+its own scratchpad. A child will claim work it did not do. Only the repository proves
+what happened.
 
-1. Exact `title` match against the chip title from Step 3.
-2. Otherwise the newest session whose `cwd` is under the target repo and whose `lastActivityAt` is after the chip was created — normally the worktree path the monitor just reported.
+Read the JSON result for cost and denials, then verify independently:
 
-**If the join is ambiguous or empty, report that and drop the watch.** Never guess a target: the cost of guessing is messaging an unrelated session the user is actively working in. This mirrors Step 1's stance on ambiguous issues.
+```bash
+git -C "$WT" log --oneline origin/"$BASE"..HEAD
+gh pr list --repo "$SLUG" --search "$N" --state all --json number,state,headRefName
+gh pr checks <pr-number>
+```
 
-Address the session by its **`sessionId`**, and use the `ccd_session_mgmt` tools to do it. The name-addressed alternatives do not work here and should not be reached for: a locally-clicked chip is listed by its *worktree slug*, not by the chip title, so `ListAgents` cannot be joined on what you know; that listing also collides names and self-truncates past the first pages, and `notify_when_idle` inherits the same addressing. A name-addressed send does not fail loudly — it reaches the wrong session silently.
+A non-empty `permission_denials` array is the diagnosable failure mode: the child hit a
+command outside the allowlist. Widen the list deliberately for that command and re-run —
+do not switch to a blanket grant.
 
-**Read intent** with `mcp__ccd_session_mgmt__list_events`, and read it from the **start**. Intent is what the session understood the brief to be, so it lives in its earliest turns — but `list_events` returns the transcript *most recent last*, so a small `limit` hands you the tail instead. Page back with `before_uuid`, or pass a `limit` large enough to reach the opening turns. Live on the first real chip, `limit: 14` against a 52-message session returned two lines, both the bare `(called Bash)` that tool calls render as, and no intent signal at all; `45` reached the first turn. Only assistant prose carries intent — a window full of tool-call lines looks populated and tells you nothing.
+Report to the user: issue → branch → commits → PR number and state → CI verdict → what
+the child actually spent against the ceiling you set. If the JSON says `is_error` or the
+budget was exhausted, say that plainly and name what was left unfinished.
 
-**Handshake** with `mcp__ccd_session_mgmt__send_message` — one line, asking it to confirm the issue number it is working and restate the brief in a sentence. It lands as a visible user turn labelled "From \<this session\>", so the nudge is auditable by the user rather than invisible plumbing. There is no return channel; read the reply on a later wakeup via `list_events`.
+**Always send a `PushNotification` on a terminal outcome** — including when the user is
+plainly present and reading along. This is not a judgement call, and *"they're clearly
+watching, a push would just be noise"* is not an exception to it. The asymmetry is the
+reason: a missed push on a launch-and-leave run is **silent** and costs the user the
+outcome entirely; a redundant push to someone already reading costs one notification.
 
-## Step 7 — On a terminal event: report the outcome
-
-When the monitor reports a terminal PR state, or `list_sessions` shows the session's `isRunning` has gone false, report to the user: issue → session title → branch → `prNumber` and `prState`, all of which come straight off the `list_sessions` row without reading a transcript. Add the CI verdict (`gh pr checks <n>`) if a PR exists.
-
-**Always send a `PushNotification` on a terminal outcome** — including when the user is plainly present and reading along. This is not a judgement call, and *"they're clearly watching, a push would just be noise"* is not an exception to it. The asymmetry is the reason: a missed push on a spawn-and-leave run is **silent**, and costs the user the outcome entirely; a redundant push to someone already reading costs one notification. Do not push for the intermediate state changes.
-
-If the window ends with nothing observed, say exactly that: the chip was not started within the window. That is not a failure of the spawned session and should not be reported as one.
-
-**When there was no watch at all** — never armed (an unattended run), expired, or the session ended — the outcome is deferred, not lost. The chip's PR closes the originating issue, so GitHub holds the linkage indefinitely and it is recoverable whenever the user next looks:
+If this session ends before the child does, the outcome is deferred, not lost. The PR
+closes the originating issue, so GitHub holds the linkage indefinitely:
 
 ```bash
 gh issue view <n> --json state,closedByPullRequestsReferences \
   --jq '{state, prs: [.closedByPullRequestsReferences[]?.number]}'
 ```
 
-Tell the user that, rather than letting a dead watch read as "you get nothing".
+Tell the user that rather than letting a dead session read as "you get nothing".
 
-## What the watch may and may not do
+## What the child may and may not do
 
-The spawned session's isolation is a feature, not an accident. The watch spends a little of it deliberately and is capped there:
+The child's isolation is a feature. It is also the only thing standing between a bad brief
+and your working tree:
 
-- **May** message the spawned session for the Step 6 handshake, and to correct a **hard divergence**: it is working the wrong issue number, or it is pushing to `main`.
-- **May not** message it about scope, approach, style, or quality. Those go to the user, who can decide, not into the session as a mid-flight nudge. An injected user turn derails a session that was doing fine, and "drift" judged from a transcript excerpt is exactly where false positives come from.
-- **May not** ask it to do anything blocked in this session. Permission boundaries are per-session; routing blocked work through a peer launders the user's permission decision.
+- **May** implement the issue, run gates, open a PR, and merge through a mechanical gate
+  exactly as the brief states.
+- **May not** run outside its own worktree. If you find yourself pointing a child at the
+  parent's directory, stop — that is how two agents end up committing to one branch.
+- **May not** be handed work that is blocked in this session. Permission boundaries are
+  per-session; routing blocked work through a child launders the user's permission
+  decision, and the child runs on a different account where that decision was never made.
+- **May not** be given a wider allowlist than the task needs "to be safe". Widen on an
+  observed denial, never in anticipation of one.
+
+There is no mid-flight channel to the child and none should be added. `spawn_task`,
+`ListAgents`, `SendMessage` and the `ccd_session_mgmt` tools all address *sessions*; a
+child is a process, not a session, and none of them can reach it. To correct a bad brief,
+kill the process and relaunch with a better one.
 
 ## Multiple issues
 
-This skill makes **one** chip per run. If the user asks to implement several at once, create one chip per issue (each with its own self-contained prompt), and list what you created. Arm **one monitor per chip** — each watches a distinct issue number and worktree — but keep Step 6's join strict per chip; several chips created seconds apart are exactly the case where a sloppy title join attaches the wrong session.
+This skill launches **one** child per run. If the user asks to implement several at once,
+launch one per issue — each with its own worktree, its own branch, its own brief and its
+own ceiling — and list what you started. Give each a distinct worktree path; two children
+sharing a directory is the failure this whole step exists to prevent.

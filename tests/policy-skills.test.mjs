@@ -68,7 +68,7 @@ test('implement-issue: exists as a process skill', async () => {
 
 test('implement-issue: handoff prompt ends gate-conditional, keeps no-push-to-main', async () => {
   const md = await skill('implement-issue')
-  assert.ok(md.includes('spawn_task'), 'hands off via a spawn_task chip')
+  assert.match(md, /claude -p/, 'hands off by launching a capped `claude -p` child')
   assert.ok(/do not push\s+to main/.test(md), 'keeps the no-push-to-main directive')
   assert.ok(/squash-merge or enable auto-merge/.test(md), 'gated repos: agent merges once green')
   assert.ok(/fail closed/i.test(md), 'unverifiable gate fails closed')
