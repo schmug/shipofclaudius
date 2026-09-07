@@ -1,7 +1,7 @@
 # Factory intake — design spec
 
 **Date:** 2026-09-06
-**Status:** built and shipped on `main` — `4faa6a7` (the `factory-build` workflow) and `62c2c54` (the `factory-intake` skill, its scaffold, and the two suites). This document has been reconciled with what shipped: every place the built shape differs from the design is marked in-line, §10.1 records the five security-review rounds that produced those differences, and §15 is the delivered manifest.
+**Status:** built and shipped on `main` — `4faa6a7` (the `factory-build` workflow) and `62c2c54` (the `factory-intake` skill, its scaffold, and the two suites). This document has been reconciled with what shipped: the differences the reconciliation found are marked in-line (§5.0 is the preflight phase the design never named), §10.1 records the five security-review rounds that produced most of them, and §15 is the delivered manifest. It remains a design document reconciled after the fact, not a transcription — where it and the shipped files disagree, `skills/factory-intake/SKILL.md`, `.claude/workflows/factory-build.js`, `skills/factory-intake/scaffold/**` and `skills/factory-intake/THREAT_MODEL.md` on `main` are the source of truth.
 **Extends:** [`2026-08-05-software-factory-design.md`](2026-08-05-software-factory-design.md) — that spec is the bug-fix loop (issue → reproduce → fix → gated merge). This one is the front door: idea → candidate → Access-gated preview → approval from the phone → public deploy.
 **Evidence base:** the 2026-09-06 spike (§8.4) proved every platform assumption below on this account.
 
@@ -80,6 +80,15 @@ CLOUDFLARE
 ## 5. `factory-intake` — the process skill
 
 `skills/factory-intake/SKILL.md`, frontmatter `workflow: none`. Phases run in order; each names its stop condition. The autonomy block from the other unattended skills applies **between** the named check-ins: the skill asks nothing except in §5.2 (refine), §5.3 (spec review), §5.8 (approval), and §5.10 (iterate feedback).
+
+### 5.0 Preflight
+
+*Not in the original design — the shipped skill opens with a Phase 0 that this section records after the fact.* Nothing is created until configuration is read and the tools have answered:
+
+- **Environment.** `FACTORY_PREVIEW_DOMAIN` and `FACTORY_PROD_DOMAIN` are required; if either is absent the run stops with a setup message naming the missing ones. Optional: `FACTORY_GH_OWNER` (default `gh api user --jq .login`); `FACTORY_PROJECTS_ROOT`, a colon-separated list of directories the §5.1 research agent may scan one level deep for reusable local projects — never a dot-directory, never `.env*` / `.dev.vars` / `~/.claude`, and unset means the local scan is skipped and the brief says so; and `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, the Access service token, without which §5.7 presents candidates as **unverified** instead of scoring them.
+- **Tools.** `gh auth status` (write scope). `npx --yes wrangler@latest whoami`, which **must succeed** — §5.2's Worker-namespace check and every deploy depend on it, so a failure stops the run with the error. Then `codex --version` and the smoke `codex exec --skip-git-repo-check --sandbox read-only "Reply with exactly: CRITIC_ONLINE"`, which is **not** fatal: a failure is recorded as "critic unavailable" and §5.7 skips scoring.
+- **Orientation.** `git rev-parse --abbrev-ref HEAD && pwd`, because nothing below writes to the session's own repository.
+- **The research nonce** is minted here (`node -e 'console.log(crypto.randomUUID())'`) and is the `<NONCE>` for §5.1's fence only. §5.5 and §5.10 each mint their own `fenceNonce` for the `factory-build` invocation.
 
 ### 5.1 Research
 
@@ -375,7 +384,7 @@ the workflow half (Tasks 1–3) and the skill half plus these docs (Tasks 4–9)
 | Path | Status |
 |---|---|
 | `docs/specs/2026-09-06-factory-intake.md` | ✅ this document, reconciled with what shipped |
-| `skills/factory-intake/SKILL.md` | ✅ §5 — eleven phases, four check-ins |
+| `skills/factory-intake/SKILL.md` | ✅ §5 — twelve phases (§5's eleven plus the Phase 0 preflight the design did not name, now §5.0), four check-ins |
 | `skills/factory-intake/references/intake-questions.md` | ✅ §5.2 |
 | `skills/factory-intake/references/research-brief.md` | ✅ §5.1 |
 | `skills/factory-intake/scaffold/**` | ✅ §7 — moved out of `references/`; see the note under that heading |

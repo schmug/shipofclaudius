@@ -38,7 +38,12 @@
 
 Recorded after the fact, in the same spirit: this plan is re-derived from by future lanes, so a
 step that could not be followed as written is a defect in the plan, not a note for the next reader
-to rediscover. The blocks above have been corrected in place; this list says what changed and why.
+to rediscover. Most of the blocks above have been corrected in place. Three could not be: Task 4's
+`scripts/smoke.mjs`, Task 5's `scripts/critic.mjs`, and Task 5's `SKILL.md`, which five rounds of
+security review (deviation 8) reshaped past inline repair. Each of those three carries a
+**⚠️ SUPERSEDED — DO NOT COPY** banner immediately above it naming the round that invalidated it and
+the shipped file that replaced it; for those three the files on `main` are the source of truth, not
+this plan. This list says what changed and why.
 
 1. **The fence is located with `lastIndexOf`, not `indexOf`.** Task 2's sim block wrote `p.indexOf('<<<UNTRUSTED_FEEDBACK_')`, but `INJECTION_GUARD` names **both** markers with the real nonce *before* the fence opens, so the first occurrence is the preamble's mention and the assertion `fenceStart < inj < fenceEnd` could never hold. The plan's own test could not pass as written. The shipped sim takes the last occurrence of each marker — nothing after the real fence names them — and the Task 2 block now matches.
 2. **The scaffold's test script is bare `node --test`, not `node --test test/`.** On Node ≥ 21 a directory positional is treated as a module path and the run dies with `MODULE_NOT_FOUND`; the bare form's default patterns already match `test/*.test.mjs`. Task 4's `package.json` block and its assertion are corrected.
@@ -1138,6 +1143,17 @@ jobs:
 
 `skills/factory-intake/scaffold/scripts/smoke.mjs`:
 
+> **⚠️ SUPERSEDED — DO NOT COPY.** This block is the pre-review version. It attaches the Access
+> service token with Playwright's `extraHTTPHeaders`, and Chromium carries headers added at the
+> first hop **onto redirect targets** — a candidate Worker answering `302` to a foreign host
+> receives the token (security round 4). It also launches Chromium with no environment restriction
+> (a bare `chromium.launch()`) and records console text uncapped. The shipped file is
+> `skills/factory-intake/scaffold/scripts/smoke.mjs` on `main`: a `page.route` handler that fetches
+> same-origin requests itself with `maxRedirects: 0` and aborts every cross-origin request and
+> every 3xx answer, `chromium.launch({ env: { PATH: process.env.PATH }, chromiumSandbox: true })`,
+> and console errors capped at 20 entries of 200 chars. The history is
+> `docs/specs/2026-09-06-factory-intake.md` §10.1 round 4. Read the shipped file, never this block.
+
 ```js
 #!/usr/bin/env node
 // Smoke-test a deployed candidate THROUGH Cloudflare Access using a service token.
@@ -1202,6 +1218,21 @@ process.exit(report.checks.some((c) => !c.ok) ? 1 : 0);
 ```
 
 `skills/factory-intake/scaffold/scripts/critic.mjs` (the `critic-gated-build` runner with a factory CONFIG: the target comes from `--url`, capture fetches carry the service token, the smoke artifacts ride along, output lands under `factory-reports/<key>/`):
+
+> **⚠️ SUPERSEDED — DO NOT COPY.** This block is the pre-review version. It gathers gate evidence by
+> running `npm test` and `npx wrangler deploy --dry-run` in the clone — i.e. it **executes
+> candidate-authored code** (`test/`, `src/`, and `package.json` scripts) in the session where
+> `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` live, and the tamper guard cannot cover `test/` or
+> `src/` without making them unbuildable (security round 2). It also leaves the critic's MCP servers
+> in place; they are child processes of `codex` and therefore sit outside `--sandbox read-only`, and
+> the `-c mcp_servers={}` override that was meant to disable them **merges** into the host config
+> and removes nothing (security round 5). The shipped file is
+> `skills/factory-intake/scaffold/scripts/critic.mjs` on `main`: gate evidence comes from
+> `gh run list --commit <sha>`, the file contains no `npm`, `npx`, or `wrangler` token (the suite
+> pins that), and `codex` runs under an allowlisted environment and a scratch `CODEX_HOME` whose
+> `config.toml` has every `[mcp_servers.*]` table stripped. The history is
+> `docs/specs/2026-09-06-factory-intake.md` §10.1 rounds 2 and 5. Read the shipped file, never this
+> block.
 
 ```js
 #!/usr/bin/env node
@@ -1542,6 +1573,22 @@ research brief's `open_questions` as free-text-friendly questions with 2–3 opt
 - [ ] **Step 4: Write the skill**
 
 Create `skills/factory-intake/SKILL.md`:
+
+> **⚠️ SUPERSEDED — DO NOT COPY.** This block is the pre-review version of the skill. Its twelve
+> phase headings still match the shipped file; what several of them say does not. Its Phase 7 runs
+> `smoke.mjs` and `critic.mjs` **in the build agent's own directory** with no tamper guard, where
+> uncommitted files, `node_modules` and `.git/hooks` are invisible to a commit-to-commit diff
+> (security round 1) and a case-folded or non-ASCII path overwrites a guarded file on disk while the
+> tree diff stays clean (security round 3). Its Phase 9 deploys production from an unguarded clone
+> with a bare `npx wrangler deploy`. Its Phase 0 omits `FACTORY_PROJECTS_ROOT` and the
+> `npx wrangler whoami` check whose failure stops the run, and mints one run-wide nonce where the
+> shipped skill mints a fresh `fenceNonce` per `factory-build` invocation (deviation 3), including
+> in Phase 10. The shipped file is `skills/factory-intake/SKILL.md` on `main`: the `score-<key>`
+> clone the session makes itself, the `:(icase)` tree diff plus four checkout checks read by their
+> output and closed by `echo GUARD_DONE`, the preview-config instance check, the same guard again
+> before the production deploy, and the secret scrub before evidence is committed. The history is
+> `docs/specs/2026-09-06-factory-intake.md` §10.1 rounds 1 and 3. Read the shipped file, never this
+> block.
 
 ```markdown
 ---
