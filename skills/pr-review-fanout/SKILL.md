@@ -4,10 +4,10 @@ description: Read-only deep review of ONE PR diff — fan out review dimensions,
 argument-hint: <pr-number>
 ---
 
-Run the `pr-review-fanout` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path:
+Run the `pr-review-fanout` dynamic workflow bundled with this plugin. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js", args: { /* fill from the request */ } })
+Workflow({ script: "<the file's exact contents>", args: { /* fill from the request */ } })
 ```
 
 Fill `args` from the user's request. Common args: `number`/`pr` (required), `repo`, `dimensions`, `issue`, `threshold`. For the full, current argument list, read the header comment / `meta` block in `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/pr-review-fanout.js`, or the repo README "Arguments" table. READ-ONLY; reviews/reports only, never comments/merges; read-scoped `gh` token.

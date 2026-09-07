@@ -177,13 +177,22 @@ test('implement-issue: the description keeps the recovered casual + /issue-compa
     'the watch phase is post-trigger machinery — describing it here only dilutes matching')
 })
 
-test('each wrapper targets its own bundled workflow via scriptPath + has a description', async () => {
+// #213: Workflow({ scriptPath }) refuses any path outside the session's own working
+// directory (or an added directory) — including a real plugin-cache path, even after
+// it has been Read in-session. A plugin's bundled workflow is never under the
+// installing session's cwd, so the wrapper contract is Read-then-`script`, not
+// scriptPath: read the bundled file, then pass its exact contents as `script`.
+test('each wrapper Reads its own bundled workflow then invokes Workflow via `script` (not scriptPath) + has a description', async () => {
   for (const name of await workflowNames()) {
     const md = await read(`skills/${name}/SKILL.md`)
     assert.ok(/^---[\s\S]*?\ndescription:\s*\S.*\n[\s\S]*?---/m.test(md), `${name}: frontmatter has a non-empty description`)
     assert.ok(md.includes(`name: ${name}`), `${name}: frontmatter name matches the workflow`)
-    assert.ok(md.includes('Workflow({') && md.includes('scriptPath'), `${name}: instructs a Workflow scriptPath call`)
-    assert.ok(md.includes(wfRef(name)), `${name}: references its own bundled script path (${wfRef(name)})`)
+    assert.ok(md.includes(wfRef(name)), `${name}: references its own bundled script path (${wfRef(name)}) to Read`)
+    assert.match(md, /\bRead\b/, `${name}: instructs reading the bundled script before invoking Workflow`)
+    assert.match(md, /Workflow\(\{\s*script:/,
+      `${name}: invokes Workflow with \`script\` (the file's contents), not \`scriptPath\``)
+    assert.doesNotMatch(md, /Workflow\(\{\s*scriptPath:\s*"\$\{CLAUDE_PLUGIN_ROOT\}/,
+      `${name}: must not pass a plugin-cache path as scriptPath — Workflow refuses paths outside cwd (#213)`)
   }
 })
 

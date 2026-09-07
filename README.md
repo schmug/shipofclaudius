@@ -68,7 +68,7 @@ claude plugin marketplace add schmug/shipofclaudius
 claude plugin install shipofclaudius@shipofclaudius
 ```
 
-Each workflow is exposed as a wrapper skill (`/shipofclaudius:<name>`, e.g. `/shipofclaudius:deep-security-scan`) and by natural language (*"run a deep security scan"*). The wrapper calls the Workflow tool with the bundled script at `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js`, so an update to the plugin updates the workflows everywhere with no manual step.
+Each workflow is exposed as a wrapper skill (`/shipofclaudius:<name>`, e.g. `/shipofclaudius:deep-security-scan`) and by natural language (*"run a deep security scan"*). The Workflow tool's `scriptPath` refuses any path outside the session's own working directory (confirmed in [#213](https://github.com/schmug/shipofclaudius/issues/213) — a plugin-cache path is rejected even after being read), so the wrapper instead **reads** the bundled script at `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js` and passes its exact contents to `Workflow({ script, args })`. Nothing is copied at rest — the content comes from the single canonical file on every invocation — so an update to the plugin still updates the workflows everywhere with no manual step.
 
 Installing also registers one **MCP server**: the vent tool at [`packages/vent-server/`](packages/vent-server/), wired by the root [`.mcp.json`](.mcp.json). So the plugin adds a tool to your session alongside the skills and workflows. It lets an agent record friction with your tooling in one call: a vent appends a line to `~/.claude/vents.jsonl` (rate limited to 1 per 90 s and 10 per session) and never fails the agent's turn, whatever happens. See [CLAUDE.md](CLAUDE.md) for its operational quirks — the namespaced tool name, the harmless duplicate registration when your cwd is this repo, and where it writes.
 
@@ -88,14 +88,20 @@ The **read-only** workflows (`issue-triage-fanout`, `issue-research-fanout`, `pr
 
 ### As an agent (driving the Workflow tool)
 
-Invoke an installed workflow by `meta.name`, or run a file straight from disk by path:
+Invoke an installed workflow by `meta.name` (works once the script sits in this project's own `.claude/workflows/` or in `~/.claude/workflows/` — both are scanned into the name registry at session start):
 
 ```js
-// by name (after it's installed in ~/.claude/workflows/)
 Workflow({ name: "deep-security-scan", args: { target: ".", rounds: 4 } })
+```
 
-// or directly by path, no install step
-Workflow({ scriptPath: "~/.claude/workflows/pr-triage-fanout.js" })
+`scriptPath` is **not** a general "run any file on disk" escape hatch — confirmed empirically in [#213](https://github.com/schmug/shipofclaudius/issues/213), it accepts only a path already under the session's working directory (or an added directory), or a path the Workflow tool itself returned earlier in the session; every other path is refused, including a real `~/.claude/workflows/*.js` file and even one already `Read` in-session. Use it only for a file under the session's own cwd, or read the file yourself and pass its contents as `script` instead:
+
+```js
+// scriptPath: only for a file already under the session's cwd
+Workflow({ scriptPath: "./.claude/workflows/pr-triage-fanout.js" })
+
+// anywhere else on disk (e.g. a plugin's bundled copy): Read it, then pass the content
+Workflow({ script: "<contents of the file you just Read>" })
 ```
 
 `Workflow` returns immediately with a run ID and fires a notification when the run completes; the script's final `return` value (findings, triage verdicts, report paths) comes back as the result. Pass `args` as a real JSON value — the scripts also parse-guard a JSON **string**, but a value is preferred.

@@ -65,8 +65,9 @@ Confirmed both empirically (installed plugins on disk) and against the official 
   `${CLAUDE_PLUGIN_ROOT}/hooks/...`. The "skill points at a bundled file via the plugin root"
   pattern is proven in the wild.
 - **Arbitrary bundled files are fine** — the whole plugin directory is on disk at the root.
-- **`Workflow({ scriptPath })` accepts any on-disk path**; no documented sandbox/path restriction.
-  (Tool contract: *"Path to a workflow script file on disk."*)
+- ~~**`Workflow({ scriptPath })` accepts any on-disk path**; no documented sandbox/path restriction.
+  (Tool contract: *"Path to a workflow script file on disk."*)~~
+  **CORRECTED 2026-09-07 (resolves [#213](https://github.com/schmug/shipofclaudius/issues/213)):** this was never actually exercised end-to-end (see the "Unconfirmed" caveat right below, at the time of writing) and turned out to be false. `Workflow({ scriptPath })` refuses any path outside the session's working directory (or a directory explicitly added to it) or a path the tool itself returned earlier in the session — reproduced with a real installed-layout plugin-cache path, a real `~/.claude/workflows/*.js` file, and an ordinary out-of-cwd repo clone, all refused with the identical error, including after the target file was already `Read` in-session. The restriction is a general cwd/added-directory allowlist, not anything specific to the plugin cache, a symlink, or content-addressed storage. §4.2's wrapper body was changed accordingly: it now `Read`s the bundled file and passes its exact contents to `Workflow({ script, args })` instead of `scriptPath` — still zero-copy, since nothing is duplicated at rest and the content is re-read from the single canonical file on every invocation. See `CLAUDE.md` "Wrapper shape" and the 17 shipped `skills/*/SKILL.md` for the corrected shape.
 - **Minimal manifest:** `{ name, description, version }`.
 
 **Unconfirmed (mitigated):** the docs don't *explicitly* exercise `Workflow` + a
@@ -104,12 +105,12 @@ shipofclaudius/                          # repo root == plugin root
 Each `skills/<name>/SKILL.md` is a thin, declarative wrapper:
 - **Frontmatter `description`** mirrors the workflow's purpose (lifted from `meta.description` /
   the README) so natural-language triggering still works (*"triage my open PRs"* → the skill).
-- **Body** instructs: call
-  `Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js", args: { … } })`,
-  and includes that workflow's **argument reference** (from the README "Arguments" table) so the
-  model fills `args` correctly. It carries the same security/usage caveats the README documents
-  (e.g. read-scoped `gh` token for the read-only fan-outs; `args.execute:true` to land for
-  `stacked-merge-walk`).
+- **Body** instructs: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js`, then call
+  `Workflow({ script: <that file's exact contents>, args: { … } })` — **not** `scriptPath` (see the
+  §3 correction above), and includes that workflow's **argument reference** (from the README
+  "Arguments" table) so the model fills `args` correctly. It carries the same security/usage
+  caveats the README documents (e.g. read-scoped `gh` token for the read-only fan-outs;
+  `args.execute:true` to land for `stacked-merge-walk`).
 
 The wrapper adds **no logic** — it is a stable indirection to the canonical script. When a workflow
 gains an arg, only its wrapper's arg reference needs a one-line touch.

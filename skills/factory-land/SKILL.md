@@ -4,11 +4,13 @@ description: The software factory's gated landing step — gather ONE PR, its li
 argument-hint: <pr-number>
 ---
 
-Run the `factory-land` dynamic workflow bundled with this plugin by calling the Workflow tool with its bundled script path, injecting the bundled gate binary:
+Run the `factory-land` dynamic workflow bundled with this plugin, injecting the bundled gate binary. `Workflow({ scriptPath })` only accepts a path already under the session's working directory (or an added directory) — a plugin-cache path is refused even after being `Read` in-session (see `CLAUDE.md` "Wrapper shape"; reproduced in [#213](https://github.com/schmug/shipofclaudius/issues/213)). So: `Read` `${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-land.js`, then call the Workflow tool with its exact contents as `script`:
 
 ```
-Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/factory-land.js", args: { pr: 900, repo: "owner/name", gateBin: "${CLAUDE_PLUGIN_ROOT}/packages/factory-gate/bin/gate.mjs" } })
+Workflow({ script: "<the file's exact contents>", args: { pr: 900, repo: "owner/name", gateBin: "${CLAUDE_PLUGIN_ROOT}/packages/factory-gate/bin/gate.mjs" } })
 ```
+
+`gateBin` is a **data arg**, not the Workflow tool's own `scriptPath` — `factory-land.js` interpolates it into a fixed shell command a read-only relay agent runs (`node "${gateBin}" --input …`), which has no cwd restriction, so it is unaffected by the fix above and needs no change.
 
 Always pass `gateBin` as shown so the gate that runs is the one bundled with **this** plugin checkout rather than whatever happens to sit in the target repo. Without it the workflow falls back to a relative `packages/factory-gate/bin/gate.mjs`, which only resolves when the cwd is a repo that vendors the gate itself.
 
