@@ -158,7 +158,7 @@ const CKPT_LOAD_SCHEMA = {
 }
 const CKPT_LOAD_PROMPT =
   `You are a READ-ONLY checkpoint loader. Do exactly this and nothing else:\n` +
-  `1. Resolve the repo slug: \`gh repo view ${REPO} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
+  `1. Resolve the repo slug: \`gh repo view${A.repo ? ` ${A.repo}` : ''} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
   `Replace its "/" with "-" to form <repo>; if it cannot be resolved use "repo".\n` +
   `2. Compute the state file path: \`$HOME/.claude/workflows/state/<repo>-${CKPT_WF}.json\` (expand $HOME to an absolute path).\n` +
   `3. Print the file if it exists: \`cat "<path>" 2>/dev/null\` — if the file or its directory does not exist, that prints nothing; return an EMPTY string for raw (do NOT create it, do NOT error).\n` +
@@ -463,7 +463,7 @@ const DISCOVER_PROMPT =
   `You are READ-ONLY (gh/git/grep/read only — do NOT edit, comment, merge, or open anything).\n` +
   `Resolve, ONCE for this run, the repository's default branch and its REQUIRED status-check ` +
   `contexts so the per-PR triage agents do not each re-query branch protection.\n` +
-  `1. Default branch: \`gh repo view ${REPO} --json defaultBranchRef -q .defaultBranchRef.name\`.\n` +
+  `1. Default branch: \`gh repo view${A.repo ? ` ${A.repo}` : ''} --json defaultBranchRef -q .defaultBranchRef.name\`.\n` +
   `2. Required contexts for that branch — try branch protection first, then repository rulesets:\n` +
   `   \`gh api repos/<owner>/<repo>/branches/<defaultBranch>/protection --jq '.required_status_checks.contexts' 2>/dev/null\`\n` +
   `   and, if that 404s, \`gh api repos/<owner>/<repo>/rules/branches/<defaultBranch> --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'\`\n` +
