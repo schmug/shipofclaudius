@@ -163,6 +163,26 @@ test('the impl agent stays write-capable (worktree-isolated, NOT routed through 
   assert.notEqual(im.opts.agentType, 'Explore', 'impl is NOT read-only — it must commit/push/open a PR')
 })
 
+test('the impl prompt tells the agent to key scratch files off its OWN lane (issue #226)', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane({ issues: [5] })] } })
+  const im = byPrefix(calls, 'impl:')[0]
+  assert.ok(/shares? ONE scratchpad|shared scratchpad/i.test(im.prompt), 'prompt warns the scratchpad is shared across concurrent lanes')
+  assert.ok(im.prompt.includes('stacked-impl-lane-a-'), 'prompt gives a scratch path keyed off THIS lane (lane-a)')
+})
+
+test('two concurrent lanes get DIFFERENT scratch paths in their impl prompts (no basename collision)', async () => {
+  const { calls } = await runScript({ args: { lanes: [lane({ issues: [5] }), lane({ key: 'lane-b', branch: 'feat/b', issues: [7] })] } })
+  const [a, b] = byPrefix(calls, 'impl:')
+  assert.ok(a && b, 'both lane impl agents ran')
+  assert.ok(a.prompt.includes('stacked-impl-lane-a-'), 'lane-a prompt scoped to lane-a')
+  assert.ok(b.prompt.includes('stacked-impl-lane-b-'), 'lane-b prompt scoped to lane-b')
+  assert.notEqual(
+    a.prompt.match(/\$\{TMPDIR:-\/tmp\}\/stacked-impl-[^\s`]+/)[0],
+    b.prompt.match(/\$\{TMPDIR:-\/tmp\}\/stacked-impl-[^\s`]+/)[0],
+    'the two lanes are given different scratch path prefixes'
+  )
+})
+
 test('args.readonlyAgent overrides only the fetch relay agentType, not the impl agent', async () => {
   const { calls } = await runScript({ args: { lanes: [lane({ issues: [5] })], readonlyAgent: 'gh-ro' } })
   assert.equal(byPrefix(calls, 'fetch:#')[0].opts.agentType, 'gh-ro', 'fetch relay honors the override')
