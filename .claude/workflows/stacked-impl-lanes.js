@@ -61,6 +61,18 @@
 // backstop, and the Workflow runtime's actual tool grants are not enforced by this repo.
 // Run the triage/research siblings (not this) under the read-scoped gh token; this lane
 // needs write scope to push and open PRs. See README "Security model".
+//
+// SHARED-SCRATCHPAD GUARD (issue #226). Parallel lanes run CONCURRENT impl agents, each in its
+// own isolated git worktree — but the session's scratchpad directory (handed to every agent in
+// its environment preamble) is ONE path per SESSION, not per agent, so two lanes writing the same
+// obvious scratch filename (e.g. a commit-message or PR-body temp file for `git commit -F` /
+// `gh pr create --body-file`) silently overwrite each other with no error and no write conflict.
+// This repo has no way to change where the harness points an agent's scratchpad, so IMPL_PROMPT
+// instead tells each impl agent to key any scratch file it needs off its OWN lane.key under
+// `${TMPDIR:-/tmp}` — the same per-key-under-/tmp idiom factory-land.js and factory-build.js
+// already use for exactly this reason — never the shared scratchpad. The instruction lives in the
+// prompt itself, not in this file's comments or the wrapper skill's prose, so it reaches the agent
+// on every run regardless of what the caller remembered to say.
 
 export const meta = {
   name: 'stacked-impl-lanes',
@@ -417,6 +429,7 @@ LANE: ${lane.key}
 ${lane.invariant ? '⚠️ SECURITY-CRITICAL: touches security invariants. Add a THREAT_MODEL/security note and explain in the PR how the invariant is preserved.' : 'Non-invariant change.'}
 SCOPE: ${lane.brief}
 BRANCH: create \`${lane.branch}\` off \`origin/${base}\`; open the PR with base \`${base}\`.${stackedOn ? ` (This STACKS on the verified lane \`${stackedOn}\` — \`${base}\` ALREADY contains its commits. Build on what it changed; do NOT re-implement or revert it, and keep your diff to THIS lane's scope.)` : ''}
+SCRATCH FILES: this agent runs CONCURRENTLY with sibling lanes in the same session, and every agent in this session shares ONE scratchpad directory (the path named in your environment preamble) — a same-named file two lanes both write there is silently overwritten by whichever finishes last, with no error. If you need a temp file for anything (a multi-line commit message for \`git commit -F\`, a PR body for \`gh pr create --body-file\`, or scratch notes), write it under \`\${TMPDIR:-/tmp}/stacked-impl-${lane.key}-<name>\` instead — that path is unique to THIS lane, not the shared scratchpad.
 
 ⚠️ HARD RULES — do NOT call advisor; do NOT use WebFetch/WebSearch; do NOT poll CI (no "gh pr checks", no sleep/watch loops — they trip the no-progress watchdog); do NOT merge, push to main, or use --admin; no long sleeps. Open the PR and RETURN.
 
