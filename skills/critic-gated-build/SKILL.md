@@ -25,6 +25,7 @@ Before ending your turn, check your last paragraph. If it is a plan, an analysis
 ## Phase 1 — Build loop (per increment)
 
 - TDD; feature branch → PR → CI green → squash merge. Never push to main. **Re-verify the current branch after every `gh pr merge` — it checks main back out and orphan commits land on main silently.**
+- **If a merge/landing action is denied by Claude Code's permission system** rather than executed — whether a direct `gh pr merge` or a `Workflow(...)` call to `merge-pr-with-gate`/`stacked-merge-walk` (observed denial text includes `[Git Destructive]` and `Blocked by classifier`; see [#228](https://github.com/schmug/shipofclaudius/issues/228)) — that is not a CI failure and not a defect in the build. Report it explicitly as `BLOCKED_BY_PERMISSION` in the cycle's status rather than looping on retries or treating it as something the loop discipline above should fix, and check in with the user rather than guessing at a workaround. The exact trigger for the denial is not yet characterized end-to-end (#228 tracks the controlled measurement).
 - Parallel PRs: keep file sets disjoint, land risk-ascending, then run one integration gate (full typecheck + tests) on combined main before a single deploy.
 - Build the **verification ladder** early; each rung must emit artifacts a text-only critic can read:
   1. Unit/integration tests (runtime-faithful, e.g. workers-pool against real DB).
