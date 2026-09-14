@@ -471,7 +471,7 @@ const CKPT_LOAD_SCHEMA = {
 }
 const CKPT_LOAD_PROMPT =
   `You are a READ-ONLY checkpoint loader. Do exactly this and nothing else:\n` +
-  `1. Resolve the repo slug: \`gh repo view ${REPO} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
+  `1. Resolve the repo slug: \`gh repo view${A.repo ? ` ${A.repo}` : ''} --json nameWithOwner -q .nameWithOwner\` (e.g. "owner/name"). ` +
   `Replace its "/" with "-" to form <repo>; if it cannot be resolved use "repo".\n` +
   `2. Compute the state file path: \`$HOME/.claude/workflows/state/<repo>-${CKPT_WF}.json\` (expand $HOME to an absolute path).\n` +
   `3. Print the file if it exists: \`cat "<path>" 2>/dev/null\` — if the file or its directory does not exist, that prints nothing; return an EMPTY string for raw (do NOT create it, do NOT error).\n` +

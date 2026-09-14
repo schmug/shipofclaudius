@@ -275,7 +275,7 @@ ${fenced}
 STEPS (do all):
 1. TRUSTED METADATA (operational, safe to query live — this keeps the untrusted body/comments/reviews out of your tool calls): \`gh pr view ${item.ref} ${REPO} --json number,headRefName,baseRefName,isDraft,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision\`. Record headRefName as \`head_branch\` — the orchestrator needs it to prune the branch once the whole stack lands.
 2. CI — classify the statusCheckRollup snapshot. First discover the repo REQUIRED-context list so a real failure is distinguishable from non-required noise (the list drifts; do NOT hardcode it):
-   - resolve the repo: \`gh repo view ${REPO} --json nameWithOwner -q .nameWithOwner\`
+   - resolve the repo: \`gh repo view${A.repo ? ` ${A.repo}` : ''} --json nameWithOwner -q .nameWithOwner\`
    - \`gh api repos/<owner>/<repo>/branches/<baseRefName>/protection --jq '.required_status_checks.contexts' 2>/dev/null\`, and if that 404s (repository rulesets) \`gh api repos/<owner>/<repo>/rules/branches/<baseRefName> --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'\`.
    - ci_status: FAILING_REQUIRED if any FAILED/ERROR check is in the required list; FAILING_NOISE if only non-required checks failed; PENDING if required checks are still running; PASSING if all required succeeded; NONE if no checks. Put failing/pending check names + required/not-required in ci_detail.
 3. MERGEABILITY — record mergeStateStatus. If you are leaning toward a landable verdict, RE-QUERY \`gh pr view ${item.ref} ${REPO} --json mergeable,mergeStateStatus\` (a cold first query returns UNKNOWN — the query itself triggers computation) and treat UNKNOWN as verdict=UNKNOWN (must-verify, do NOT assert READY).

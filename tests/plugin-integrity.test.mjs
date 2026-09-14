@@ -463,6 +463,23 @@ test('every workflow has a suite, and every suite is in the package.json test ch
   }
 })
 
+test('no workflow interpolates the -R-shaped REPO var into `gh repo view` (#222)', async () => {
+  // `gh repo view` takes the repository POSITIONALLY and has no `-R`/`--repo` flag —
+  // unlike `gh pr view` / `gh issue list` / `gh pr diff`, where the same REPO const
+  // (built as `-R <owner/repo>` or '') is the correct shape. Interpolating it here
+  // built an invalid command whenever args.repo was set, and every caller silently
+  // took its fallback path. The fix is always `gh repo view${A.repo ? ' ' + A.repo : ''}`
+  // (a bare positional slug, or nothing when args.repo is absent) — never `${REPO}`.
+  const wfDir = new URL('.claude/workflows/', ROOT)
+  const offenders = []
+  for (const f of (await readdir(wfDir)).filter((f) => f.endsWith('.js'))) {
+    const src = await read(`.claude/workflows/${f}`)
+    if (/gh repo view\s*\$\{REPO\}/.test(src)) offenders.push(f)
+  }
+  assert.deepEqual(offenders, [],
+    `these workflows interpolate the -R-shaped REPO var into \`gh repo view\`, which has no -R flag: ${offenders.join(', ')}`)
+})
+
 // Per-entry hook validation, extracted so a fixture table can exercise it directly.
 // Left inline, these guards are enforced only by whatever hooks.json happens to contain
 // today: a future edit deleting one would land green, which is exactly what mutation
