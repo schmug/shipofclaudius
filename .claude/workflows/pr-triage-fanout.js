@@ -99,7 +99,11 @@ const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.t
 
 // ── Spine helpers (inlined; Workflow scripts cannot `import`). Stamped with
 // SPINE_VERSION so the hand-synced copies in ~/.claude/workflows/ can be diffed for drift. ──
-const SPINE_VERSION = '1.0.0'
+// 1.0.0 -> 1.1.0 (#223): entries now also carry `headSha` (the repo HEAD they were
+// computed against), so ckptReusable can tell a verdict about a STALE tree from one
+// about the current tree. The bump invalidates every pre-#223 entry (none carries
+// headSha) for exactly one recompute; every entry written from here on carries it.
+const SPINE_VERSION = '1.1.0'
 
 // Fan-out batch size. Each PR is a relay→classify CHAIN (2 agents that run sequentially
 // within the item), so a wave of B keeps at most B agents in-flight — under the
@@ -124,20 +128,69 @@ async function runWaves(items, fn, batchSize = 8) {
   return out
 }
 
+// ── Tree-diff footprint helpers (PURE, MODEL-FREE). ──────────────────────────────────
+// pr-triage-fanout's own TRIAGE_SCHEMA carries no files[] (a PR's verdict is not framed as
+// "which repo files does this depend on" the way an issue triage is) — but ckptReusable
+// below still needs a normalized-path comparison to check a cached entry's footprint (see
+// #223), so these three leaf functions are copied in here verbatim from the issue-triage /
+// issue-research file-overlap block (Workflow scripts cannot `import`). An always-empty
+// footprint here just means every pr-triage entry falls to the fail-closed "unknown
+// footprint" branch of ckptReusable — which is CORRECT: a PR's mergeability/CI verdict can
+// change from an unrelated commit landing on the base branch alone, with no change to the
+// PR itself, so ANY tree change since the entry was computed should invalidate it.
+function normPath(p) {
+  const out = []
+  for (const seg of String(p).trim().split('/')) {
+    if (seg === '' || seg === '.') continue   // repeated / leading / trailing separators, and "."
+    if (seg === '..') { out.pop(); continue } // ".." above the root simply clamps there
+    out.push(seg)
+  }
+  return out.join('/')
+}
+
+// The COMPARISON key: canonical path, lowercased (see the fuller explanation in
+// issue-triage-fanout.js's copy of this function — over-detecting a collision costs only
+// a forced recompute; missing one would silently reuse a stale verdict).
+function fileKey(p) { return normPath(p).toLowerCase() }
+
+// Normalize a raw files[] into a deduped, sorted array of comparable paths, each in its
+// ORIGINAL spelling (canonicalized, never lowercased).
+function normFiles(files) {
+  if (!Array.isArray(files)) return []
+  const byKey = new Map()
+  for (const f of files) {
+    if (typeof f !== 'string') continue
+    const t = normPath(f)
+    if (!t) continue
+    const k = t.toLowerCase()
+    if (!byKey.has(k)) byKey.set(k, t)
+  }
+  return [...byKey.values()].sort()
+}
+
 // ── Read-checkpoint (spine §2.4: idempotency = hybrid, READ side). ───────────────────
 // Read-only PR triage is expensive (relay→classify chain per PR). Re-running should not
 // re-pay for PRs that have not changed since last time. We persist each item's result to
-// ~/.claude/workflows/state/<repo>-<wf>.json, keyed by {number, updatedAt, SPINE_VERSION}.
-// On re-run we skip an entry iff it is present, done, its PR's `updatedAt` is unchanged,
-// AND it was written by THIS spine version. (PR triage already has state-derived skipping
-// for non-OPEN PRs; this is the orthogonal READ checkpoint for OPEN PRs that are unchanged.)
+// ~/.claude/workflows/state/<repo>-<wf>.json, keyed by {number, updatedAt, headSha,
+// SPINE_VERSION}. On re-run we skip an entry iff it is present, done, its PR's `updatedAt`
+// is unchanged, it was written by THIS spine version, AND the repo TREE has not changed
+// since it was computed (#223: mergeability/CI is a claim about repo state — a PR can go
+// from clean to BEHIND, or a required check can start failing, purely because the BASE
+// branch moved, with no change to the PR itself or its own `updatedAt`). (PR triage already
+// has state-derived skipping for non-OPEN PRs; this is the orthogonal READ checkpoint for
+// OPEN PRs that are unchanged.)
 //
 // Workflow scripts cannot do file IO, so the mechanism is agent-mediated and runs through
 // the read-only agentType like everything else:
 //   - a LOAD agent (ckpt-load) resolves the state path and `cat`s the file (empty if
 //     missing); the script JSON.parses it DEFENSIVELY (malformed → treated as empty).
-//   - a METADATA agent (ckpt-meta) resolves each kept PR's CURRENT `updatedAt` in ONE
-//     batched gh call, so the skip decision happens BEFORE the expensive chain.
+//   - a METADATA agent (ckpt-meta) resolves each kept PR's CURRENT `updatedAt` AND the
+//     repo's current HEAD sha in ONE batched call, so the skip decision happens BEFORE
+//     the expensive chain.
+//   - a TREE-CHECK agent (ckpt-treecheck) — spawned ONLY when a candidate's cached
+//     headSha differs from the current HEAD — batches a `git diff --name-only <sha> HEAD`
+//     per distinct cached sha so ckptReusable can fail closed on any tree change (this
+//     workflow's entries never carry a files[] footprint, so any non-empty diff invalidates).
 //   - a single WRITER agent (ckpt-write) runs SEQUENTIALLY at the end (never inside a
 //     concurrent wave → no clobber race) to persist the merged state (old unchanged
 //     entries + newly computed ones).
@@ -166,7 +219,7 @@ const CKPT_LOAD_PROMPT =
   `Do NOT edit, comment, merge, push, or open anything; run no mutating command.`
 
 const CKPT_META_SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['items'],
+  type: 'object', additionalProperties: false, required: ['items', 'headSha'],
   properties: {
     items: {
       type: 'array',
@@ -178,12 +231,44 @@ const CKPT_META_SCHEMA = {
         },
       },
     },
+    headSha: { type: 'string', description: 'The repo\'s current HEAD commit (`git rev-parse HEAD`), or "" if it could not be resolved.' },
   },
 }
 const CKPT_META_PROMPT = (nums) =>
-  `You are a READ-ONLY metadata relay. For these PR numbers — ${nums.join(', ')} — resolve each one's CURRENT \`updatedAt\` timestamp so a checkpoint can tell which PRs changed since last run.\n` +
-  `Run (one call): \`gh pr list ${REPO} --state all --json number,updatedAt --jq '[.[] | {number, updatedAt}]'\` and keep only the requested numbers; for any requested number not returned, use updatedAt "" (treat as changed).\n` +
-  `Return { items: [{ number, updatedAt }, ...] } covering EVERY requested number. Read-only: run no mutating command; do NOT edit, comment, merge, push, or open anything.`
+  `You are a READ-ONLY metadata relay. For these PR numbers — ${nums.join(', ')} — resolve each one's CURRENT \`updatedAt\` timestamp so a checkpoint can tell which PRs changed since last run, AND resolve the repo's current HEAD so it can tell whether the TREE changed under a cached verdict.\n` +
+  `1. Run \`git rev-parse HEAD\` and capture its output as headSha (use "" if it fails).\n` +
+  `2. Run (one call): \`gh pr list ${REPO} --state all --json number,updatedAt --jq '[.[] | {number, updatedAt}]'\` and keep only the requested numbers; for any requested number not returned, use updatedAt "" (treat as changed).\n` +
+  `Return { items: [{ number, updatedAt }, ...], headSha } covering EVERY requested number. Read-only: run no mutating command; do NOT edit, comment, merge, push, or open anything.`
+
+// Tree-diff relay (#223): spawned ONLY when at least one candidate's cached headSha
+// differs from the current HEAD (see the decision loop below). Batches a
+// `git diff --name-only <sha> HEAD` per DISTINCT cached sha — one agent call for the
+// whole run, never one per candidate — so ckptReusable can compare each entry's own
+// files[] footprint against what actually changed since it was computed.
+const CKPT_TREECHECK_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['diffs'],
+  properties: {
+    diffs: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['sha', 'changedFiles', 'unresolved'],
+        properties: {
+          sha: { type: 'string' },
+          changedFiles: { type: 'array', items: { type: 'string' }, description: 'Files that differ between `sha` and the current HEAD (`git diff --name-only <sha> HEAD`); empty if the tree is identical.' },
+          unresolved: { type: 'boolean', description: 'true if `sha` does not resolve in this checkout (e.g. a shallow clone or rewritten history) — changedFiles is [] and must NOT be read as "no changes".' },
+        },
+      },
+    },
+  },
+}
+const CKPT_TREECHECK_PROMPT = (shas) =>
+  `You are a READ-ONLY tree-diff relay. A checkpoint needs to know whether the repo TREE has changed ` +
+  `since each of these commits, so a cached verdict about repo state is never reused against a tree it ` +
+  `no longer describes:\n${shas.join(', ')}\n` +
+  `For EACH sha above, run: \`git diff --name-only <sha> HEAD\`.\n` +
+  `- If it succeeds, set changedFiles to the (possibly empty) list of changed paths and unresolved:false.\n` +
+  `- If it errors (the sha does not resolve in this checkout — e.g. a shallow clone or rewritten history), set unresolved:true and changedFiles:[].\n` +
+  `Return { diffs: [{ sha, changedFiles, unresolved }, ...] } covering EVERY sha above exactly once. Read-only: run no mutating command; do NOT edit, comment, merge, push, or open anything.`
 
 const CKPT_WRITE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['written'],
@@ -209,15 +294,34 @@ function ckptParse(raw) {
 }
 
 // An entry is REUSABLE (skip the relay→classify chain, reuse the cached result) iff it
-// exists, is done, was stamped with the current SPINE_VERSION, and its PR's current
-// `updatedAt` matches the cached one. A blank current updatedAt (unresolved) is treated as
-// changed → always re-run. FRESH disables reuse entirely.
-function ckptReusable(entry, currentUpdatedAt) {
+// exists, is done, was stamped with the current SPINE_VERSION, its PR's current
+// `updatedAt` matches the cached one, AND the repo TREE has not moved under its own
+// dependency footprint (result.files[]) since it was computed (#223: a verdict is a
+// claim about repo state, not just about issue text — reusing purely on `updatedAt`
+// re-serves a stale verdict about a tree that has since changed). `currentHeadSha` is
+// this run's resolved HEAD; `diffsBySha` maps a cached `headSha` -> { changedFiles,
+// unresolved } from a batched `git diff --name-only <sha> HEAD`. FAIL-CLOSED: an
+// unresolved current HEAD, an unresolved diff, or an UNKNOWN footprint (empty files[])
+// under ANY tree change all invalidate the entry rather than silently reusing it — the
+// direction chosen for #223's own repro (a stale BLOCKED verdict served forever). A
+// blank current updatedAt (unresolved) is treated as changed -> always re-run. FRESH
+// disables reuse entirely.
+function ckptReusable(entry, currentUpdatedAt, currentHeadSha, diffsBySha) {
   if (!entry || typeof entry !== 'object') return false
   if (entry.spineVersion !== SPINE_VERSION) return false
   if (!entry.result) return false
   if (!currentUpdatedAt) return false
-  return entry.updatedAt === currentUpdatedAt
+  if (entry.updatedAt !== currentUpdatedAt) return false
+  if (!currentHeadSha) return false
+  if (entry.headSha === currentHeadSha) return true
+  const diffs = (diffsBySha instanceof Map) ? diffsBySha : new Map()
+  const diff = diffs.get(entry.headSha)
+  if (!diff || diff.unresolved || !Array.isArray(diff.changedFiles)) return false
+  if (diff.changedFiles.length === 0) return true
+  const footprint = normFiles(entry.result.files)
+  if (footprint.length === 0) return false
+  const changed = new Set(normFiles(diff.changedFiles).map(fileKey))
+  return !footprint.some((f) => changed.has(fileKey(f)))
 }
 
 const INJECTION_GUARD =
@@ -562,12 +666,36 @@ const UPDATED_AT = new Map()
 for (const it of ((metaRes && Array.isArray(metaRes.items)) ? metaRes.items : [])) {
   if (it && Number.isInteger(it.number)) UPDATED_AT.set(it.number, typeof it.updatedAt === 'string' ? it.updatedAt : '')
 }
+const HEAD_SHA = (metaRes && typeof metaRes.headSha === 'string') ? metaRes.headSha : ''
+
+// Tree-diff check (#223): only entries whose cached headSha differs from the current HEAD
+// need a diff — an entry whose headSha already matches is trivially unstale and
+// ckptReusable never consults DIFFS for it. Collecting the candidate shas UP FRONT keeps
+// this a SINGLE extra agent call for the whole batch (one per DISTINCT cached sha), never
+// one per PR.
+const SHAS_TO_CHECK = new Set()
+if (!FRESH && HEAD_SHA) {
+  for (const p of kept) {
+    const entry = CKPT_STATE[String(p.number)]
+    if (entry && typeof entry === 'object' && entry.headSha && entry.headSha !== HEAD_SHA) SHAS_TO_CHECK.add(entry.headSha)
+  }
+}
+const DIFFS = new Map()
+if (SHAS_TO_CHECK.size) {
+  const shaList = [...SHAS_TO_CHECK].sort()
+  log(`Checkpoint: tree-checking ${shaList.length} cached HEAD sha(s) against current ${HEAD_SHA} ` +
+    `(#223: a cached verdict is a claim about repo state, not just PR text).`)
+  const treeRes = await agent(CKPT_TREECHECK_PROMPT(shaList), { label: 'ckpt-treecheck', phase: 'Triage', agentType: READONLY_AGENT, schema: CKPT_TREECHECK_SCHEMA, effort: 'low' })
+  for (const d of ((treeRes && Array.isArray(treeRes.diffs)) ? treeRes.diffs : [])) {
+    if (d && typeof d.sha === 'string') DIFFS.set(d.sha, d)
+  }
+}
 
 const keptToRun = []
 const reused = []
 for (const p of kept) {
   const entry = CKPT_STATE[String(p.number)]
-  if (!FRESH && ckptReusable(entry, UPDATED_AT.get(p.number))) reused.push({ number: p.number, result: entry.result })
+  if (!FRESH && ckptReusable(entry, UPDATED_AT.get(p.number), HEAD_SHA, DIFFS)) reused.push({ number: p.number, result: entry.result })
   else keptToRun.push(p)
 }
 if (reused.length) {
@@ -631,6 +759,7 @@ for (const r of fresh) {
   mergedEntries[String(r.number)] = {
     number: r.number,
     updatedAt: UPDATED_AT.get(r.number) || '',
+    headSha: HEAD_SHA || '',
     spineVersion: SPINE_VERSION,
     result: r,
   }
