@@ -472,23 +472,37 @@ if (NUMBERS.length === 0) {
     '`gh issue list --state open` returned none. Pass args.numbers explicitly, or confirm there are open issues.')
 }
 
+// Free-text caps (issue #233). TRIAGE_CAPS is the INTENDED bound — still enforced by
+// clampToTriageCaps() below, right after each classify response comes back — but the
+// schema's own maxLength gives the model a CAP_MARGIN_PCT tolerance on top of it. Without
+// that margin the classifier reliably overshoots the bare cap by a handful of characters
+// (observed 2026-09-19 triaging schmug/contextbuddy#6: rationale 602/600, research_context
+// 4004/4000), the StructuredOutput retry cap (5) exhausts on the same near-miss every time,
+// and the issue is dropped to missing[] with no assessment at all — the tightest cap
+// biting hardest on RESEARCH, the bucket with the most to say. A schema-valid near-miss is
+// now accepted on the first try and clamped in script code to the same intended bound, so
+// the downstream (checkpoint, synthesis, echoed-into-other-prompts) text is never unbounded.
+const TRIAGE_CAPS = { title: 300, rationale: 600, research_context: 4000 }
+const CAP_MARGIN_PCT = 0.10
+const capWithMargin = (n) => Math.ceil(n * (1 + CAP_MARGIN_PCT))
+
 const TRIAGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['number', 'classification', 'rationale', 'complexity'],
   properties: {
     number: { type: 'integer' },
-    title: { type: 'string', maxLength: 300 },
+    title: { type: 'string', maxLength: capWithMargin(TRIAGE_CAPS.title) },
     classification: {
       type: 'string',
       enum: ['GREEN', 'DECISION', 'RESEARCH', 'DONE', 'BLOCKED'],
       description: 'GREEN=properly specced + implementable now, no human decision; DECISION=needs a human product/architecture choice with no sensible default; RESEARCH=underdetermined, needs investigation before it can be specced; DONE=already satisfied by current repo state; BLOCKED=needs an external secret/API key, repo-admin access, or is explicitly future-scoped',
     },
     group: { type: 'string', description: 'For GREEN: a canonical grouping key so related issues batch into one PR (e.g. ci, repo-hygiene, security-fix, audit, docs, tooling, tests). Empty if not GREEN.' },
-    rationale: { type: 'string', maxLength: 600, description: '2-4 sentences citing concrete repo evidence (files that exist or not, acceptance criteria met or not).' },
+    rationale: { type: 'string', maxLength: capWithMargin(TRIAGE_CAPS.rationale), description: '2-4 sentences citing concrete repo evidence (files that exist or not, acceptance criteria met or not).' },
     decision_question: { type: 'string', description: 'For DECISION: the single crisp question the human must answer — copied VERBATIM from the issue when it is a `needs-decision`-labeled brief that already states one. Empty otherwise.' },
     decision_options: { type: 'array', items: { type: 'string' }, description: 'For DECISION: 2-4 concrete options, recommended first — copied VERBATIM, in the brief\'s own order, from a `needs-decision`-labeled brief that already lists them. Empty otherwise.' },
-    research_context: { type: 'string', maxLength: 4000, description: 'For RESEARCH: markdown findings + suggested approach, ready to post as an issue comment. Empty otherwise.' },
+    research_context: { type: 'string', maxLength: capWithMargin(TRIAGE_CAPS.research_context), description: 'For RESEARCH: markdown findings + suggested approach, ready to post as an issue comment. Empty otherwise.' },
     blocker: { type: 'string', description: 'For BLOCKED: the exact external dependency. Empty otherwise.' },
     already_done_evidence: { type: 'string', description: 'For DONE: proving files/commits. Empty otherwise.' },
     files: { type: 'array', items: { type: 'string' }, description: 'Likely files to create/modify if implemented (used for collision/grouping analysis).' },
@@ -496,6 +510,26 @@ const TRIAGE_SCHEMA = {
     depends_on: { type: 'array', items: { type: 'integer' }, description: 'Other open issue numbers that must land first.' },
     security_critical: { type: 'boolean', description: 'True if it touches security-critical invariants/planes of this project.' },
   },
+}
+
+// Script-side clamp back down to the INTENDED cap (TRIAGE_CAPS), applied to every fresh
+// classify result before it is merged into the checkpoint or returned — so the schema
+// margin above never lets an unbounded (or merely over-intended-cap) string reach a
+// downstream prompt (synthesis, issue-research-fanout's seed, the checkpoint file).
+// Truncation is logged (no-silent-caps), never silent.
+function clampToTriageCaps(r) {
+  const truncatedFields = []
+  for (const field of Object.keys(TRIAGE_CAPS)) {
+    const cap = TRIAGE_CAPS[field]
+    if (typeof r[field] === 'string' && r[field].length > cap) {
+      r[field] = r[field].slice(0, cap)
+      truncatedFields.push(field)
+    }
+  }
+  if (truncatedFields.length) {
+    log(`⚠️ #${r.number}: truncated ${truncatedFields.join(', ')} to the ${truncatedFields.map((f) => `${TRIAGE_CAPS[f]}-char`).join('/')} intended cap (schema allowed a ${Math.round(CAP_MARGIN_PCT * 100)}% margin over it).`)
+  }
+  return r
 }
 
 // DECISION-BRIEF CONTRACT (issue #131). An unattended run (cron routine, /loop,
@@ -704,7 +738,8 @@ const results = await runWaves(toRun, async (n) => {
   const fetched = await agent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
   if (!fetched) return null
   const fenced = fence(fetched.nonce, fetched.raw)
-  return agent(PROMPT(n, fenced), { label: `triage:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: TRIAGE_SCHEMA })
+  const r = await agent(PROMPT(n, fenced), { label: `triage:#${n}`, phase: 'Triage', agentType: READONLY_AGENT, schema: TRIAGE_SCHEMA })
+  return r ? clampToTriageCaps(r) : r
 }, BATCH)
 
 // Fold the freshly-computed results and the reused (checkpoint-hit) results into one set.

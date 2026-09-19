@@ -793,15 +793,76 @@ test('#178 the worked example is synthetic and self-fenced, not the real issue b
     'the example does not reuse the real issue\'s fetch nonce')
 })
 
-test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLength', async () => {
+test('#178 the TRIAGE_SCHEMA free-text fields named in the issue carry a maxLength (with the #233 tolerance margin)', async () => {
   const { calls } = await runScript({ args: { numbers: [7] } })
   const cls = agentsByLabelPrefix(calls, 'triage:#')[0]
   const props = cls.opts.schema.properties
-  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
-  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
-  assert.equal(props.research_context.maxLength, 4000, 'research_context (long-form) is capped at 4000 chars')
+  // #233: the schema's own maxLength is the INTENDED cap plus a tolerance margin (so a
+  // near-miss classify response is schema-valid on the first try); the intended cap is
+  // still enforced by script-side clamping, asserted separately below.
+  assert.equal(props.title.maxLength, 330, 'title schema cap is 300 + 10% margin')
+  assert.equal(props.rationale.maxLength, 660, 'rationale schema cap is 600 + 10% margin')
+  assert.equal(props.research_context.maxLength, 4400, 'research_context schema cap is 4000 + 10% margin')
   assert.ok(props.research_context.maxLength > props.rationale.maxLength, 'the long-form field gets a more generous cap than the short rationale')
   assert.ok(props.rationale.maxLength >= 400, 'the rationale cap still admits a real 2-4 sentence answer')
+})
+
+// ===================== FREE-TEXT CAP TOLERANCE (issue #233) =====================
+// A classifier reliably overshoots a bare maxLength cap by a handful of characters
+// (observed schmug/contextbuddy#6: rationale 602/600, research_context 4004/4000). Before
+// this fix that overshoot was a schema violation that burned the whole StructuredOutput
+// retry budget (5) and dropped the issue to missing[] with no assessment at all. The
+// schema now gives a 10% margin over the intended cap, and script code clamps the
+// response back down to the intended cap so nothing unbounded reaches the checkpoint or a
+// downstream prompt (e.g. issue-research-fanout's seed).
+
+test('#233 a near-miss overshoot (a few chars over the intended cap) is accepted and truncated, not dropped to missing[]', async () => {
+  const overRationale = 'r'.repeat(602) // observed failure length: 602/600
+  const overResearch = 'x'.repeat(4004) // observed failure length: 4004/4000
+  const { result, calls } = await runScript({
+    args: { numbers: [7] },
+    triage: (n) => ({ ...defaultTriage(n), classification: 'RESEARCH', rationale: overRationale, research_context: overResearch }),
+  })
+  assert.deepEqual(result.missing, [], 'a near-miss overshoot must never be dropped to missing[]')
+  assert.equal(result.triaged.length, 1, 'the issue is still assessed')
+  const r = result.triaged[0]
+  assert.equal(r.rationale.length, 600, 'rationale is clamped back to the intended 600-char cap')
+  assert.equal(r.research_context.length, 4000, 'research_context is clamped back to the intended 4000-char cap')
+  assert.ok(overRationale.startsWith(r.rationale), 'the clamp truncates from the end, keeping the leading content')
+  assert.ok(overResearch.startsWith(r.research_context), 'the clamp truncates from the end, keeping the leading content')
+})
+
+test('#233 an overshoot beyond even the schema margin still fails through to missing[] (the margin is not unlimited)', async () => {
+  // Simulates the StructuredOutput layer this sim cannot itself run: a response so far over
+  // the (margined) schema cap that real schema validation would still reject it and the
+  // retry budget would exhaust, so the fetch/classify chain never resolves for this issue.
+  const { result } = await runScript({ args: { numbers: [7, 8] }, triage: (n) => (n === 8 ? null : defaultTriage(n)) })
+  assert.deepEqual(result.missing, [8], 'an unresolvable classify still lands in missing[] — the margin bounds retries, it does not eliminate them')
+})
+
+test('#233 truncation is logged, never silent (no-silent-caps)', async () => {
+  const { calls } = await runScript({
+    args: { numbers: [7] },
+    triage: (n) => ({ ...defaultTriage(n), rationale: 'r'.repeat(602) }),
+  })
+  const truncLog = calls.logs.find((m) => /truncat/i.test(m) && /#7\b/.test(m))
+  assert.ok(truncLog, 'a log line names the truncated issue')
+  assert.ok(/rationale/.test(truncLog), 'the log names which field was truncated')
+})
+
+test('#233 a response within cap (no overshoot) is left byte-for-byte unchanged', async () => {
+  const { result } = await runScript({
+    args: { numbers: [7] },
+    triage: (n) => ({ ...defaultTriage(n), rationale: 'short and fine', research_context: 'also fine' }),
+  })
+  assert.equal(result.triaged[0].rationale, 'short and fine', 'no truncation applied when already within cap')
+  assert.equal(result.triaged[0].research_context, 'also fine', 'no truncation applied when already within cap')
+})
+
+test('#233 caps and tolerance are defined once, near the schema, with a comment naming the observed failure lengths', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(/CAP_MARGIN_PCT/.test(src), 'a named tolerance constant exists')
+  assert.ok(/602/.test(src) && /4004/.test(src), 'the comment names the observed failure lengths from the repro (602/600, 4004/4000)')
 })
 
 test('#178 the worked example reaches EVERY classify prompt in a wave, not just the first', async () => {
