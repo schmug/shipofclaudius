@@ -349,12 +349,15 @@ test('README pins no hardcoded test total (nothing can verify one from inside th
 test('CLAUDE.md pins no hardcoded test total either (the pin that outlived #69)', () =>
   assertPinsNoTotal('CLAUDE.md'))
 
-// ---- dispatched agentTypes must actually ship ----
-// A workflow's `agentType:` is resolved by Claude Code against its agent registry. A name no
-// bundled file defines resolves to nothing the repo controls: on a fresh `claude plugin install`
-// the maintainer's personal ~/.claude/agents/ copy is absent, so `security-hardening-reviewer` --
-// which README's Security model cites twice as an active mitigation, and which fix-finding makes
-// its ENTIRE Verify phase -- silently was not there for anyone but the maintainer (#70).
+// ---- dispatched agentTypes must actually ship, under the name the runtime registers ----
+// A workflow's `agentType:` is resolved by Claude Code against its agent registry. A plugin-shipped
+// agent (declared in plugin.json's "agents" key) registers on install as `<pluginName>:<name>` --
+// NOT the bare frontmatter `name:` from its .claude/agents/*.md. A bare literal like
+// `security-hardening-reviewer` -- which README's Security model cites twice as an active
+// mitigation, and which fix-finding makes its ENTIRE Verify phase -- resolves to nothing this repo
+// controls on a fresh `claude plugin install` (#70, and again via the still-unnamespaced dispatch
+// itself in #232). So every non-built-in dispatch is required to carry the plugin-name prefix, and
+// only the stripped, bare remainder is checked against what .claude/agents/*.md actually ships.
 
 // Runtime-provided types. Not ours to ship, so exempt.
 const BUILTIN_AGENTS = new Set(['Explore', 'Plan', 'general-purpose'])
@@ -411,15 +414,22 @@ const dispatchedAgentTypes = async () => {
   return out
 }
 
-test('every non-built-in agentType dispatched from a workflow is shipped under .claude/agents/', async () => {
+test('every non-built-in agentType dispatched from a workflow is shipped, namespaced for plugin delivery', async () => {
   const shipped = await shippedAgentNames()
   const dispatched = await dispatchedAgentTypes()
   assert.ok(dispatched.length > 0, 'sanity: the scan found agentType dispatches at all')
+  const pluginName = (await readJSON('.claude-plugin/plugin.json')).name
+  const prefix = `${pluginName}:`
   for (const { wf, agent, via } of dispatched) {
     if (BUILTIN_AGENTS.has(agent)) continue
-    assert.ok(shipped.has(agent),
+    assert.ok(agent.startsWith(prefix),
+      `${wf} dispatches agentType "${agent}" (${via}) as a bare name -- a plugin-shipped agent only ` +
+      `registers as "${prefix}<name>" for installers, so the bare form resolves to nothing outside a ` +
+      `session shadowed by a personal ~/.claude/agents/ copy. Use "${prefix}${agent}".`)
+    const bare = agent.slice(prefix.length)
+    assert.ok(shipped.has(bare),
       `${wf} dispatches agentType "${agent}" (${via}) but no .claude/agents/*.md declares ` +
-      `\`name: ${agent}\` -- on a fresh plugin install it resolves to nothing this repo controls. ` +
+      `\`name: ${bare}\` -- on a fresh plugin install it resolves to nothing this repo controls. ` +
       `Shipped: [${[...shipped.keys()].join(', ') || 'none'}]`)
   }
 })

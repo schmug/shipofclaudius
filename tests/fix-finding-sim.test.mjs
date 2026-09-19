@@ -237,7 +237,7 @@ test('a security-hardening-reviewer adversarially verifies the fix after the PR 
   const { calls } = await runScript({ args: baseArgs() })
   const r = byPrefix(calls, 'review')[0]
   assert.ok(r, 'a review agent ran')
-  assert.equal(r.opts.agentType, 'security-hardening-reviewer', 'review uses the hardening reviewer agent')
+  assert.equal(r.opts.agentType, 'shipofclaudius:security-hardening-reviewer', 'review uses the namespaced hardening reviewer agent')
   const reviewIdx = calls.agents.findIndex((a) => (a.opts.label || '').startsWith('review'))
   const fixIdx = calls.agents.findIndex((a) => (a.opts.label || '').startsWith('fix'))
   assert.ok(fixIdx >= 0 && reviewIdx > fixIdx, 'the reviewer runs after the fix opens the PR')
@@ -372,7 +372,7 @@ test('models: the model pin does not disturb the fix agent tools or the reviewer
   const r = byPrefix(calls, 'review')[0]
   assert.equal(f.opts.isolation, 'worktree', 'the fix agent keeps worktree isolation')
   assert.ok(!f.opts.agentType, 'the fix agent keeps its write tools (no read-only agentType)')
-  assert.equal(r.opts.agentType, 'security-hardening-reviewer', 'model independence is ADDED TO role independence, not swapped for it')
+  assert.equal(r.opts.agentType, 'shipofclaudius:security-hardening-reviewer', 'model independence is ADDED TO role independence, not swapped for it')
 })
 
 // ---------- #181: followups (test-sizing guidance + a structured escape hatch) ----------
