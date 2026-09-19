@@ -566,7 +566,7 @@ async function runLane(lane, base, laneMode, stackedOn) {
   let review = null
   if (impl && lane.invariant && impl.status === 'PR_OPENED') {
     review = await runAgent(REVIEW_PROMPT(lane, impl, base), {
-      label: `review:${lane.key}`, phase: 'Review', agentType: 'security-hardening-reviewer',
+      label: `review:${lane.key}`, phase: 'Review', agentType: 'shipofclaudius:security-hardening-reviewer',
     })
   }
   // Doc-freshness completeness-critic (read-only, per opened lane): flag behavior-change-

@@ -193,7 +193,7 @@ test('the security-hardening-reviewer gate is preserved on invariant lanes', asy
   const { calls } = await runScript({ args: { lanes: [lane({ invariant: true })] } })
   const rev = byPrefix(calls, 'review:')[0]
   assert.ok(rev, 'review agent ran for the invariant lane')
-  assert.equal(rev.opts.agentType, 'security-hardening-reviewer', 'review still uses the hardening reviewer agent')
+  assert.equal(rev.opts.agentType, 'shipofclaudius:security-hardening-reviewer', 'review still uses the namespaced hardening reviewer agent')
 })
 
 test('a multi-issue lane fences every issue text into the impl prompt', async () => {

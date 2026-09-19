@@ -402,7 +402,7 @@ if (!impl || impl.status !== 'PR_OPENED') {
 // ── Phase: Verify (read-only, adversarial) ──
 phase('Verify')
 const review = await agent(REVIEW_PROMPT(impl), {
-  label: `review:${KEY}`, phase: 'Verify', agentType: 'security-hardening-reviewer', model: REVIEW_MODEL, schema: REVIEW_SCHEMA,
+  label: `review:${KEY}`, phase: 'Verify', agentType: 'shipofclaudius:security-hardening-reviewer', model: REVIEW_MODEL, schema: REVIEW_SCHEMA,
 })
 
 // Confidence from the fix status + the adversarial review. A weakened control (self-reported OR
