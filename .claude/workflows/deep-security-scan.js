@@ -246,7 +246,12 @@ const fnv1a32 = (str, seed) => {
 }
 const contentHash = (str) => fnv1a32(str, 0x811c9dc5).toString(16).padStart(8, '0') + fnv1a32('scf ' + str, 0x811c9dc5).toString(16).padStart(8, '0')
 const rootCause = (f) => normPart(f.sink) || normPart(f.source) || normPart(f.title) // the most stable non-line signal of WHAT it is
-const fingerprintOf = (f) => 'scf1:' + contentHash([normPart(stripLine(f.file || f.location || '')), normPart(f.vuln_class), rootCause(f)].join(''))
+// scf2 (bumped from scf1, issue #238): dropped vuln_class from the content address. Different
+// lenses routinely name the same defect differently (supply-chain vs injection vs
+// ci-workflow-injection for one $GITHUB_OUTPUT newline-injection bug), so a class-keyed fingerprint
+// let a renamed class re-surface as a brand-new finding against args.priorBundle. rootCause
+// (sink/source/title) is the stable non-line signal that already does the identity work.
+const fingerprintOf = (f) => 'scf2:' + contentHash([normPart(stripLine(f.file || f.location || '')), rootCause(f)].join(''))
 
 // SARIF 2.1.0 projection of a findings doc (for CodeQL/Semgrep/Trail-of-Bits interop). Built in
 // plain JS so it is deterministic and offline-validatable against the SARIF schema.
@@ -547,13 +552,16 @@ const seen = new Map()
 let nextId = 1
 let uniqueTotal = 0
 const addCandidate = (c) => {
-  // Collapse the same issue found by multiple lenses or rounds: same file + class + ~line bucket.
-  const key = `${norm(c.file)}|${norm(c.vuln_class)}|${Math.round((c.line || 0) / 8)}`
-  const altKey = `${norm(c.file)}|${norm(c.title)}`
-  if (seen.has(key) || seen.has(altKey)) return false
+  // Collapse the same issue found by multiple lenses or rounds: same file + same stable root-cause
+  // signal (sink/source, falling back to title) — independent of what each lens calls the
+  // vuln_class and of each lens's best-guess line, both of which drift across independent passes
+  // (issue #238: the same $GITHUB_OUTPUT-injection bug came back under three different classes).
+  // A genuinely distinct defect at the same file:line still gets its own key, because rootCause
+  // distinguishes on sink/source rather than collapsing on file+line alone.
+  const key = `${norm(c.file)}|${rootCause(c)}`
+  if (seen.has(key)) return false
   const entry = { id: `f${nextId++}`, ...c }
   seen.set(key, entry)
-  seen.set(altKey, entry)
   uniqueTotal++
   return true
 }

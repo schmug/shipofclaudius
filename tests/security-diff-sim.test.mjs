@@ -441,6 +441,52 @@ test('dedup precedence: the earlier (lower-id) worker wins a colliding candidate
   assert.equal(result.reportable[0].source, 'WORKER0', 'earlier worker survives the dedup tie')
 })
 
+// ---- vuln_class-independent dedup + fingerprint (issue #238) — mirrors dss-sim's V3 suite ----
+// Different lenses routinely name the same defect differently (the bake-off repro: one
+// $GITHUB_OUTPUT newline-injection bug came back under supply-chain, injection, and
+// ci-workflow-injection from three separate workers). addCandidate and fingerprintOf must
+// collapse those to ONE candidate / ONE fingerprint by keying on rootCause (sink/source/title)
+// instead of vuln_class, while still keeping genuinely distinct defects at the same file:line
+// apart via their differing sink/source. security-diff-scan.js carries the identical change.
+
+const discoveryClassMismatch = (prompt) => {
+  const id = Number((prompt.match(/worker #(\d+)/) || [])[1])
+  const base = { file: 'scripts/mythos/run.ts', line: 151, change_ref: 'scripts/mythos/run.ts:+151', introduced: 'added', source: 'GITHUB_OUTPUT', sink: 'echo >> $GITHUB_OUTPUT', why: 'unescaped newline lets attacker-controlled output inject extra keys' }
+  const byId = [
+    { title: 'GITHUB_OUTPUT newline injection (supply-chain framing)', vuln_class: 'supply-chain' },
+    { title: 'workflow output injection', vuln_class: 'injection' },
+    { title: 'CI workflow output injection', vuln_class: 'ci-workflow-injection' },
+  ]
+  const pick = byId[id] || byId[byId.length - 1]
+  return { threat_model: 'tm', hunks_reviewed: 1, candidates: [{ ...base, ...pick }] }
+}
+
+test('v3: same file + same rootCause but different vuln_class collapses to ONE candidate', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 3 }, map: { discovery: discoveryClassMismatch } })
+  assert.equal(result.candidates, 1, `3 lenses naming the same defect 3 different classes must collapse to 1, got ${result.candidates}`)
+})
+
+test('v3: the collapsed pair produces one identical scf2: fingerprint', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 3 }, map: { discovery: discoveryClassMismatch } })
+  assert.equal(result.bundle.findings.length, 1, 'one finding in the bundle')
+  assert.ok(result.bundle.findings[0].fingerprint.startsWith('scf2:'), 'fingerprint prefix bumped to scf2 (compatibility break)')
+})
+
+const discoveryDistinctSinksSameLine = (prompt) => {
+  const id = Number((prompt.match(/worker #(\d+)/) || [])[1])
+  if (id === 0) {
+    return { threat_model: 'tm', hunks_reviewed: 1, candidates: [{ title: 'missing owner check before delete', file: 'src/api.ts', line: 88, change_ref: 'src/api.ts:+88', introduced: 'added', vuln_class: 'missing-authz', source: 'req.user', sink: 'checkOwnership', why: 'no owner check on this line' }] }
+  }
+  return { threat_model: 'tm', hunks_reviewed: 1, candidates: [{ title: 'raw query on the same line', file: 'src/api.ts', line: 88, change_ref: 'src/api.ts:+88', introduced: 'added', vuln_class: 'sql-injection', source: 'req.body', sink: 'db.raw', why: 'a second, separate sink on the same line' }] }
+}
+
+test('v3: two genuinely distinct defects at the same file:line do NOT over-collapse', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map: { discovery: discoveryDistinctSinksSameLine } })
+  assert.equal(result.candidates, 2, 'a missing-authz check and a separate injection sink on one line stay separate')
+  const fps = new Set(result.bundle.findings.map((f) => f.fingerprint))
+  assert.equal(fps.size, 2, 'and they get two distinct fingerprints')
+})
+
 test('zero candidates -> early return "reviewed, found nothing", no report agent', async () => {
   const map = { discovery: () => emptyDiscovery }
   const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, map })
@@ -631,9 +677,10 @@ test('report prompt carries the scope + reportable findings for rendering', asyn
 
 // ============= SEALED FINGERPRINTED BUNDLE + COVERAGE SCHEMA + SARIF (issue #21) =============
 // Same cross-run findings contract as deep-security-scan, scoped to the change: each confirmed
-// in-scope finding gets a stable fingerprint (file + class + normalized root-cause, NOT the
-// line/change_ref which drift); the coverage doc distinguishes "not observed" from "not scanned";
-// args.priorBundle dedups across runs with a delta. Mirrors dss-sim's bundle suite.
+// in-scope finding gets a stable fingerprint (file + normalized root-cause, NOT the vuln_class
+// or the line/change_ref, all of which drift across lenses/edits — issue #238); the coverage doc
+// distinguishes "not observed" from "not scanned"; args.priorBundle dedups across runs with a
+// delta. Mirrors dss-sim's bundle suite.
 
 test('report prompt: bundle + SARIF embedding carries no base64', async () => {
   const map = {}
@@ -715,7 +762,7 @@ test('priorBundle as a path triggers a read-only loader relay (Explore) — fail
 })
 
 test('no-change-in-scope still emits a bundle (unknown completeness, no misleading delta)', async () => {
-  const map = { resolve: RESOLVE_EMPTY, priorLoaded: { ok: true, content: '{"findings":[{"fingerprint":"scf1:abc"}]}', note: 'ok' } }
+  const map = { resolve: RESOLVE_EMPTY, priorLoaded: { ok: true, content: '{"findings":[{"fingerprint":"scf2:abc"}]}', note: 'ok' } }
   const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: '/tmp/p.json' }, map })
   assert.ok(result.bundle, 'a bundle is emitted even when nothing was in scope')
   assert.equal(result.bundle.coverage.completeness, 'unknown', 'nothing scanned -> unknown')

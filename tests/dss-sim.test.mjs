@@ -336,6 +336,55 @@ test('v2: validator prompt is trace-only with >80% confidence floor', async () =
   assert.ok(prompts.every((p) => p.includes('80%')), 'confidence floor present')
 })
 
+// ================= V3: vuln_class-independent dedup + fingerprint (issue #238) =================
+// Different lenses routinely name the same defect differently (the bake-off repro: one
+// $GITHUB_OUTPUT newline-injection bug came back under supply-chain, injection, and
+// ci-workflow-injection from three separate workers). addCandidate and fingerprintOf must
+// collapse those to ONE candidate / ONE fingerprint by keying on rootCause (sink/source/title)
+// instead of vuln_class, while still keeping genuinely distinct defects at the same file:line
+// apart via their differing sink/source.
+
+const discoveryClassMismatch = (prompt) => {
+  const id = Number((prompt.match(/worker #(\d+)/) || [])[1])
+  const base = { file: 'scripts/mythos/run.ts', line: 151, source: 'GITHUB_OUTPUT', sink: 'echo >> $GITHUB_OUTPUT', why: 'unescaped newline lets attacker-controlled output inject extra keys' }
+  const byId = [
+    { title: 'GITHUB_OUTPUT newline injection (supply-chain framing)', vuln_class: 'supply-chain' },
+    { title: 'workflow output injection', vuln_class: 'injection' },
+    { title: 'CI workflow output injection', vuln_class: 'ci-workflow-injection' },
+  ]
+  const pick = byId[id] || byId[byId.length - 1]
+  return { threat_model: 'tm', files_reviewed: 1, candidates: [{ ...base, ...pick }] }
+}
+
+test('v3: same file + same rootCause but different vuln_class collapses to ONE candidate', async () => {
+  const map = { tool: toolMissing, discovery: discoveryClassMismatch }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.candidates, 1, `3 lenses naming the same defect 3 different classes must collapse to 1, got ${result.candidates}`)
+})
+
+test('v3: the collapsed pair produces one identical scf2: fingerprint', async () => {
+  const map = { tool: toolMissing, discovery: discoveryClassMismatch }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.bundle.findings.length, 1, 'one finding in the bundle')
+  assert.ok(result.bundle.findings[0].fingerprint.startsWith('scf2:'), 'fingerprint prefix bumped to scf2 (compatibility break)')
+})
+
+const discoveryDistinctSinksSameLine = (prompt) => {
+  const id = Number((prompt.match(/worker #(\d+)/) || [])[1])
+  if (id === 0) {
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: 'missing owner check before delete', file: 'src/api.ts', line: 88, vuln_class: 'missing-authz', source: 'req.user', sink: 'checkOwnership', why: 'no owner check on this line' }] }
+  }
+  return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: 'raw query on the same line', file: 'src/api.ts', line: 88, vuln_class: 'sql-injection', source: 'req.body', sink: 'db.raw', why: 'a second, separate sink on the same line' }] }
+}
+
+test('v3: two genuinely distinct defects at the same file:line do NOT over-collapse', async () => {
+  const map = { tool: toolMissing, discovery: discoveryDistinctSinksSameLine }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(result.candidates, 2, 'a missing-authz check and a separate injection sink on one line stay separate')
+  const fps = new Set(result.bundle.findings.map((f) => f.fingerprint))
+  assert.equal(fps.size, 2, 'and they get two distinct fingerprints')
+})
+
 // ================= REPORT-MD HARDENING (workflow-subagent guardrail) =================
 // The workflow runtime blocks subagents from WRITING report.md ("return findings as text,
 // not write report files") while allowing report.html. The report agent must return the
