@@ -107,6 +107,15 @@ const toolOk = {
 }
 const toolMissing = { ran: false, tool_version: '', files_scanned: 0, note: 'foxguard not installed', candidates: [] }
 const toolOkNoCount = { ...toolOk, files_scanned: 0 }
+// toolOk (above) has only a sql-injection candidate — zero dependency findings — the exact
+// shape of issue #237's repro (foxguard ran, found code-rule hits, found no CVE/OSV hits).
+const toolOkEmpty = { ran: true, tool_version: '0.8.1', files_scanned: 12, note: 'ok', candidates: [] }
+const toolOkWithDep = {
+  ran: true, tool_version: '0.8.1', files_scanned: 12, note: 'ok',
+  candidates: [
+    { title: 'vulnerable dependency: astro', file: 'package-lock.json', line: 0, vuln_class: 'vulnerable-dependency', source: 'foxguard:osv-astro', sink: '', why: 'tool match' },
+  ],
+}
 
 // ---- canned factual-verification verdicts (Verify phase grounds each reportable finding) ----
 const verifyOk = {
@@ -243,6 +252,36 @@ test('v2: discovery lenses are re-aimed only when the tool ran', async () => {
   const map2 = { tool: toolMissing, discovery: (p) => { calls2.push(p); return discoveryTwo } }
   await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map2) })
   assert.ok(calls2.length > 0 && calls2.every((p) => !p.includes('already swept')), 'no re-aim note when tool skipped')
+})
+
+test('#237: TOOL_NOTE with zero dependency candidates makes no OSV/dependency-coverage claim', async () => {
+  const calls = []
+  // toolOk carries one sql-injection candidate and NO vulnerable-dependency candidate.
+  const map = { tool: toolOk, discovery: (p) => { calls.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(calls.length > 0, 'discovery ran')
+  for (const p of calls) {
+    assert.ok(!/known-CVE dependenc/i.test(p), 'must not claim CVE/dependency coverage when no dependency candidate was found')
+    assert.ok(!/\bOSV\b/.test(p), 'must not claim OSV coverage when no dependency candidate was found')
+  }
+})
+
+test('#237: TOOL_NOTE claims OSV/dependency coverage only when a vulnerable-dependency candidate is actually present', async () => {
+  const calls = []
+  const map = { tool: toolOkWithDep, discovery: (p) => { calls.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(calls.length > 0 && calls.every((p) => /known-CVE dependenc/i.test(p) && /OSV/.test(p)), 'claims dependency coverage when the tool actually returned a dependency candidate')
+})
+
+test('#237: TOOL_NOTE with the tool run but zero candidates tells workers to hunt every class', async () => {
+  const calls = []
+  const map = { tool: toolOkEmpty, discovery: (p) => { calls.push(p); return discoveryTwo } }
+  await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.ok(calls.length > 0, 'discovery ran')
+  for (const p of calls) {
+    assert.ok(!/already swept/.test(p), 'must not claim anything was swept when the tool found nothing')
+    assert.ok(/ZERO candidates/.test(p) && /hunt every class/.test(p), 'must explicitly tell workers to hunt everything')
+  }
 })
 
 test('v2: fail-open — tool missing still produces a full agentic run + SKIPPED coverage', async () => {
