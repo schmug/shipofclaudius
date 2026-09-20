@@ -411,7 +411,9 @@ const fnv1a32 = (str, seed) => {
 }
 const contentHash = (str) => fnv1a32(str, 0x811c9dc5).toString(16).padStart(8, '0') + fnv1a32('scf ' + str, 0x811c9dc5).toString(16).padStart(8, '0')
 const rootCause = (f) => normPart(f.sink) || normPart(f.source) || normPart(f.title)
-const fingerprintOf = (f) => 'scf1:' + contentHash([normPart(stripLine(f.file || f.location || '')), normPart(f.vuln_class), rootCause(f)].join(''))
+// scf2 (bumped from scf1, issue #238): dropped vuln_class from the content address — see
+// deep-security-scan.js's identical fingerprintOf for the rationale. Both files must stay in sync.
+const fingerprintOf = (f) => 'scf2:' + contentHash([normPart(stripLine(f.file || f.location || '')), rootCause(f)].join(''))
 const ruleIdOf = (f) => normPart(f.vuln_class).replace(/ /g, '-') || 'finding'
 const SARIF_SEV = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' }
 function buildSarif(toolName, findings) {
@@ -744,13 +746,15 @@ const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
 const seen = new Map()
 let nextId = 1
 const addCandidate = (c) => {
-  // Collapse the same issue found by multiple lenses: same file + class + ~line bucket.
-  const key = `${norm(c.file)}|${norm(c.vuln_class)}|${Math.round((c.line || 0) / 8)}`
-  const altKey = `${norm(c.file)}|${norm(c.title)}`
-  if (seen.has(key) || seen.has(altKey)) return
+  // Collapse the same issue found by multiple lenses: same file + same stable root-cause signal
+  // (sink/source, falling back to title) — independent of what each lens calls the vuln_class and
+  // of each lens's best-guess line, both of which drift across independent passes (issue #238).
+  // A genuinely distinct defect at the same file:line still gets its own key, because rootCause
+  // distinguishes on sink/source rather than collapsing on file+line alone.
+  const key = `${norm(c.file)}|${rootCause(c)}`
+  if (seen.has(key)) return
   const entry = { id: `f${nextId++}`, ...c }
   seen.set(key, entry)
-  seen.set(altKey, entry)
 }
 // Insertion order is dedup precedence: earlier (lower-id, lens-specialized) workers win ties.
 for (const d of clean) for (const c of (d.candidates || [])) addCandidate(c)
