@@ -490,10 +490,37 @@ Do NOT validate, filter, or fix — mapping only; skeptical validation happens d
   )
 }
 const toolCandidates = (toolReport && toolReport.ran && Array.isArray(toolReport.candidates)) ? toolReport.candidates : []
+// TOOL_NOTE class coverage (issue #237): claim coverage ONLY for classes toolCandidates
+// actually produced, derived from vuln_class — not a static list of what the tool can in
+// principle detect. A round with zero dependency candidates must not tell workers OSV/
+// dependency was swept: that silently suppressed the one lens that owns dependencies.
+const TOOL_NOTE_CLASS_LABELS = {
+  [normPart('hardcoded-secret')]: 'secret patterns',
+  [normPart('vulnerable-dependency')]: 'known-CVE dependencies (OSV)',
+  [normPart('weak-crypto')]: 'weak/legacy-crypto API calls',
+}
+const TOOL_NOTE_OTHER_LABEL = 'taint-rule SAST (injection/traversal-pattern matches)'
+function toolCoveredLabels(candidates) {
+  const classes = [...new Set(candidates.map((c) => normPart(c.vuln_class)).filter(Boolean))]
+  const labels = []
+  let sawOther = false
+  for (const cls of classes) {
+    const label = TOOL_NOTE_CLASS_LABELS[cls]
+    if (label) labels.push(label)
+    else sawOther = true
+  }
+  if (sawOther) labels.push(TOOL_NOTE_OTHER_LABEL)
+  return labels
+}
+const TOOL_COVERED_LABELS = toolCoveredLabels(toolCandidates)
 const TOOL_NOTE = (toolReport && toolReport.ran)
-  ? `
+  ? (toolCandidates.length === 0
+      ? `
 
-NOTE: a deterministic scanner (foxguard ${toolReport.tool_version}) already swept this target for pattern-matchable issues — secret patterns, known-CVE dependencies (OSV), taint-rule SAST, weak/legacy-crypto API calls — and its ${toolCandidates.length} findings are already in the pipeline. Do not spend depth re-finding those classes; go deep on what tools cannot see: authorization gaps, business logic, tenant isolation, multi-step chains, and semantic misuse of otherwise-sound primitives.`
+NOTE: a deterministic scanner (foxguard ${toolReport.tool_version}) ran against this target and returned ZERO candidates. Do not treat ANY class as pre-swept — hunt every class in your lens from scratch, including secrets, dependencies, SAST-pattern issues, and crypto misuse.`
+      : `
+
+NOTE: a deterministic scanner (foxguard ${toolReport.tool_version}) already swept this target for ${TOOL_COVERED_LABELS.join(', ')} — its ${toolCandidates.length} finding(s) in ${TOOL_COVERED_LABELS.length === 1 ? 'that class' : 'those classes'} are already in the pipeline, so do not spend depth re-finding ${TOOL_COVERED_LABELS.length === 1 ? 'it' : 'them'}. The prefilter is pattern-matching only, not exhaustive: go deep on every OTHER class too, plus what tools cannot see at all — authorization gaps, business logic, tenant isolation, multi-step chains, and semantic misuse of otherwise-sound primitives.`)
   : ''
 const TOOL_COVERAGE = !TOOLS.includes('foxguard')
   ? 'Deterministic prefilter disabled (args.tools=[]).'
