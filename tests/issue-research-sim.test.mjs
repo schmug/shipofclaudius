@@ -54,13 +54,17 @@ function greenResearch(n) {
 // ckpt-load agent returns; `ckptMeta(nums)` returns the {items:[{number,updatedAt}]}
 // the ckpt-meta agent resolves; `onWrite(state)` captures what the writer was handed.
 const DEFAULT_UPDATED_AT = '2026-06-20T00:00:00Z'
+const DEFAULT_HEAD_SHA = 'sha-baseline-0000000000000000000000000000000000'
 function defaultCkptMeta(nums) {
-  return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })) }
+  return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })), headSha: DEFAULT_HEAD_SHA }
+}
+function defaultCkptTreecheck(shas) {
+  return { diffs: shas.map((sha) => ({ sha, changedFiles: [], unresolved: false })) }
 }
 
-async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, onWrite } = {}) {
+async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, ckptTreecheck, onWrite } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
-  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', parallelBatches: [], metaNumbers: [], written: null }
+  const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', parallelBatches: [], metaNumbers: [], treecheckShas: [], written: null }
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -75,6 +79,12 @@ async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, on
       const nums = m ? m[1].split(',').map((s) => Number(s.trim())).filter(Number.isInteger) : []
       calls.metaNumbers = nums
       return ckptMeta ? ckptMeta(nums) : defaultCkptMeta(nums)
+    }
+    if (label === 'ckpt-treecheck') {
+      const m = prompt.match(/describes:\n([^\n]+)\n/)
+      const shas = m ? m[1].split(',').map((s) => s.trim()).filter(Boolean) : []
+      calls.treecheckShas = shas
+      return ckptTreecheck ? ckptTreecheck(shas) : defaultCkptTreecheck(shas)
     }
     if (label === 'ckpt-write') {
       // Parse the JSON the writer was handed (between the markers) so tests can assert it.
@@ -270,10 +280,10 @@ const readSpineVersion = async () => {
   return m ? m[1] : null
 }
 // Build a prior-state file string with cached entries for the given numbers.
-const priorState = (nums, { updatedAt = DEFAULT_UPDATED_AT, spineVersion } = {}) => {
+const priorState = (nums, { updatedAt = DEFAULT_UPDATED_AT, spineVersion, headSha = DEFAULT_HEAD_SHA } = {}) => {
   const entries = {}
   for (const n of nums) {
-    entries[String(n)] = { number: n, updatedAt, spineVersion, result: { ...greenResearch(n), rationale: 'CACHED' } }
+    entries[String(n)] = { number: n, updatedAt, headSha, spineVersion, result: { ...greenResearch(n), rationale: 'CACHED' } }
   }
   return JSON.stringify({ spineVersion, workflow: 'issue-research-fanout', entries })
 }
@@ -297,7 +307,7 @@ test('a changed updatedAt invalidates the cached entry and re-runs that issue', 
     args: { numbers: [12, 13] },
     ckptLoad: priorState([12, 13], { updatedAt: '2026-01-01T00:00:00Z', spineVersion: SPINE }),
     // current updatedAt for #13 differs from the cached one -> #13 must re-run; #12 unchanged.
-    ckptMeta: (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: n === 13 ? 'CHANGED' : '2026-01-01T00:00:00Z' })) }),
+    ckptMeta: (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: n === 13 ? 'CHANGED' : '2026-01-01T00:00:00Z' })), headSha: DEFAULT_HEAD_SHA }),
   })
   assert.deepEqual(result.reused, [12], 'only the unchanged issue is reused')
   assert.deepEqual(byPrefix(calls, 'research:#').map((a) => Number((a.opts.label || '').slice('research:#'.length))), [13], 'only the changed issue is re-researched')
@@ -386,6 +396,127 @@ test('the checkpoint agents only touch the local state file / read-only gh metad
   assert.ok(/state\//.test(load.prompt) && /issue-research-fanout\.json/.test(load.prompt), 'load reads the per-repo per-wf state path')
   assert.ok(/READ-ONLY/i.test(load.prompt) && /no mutating command/i.test(load.prompt), 'load is told to run no mutating command')
   assert.ok(/mkdir -p/.test(write.prompt) && /do NOT edit, comment/i.test(write.prompt), 'writer only mkdir+writes the local file, no GitHub mutation')
+})
+
+// ===================== TREE-DIFF CHECKPOINT (#223) =====================
+// See the fuller rationale in tests/issue-triage-sim.test.mjs — a cached verdict is a
+// claim about repo state, not just about issue text. Mirrored here for research.
+const OLD_SHA = 'sha-old-1111111111111111111111111111111111'
+const metaAtHead = (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })), headSha: 'sha-new-2222222222222222222222222222222222' })
+
+test('#223 a tree change that touches the cached footprint invalidates the entry (recompute)', async () => {
+  const SPINE = await readSpineVersion()
+  const entries = { '12': { number: 12, updatedAt: DEFAULT_UPDATED_AT, headSha: OLD_SHA, spineVersion: SPINE, result: { ...greenResearch(12), files: ['a.js'] } } }
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: JSON.stringify({ spineVersion: SPINE, workflow: 'issue-research-fanout', entries }),
+    ckptMeta: metaAtHead,
+    ckptTreecheck: (shas) => ({ diffs: shas.map((sha) => ({ sha, changedFiles: ['a.js'], unresolved: false })) }),
+  })
+  assert.deepEqual(result.reused, [], 'the entry is NOT reused once the tree diff touches its own footprint')
+  assert.equal(byPrefix(calls, 'research:#').length, 1, 'the issue is re-researched')
+})
+
+test('#223 a KNOWN footprint disjoint from the actual diff still reuses (no wasted recompute)', async () => {
+  const SPINE = await readSpineVersion()
+  const entries = { '12': { number: 12, updatedAt: DEFAULT_UPDATED_AT, headSha: OLD_SHA, spineVersion: SPINE, result: { ...greenResearch(12), files: ['src/hub.js'] } } }
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: JSON.stringify({ spineVersion: SPINE, workflow: 'issue-research-fanout', entries }),
+    ckptMeta: metaAtHead,
+    ckptTreecheck: (shas) => ({ diffs: shas.map((sha) => ({ sha, changedFiles: ['README.md'], unresolved: false })) }),
+  })
+  assert.deepEqual(result.reused, [12], 'the diff is disjoint from the cached footprint -> still reusable')
+  assert.equal(byPrefix(calls, 'research:#').length, 0)
+})
+
+test('#223 an UNKNOWN (empty) footprint (e.g. a non-GREEN verdict) fails closed on ANY tree change', async () => {
+  const SPINE = await readSpineVersion()
+  // DECISION/BLOCKED/STILL_RESEARCH verdicts carry no files[] — only GREEN does.
+  const entries = { '12': { number: 12, updatedAt: DEFAULT_UPDATED_AT, headSha: OLD_SHA, spineVersion: SPINE, result: { ...greenResearch(12), verdict: 'DECISION', files: [] } } }
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: JSON.stringify({ spineVersion: SPINE, workflow: 'issue-research-fanout', entries }),
+    ckptMeta: metaAtHead,
+    ckptTreecheck: (shas) => ({ diffs: shas.map((sha) => ({ sha, changedFiles: ['README.md'], unresolved: false })) }),
+  })
+  assert.deepEqual(result.reused, [], 'no files[] to prove disjointness -> falls back to the plain HEAD-sha key')
+  assert.equal(byPrefix(calls, 'research:#').length, 1)
+})
+
+test('#223 an EMPTY diff between the cached sha and HEAD reuses regardless of footprint', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: priorState([12], { spineVersion: SPINE, headSha: OLD_SHA }),
+    ckptMeta: metaAtHead,
+    ckptTreecheck: (shas) => ({ diffs: shas.map((sha) => ({ sha, changedFiles: [], unresolved: false })) }),
+  })
+  assert.deepEqual(result.reused, [12], 'byte-identical tree between the cached sha and HEAD -> reusable')
+  assert.equal(byPrefix(calls, 'research:#').length, 0)
+})
+
+test('#223 an UNRESOLVED diff fails closed and forces a recompute', async () => {
+  const SPINE = await readSpineVersion()
+  const entries = { '12': { number: 12, updatedAt: DEFAULT_UPDATED_AT, headSha: OLD_SHA, spineVersion: SPINE, result: { ...greenResearch(12), files: ['a.js'] } } }
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: JSON.stringify({ spineVersion: SPINE, workflow: 'issue-research-fanout', entries }),
+    ckptMeta: metaAtHead,
+    ckptTreecheck: (shas) => ({ diffs: shas.map((sha) => ({ sha, changedFiles: [], unresolved: true })) }),
+  })
+  assert.deepEqual(result.reused, [], 'an unresolved diff must never be read as "no changes"')
+  assert.equal(byPrefix(calls, 'research:#').length, 1)
+})
+
+test('#223 an unresolved current HEAD forces a full recompute even with an unchanged updatedAt', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    ckptLoad: priorState([12], { spineVersion: SPINE, headSha: OLD_SHA }),
+    ckptMeta: (nums) => ({ items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })), headSha: '' }),
+  })
+  assert.deepEqual(result.reused, [], 'HEAD unresolved -> fail closed')
+  assert.equal(byPrefix(calls, 'research:#').length, 1)
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-treecheck').length, 0, 'no point tree-checking against an unresolved HEAD')
+})
+
+test('#223 no tree-check agent is spawned when the cached headSha already matches HEAD', async () => {
+  const SPINE = await readSpineVersion()
+  const { result, calls } = await runScript({
+    args: { numbers: [12, 13] },
+    ckptLoad: priorState([12, 13], { spineVersion: SPINE }), // headSha defaults to DEFAULT_HEAD_SHA
+  })
+  assert.deepEqual(result.reused.sort(), [12, 13], 'both reused — headSha already matches')
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-treecheck').length, 0)
+})
+
+test('#223 a freshly-computed entry is stamped with the current HEAD sha', async () => {
+  const { calls } = await runScript({ args: { numbers: [12] }, ckptMeta: metaAtHead })
+  assert.ok(calls.written && calls.written.entries['12'], 'the fresh entry is persisted')
+  assert.equal(calls.written.entries['12'].headSha, 'sha-new-2222222222222222222222222222222222', 'stamped with the HEAD sha resolved this run')
+})
+
+test('#223 args.fresh:true never spawns a tree-check agent', async () => {
+  const SPINE = await readSpineVersion()
+  const { calls } = await runScript({
+    args: { numbers: [12], fresh: true },
+    ckptLoad: priorState([12], { spineVersion: SPINE, headSha: OLD_SHA }),
+    ckptMeta: metaAtHead,
+  })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'ckpt-treecheck').length, 0, 'FRESH bypasses the checkpoint (and its tree-check) entirely')
+})
+
+test('#223 the ckpt-treecheck agent is read-only (Explore default + override)', async () => {
+  const SPINE = await readSpineVersion()
+  const entries = { '12': { number: 12, updatedAt: DEFAULT_UPDATED_AT, headSha: OLD_SHA, spineVersion: SPINE, result: { ...greenResearch(12), files: ['a.js'] } } }
+  const base = { args: { numbers: [12] }, ckptLoad: JSON.stringify({ spineVersion: SPINE, workflow: 'issue-research-fanout', entries }), ckptMeta: metaAtHead }
+  const { calls } = await runScript(base)
+  const tc = calls.agents.find((a) => a.opts.label === 'ckpt-treecheck')
+  assert.ok(tc, 'the tree-check agent ran')
+  assert.equal(tc.opts.agentType, 'Explore')
+  const { calls: c2 } = await runScript({ ...base, args: { ...base.args, readonlyAgent: 'gh-ro' } })
+  assert.equal(c2.agents.find((a) => a.opts.label === 'ckpt-treecheck').opts.agentType, 'gh-ro')
 })
 
 test('the read-checkpoint preserves the existing return contract (additive: reused / checkpointWritten)', async () => {
