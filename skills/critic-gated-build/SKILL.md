@@ -13,7 +13,7 @@ Run an entire build — intake → spec → TDD implementation → deploy → in
 Use AskUserQuestion in 2–3 batched rounds for only the load-bearing decisions; recommend a default in each:
 
 1. Stack/hosting, data layer, identity model.
-2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: fresh-context subagent of the building model (disclose the reduced independence).
+2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: dispatch the `shipofclaudius:reviewer` agent (Agent tool, `subagent_type: "shipofclaudius:reviewer"`) as a fresh-context critic of the building model (disclose the reduced independence).
 3. **Done bar** — default: every rubric category ≥ 8/10 on **two consecutive cycles**.
 4. **Cycle cap** — default 12; on cap, stop and report gaps instead of thrashing.
 5. Deploy target, repo name/visibility, check-in points (default: first deploy + completion only).

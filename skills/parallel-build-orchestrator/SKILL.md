@@ -70,7 +70,7 @@ Run overlapping clusters as separate sequential invocations; run the disjoint ba
 No node is accepted on the implementer's word. For each opened PR, run **both** gates. A node is `PASS` only when both clear.
 
 **Gate A — empirical re-verification (this skill's own step; nothing delegable does it).**
-In a fresh worktree checked out at the PR head, a reviewer that did not write the code runs, itself:
+In a fresh worktree checked out at the PR head, dispatch the `shipofclaudius:reviewer` agent (Agent tool, `subagent_type: "shipofclaudius:reviewer"`) — a reviewer that did not write the code, restricted to Read/Grep/Glob/Bash — to run, itself:
 
 1. the node's exact `verify` command, and
 2. the repo's full suite.
