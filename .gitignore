@@ -3,6 +3,7 @@ node_modules/
 
 # Workflow run artifacts
 .security-scans/
+.pr-reviews/
 *.bak
 
 # Secrets — never commit
