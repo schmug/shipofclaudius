@@ -63,7 +63,9 @@ function defaultCkptMeta(nums) {
   return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })) }
 }
 
-async function runScript({ args, gather, fetch, triage, discover, synth, ckptLoad, ckptMeta, onWrite } = {}) {
+const SAFE_TOKEN_SCOPE = { authStatus: "Token scopes: 'read:org'", scopesHeader: '' }
+
+async function runScript({ args, gather, fetch, triage, discover, synth, ckptLoad, ckptMeta, onWrite, tokenScope } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', discoverPrompt: '', synthPrompt: '', synthOpts: null, parallelBatches: [], metaNumbers: [], written: null }
   const agent = async (prompt, opts = {}) => {
@@ -71,6 +73,7 @@ async function runScript({ args, gather, fetch, triage, discover, synth, ckptLoa
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
     const label = opts.label || ''
     await new Promise((r) => setTimeout(r, 1))
+    if (label === 'check-gh-token-scope') { return tokenScope !== undefined ? tokenScope : SAFE_TOKEN_SCOPE }
     if (label === 'ckpt-load') {
       return { raw: ckptLoad != null ? ckptLoad : '', path: '/home/u/.claude/workflows/state/o-r-pr-triage-fanout.json' }
     }
@@ -541,6 +544,51 @@ test('#178 the worked example reaches EVERY classify prompt in a wave, not just 
     assert.ok(!block.includes(`nonce-${n}-feedface`), `${c.opts.label}'s example does not reuse that PR's real fetch nonce`)
     assert.ok(c.prompt.includes(`nonce-${n}-feedface`), `${c.opts.label} still carries its own real fenced data outside the example`)
   }
+})
+
+// ===================== TOKEN-SCOPE PREFLIGHT (#248) =====================
+test('#248 a write-capable classic token (repo scope) fails fast before any gh PR call', async () => {
+  await assert.rejects(
+    runScript({ args: {}, gather: oneAlice, tokenScope: { authStatus: "Token scopes: 'repo', 'gist'", scopesHeader: '' } }),
+    /write-capable/i,
+  )
+})
+
+test('#248 a write-capable token reported only via the X-OAuth-Scopes header also fails fast', async () => {
+  await assert.rejects(
+    runScript({ args: {}, gather: oneAlice, tokenScope: { authStatus: '', scopesHeader: 'x-oauth-scopes: repo' } }),
+    /write-capable/i,
+  )
+})
+
+test('#248 the token check is wired before the gather call, so a fail-fast throw halts before any gh PR call runs', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(src.indexOf('check-gh-token-scope') < src.indexOf("label: 'gather-open-prs'"), 'token check precedes the gather call in source order (sequential await means a throw there halts before gather runs)')
+})
+
+test('#248 a read-only classic token (no repo scope) proceeds normally', async () => {
+  const { result, calls } = await runScript({
+    args: {}, gather: oneAlice, tokenScope: { authStatus: "Token scopes: 'read:org'", scopesHeader: '' },
+  })
+  assert.equal(result.triaged.length, 1, 'the run proceeds and triages as usual')
+  const check = calls.agents.find((a) => a.opts.label === 'check-gh-token-scope')
+  assert.ok(check, 'the token-scope preflight agent ran')
+  assert.equal(check.opts.agentType, 'Explore', 'the preflight check itself is read-only')
+  assert.ok(calls.logs.some((m) => /token-scope preflight/i.test(m) && /proceeding/i.test(m)), 'a proceed log line is emitted')
+})
+
+test('#248 an unresolvable token scope (fine-grained/App token) logs a warning but does not fail', async () => {
+  const { result, calls } = await runScript({
+    args: {}, gather: oneAlice, tokenScope: { authStatus: 'github.com\n  ✓ Logged in', scopesHeader: '' },
+  })
+  assert.equal(result.triaged.length, 1, 'the run still proceeds')
+  assert.ok(calls.logs.some((m) => /token-scope preflight/i.test(m) && /cannot verify|could not/i.test(m)), 'an unresolved-scope warning is logged')
+})
+
+test('#248 args.readonlyAgent scopes the token-scope preflight agent too', async () => {
+  const { calls } = await runScript({ args: { readonlyAgent: 'gh-ro' }, gather: oneAlice })
+  const check = calls.agents.find((a) => a.opts.label === 'check-gh-token-scope')
+  assert.equal(check.opts.agentType, 'gh-ro', 'preflight honors the readonlyAgent override')
 })
 
 // ---- runner ----

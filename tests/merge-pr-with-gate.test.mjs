@@ -49,9 +49,11 @@ function defaultFetch(ref) {
 const verdictOf = (ref, over = {}) => ({ ref: String(ref), verdict: 'READY', mergeability: 'CLEAN', ci_status: 'PASSING', ci_detail: '', hold: '', rationale: 'green', ...over })
 const mergedOf = (ref, over = {}) => ({ ref: String(ref), status: 'MERGED', merged_sha: `sha-${ref}`, mergeability: 'CLEAN', ci_status: 'PASSING', detail: 'merged', ...over })
 
+const SAFE_TOKEN_SCOPE = { authStatus: "Token scopes: 'read:org'", scopesHeader: '' }
+
 // Runs the workflow with fetch/verify/merge stubs. Default execute:true so the merge path is
 // exercised; the stage-default + gate tests pass execute:false explicitly.
-async function runScript({ args, fetch, verify, merge } = {}) {
+async function runScript({ args, fetch, verify, merge, tokenScope } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], order: [] }
   const agent = async (prompt, opts = {}) => {
@@ -60,6 +62,7 @@ async function runScript({ args, fetch, verify, merge } = {}) {
     const label = opts.label || ''
     calls.order.push(label)
     await new Promise((r) => setTimeout(r, 1))
+    if (label === 'check-gh-token-scope') { return tokenScope !== undefined ? tokenScope : SAFE_TOKEN_SCOPE }
     if (label.startsWith('fetch:#')) {
       const ref = label.slice('fetch:#'.length)
       return fetch ? fetch(ref) : defaultFetch(ref)
@@ -304,6 +307,47 @@ test('SPINE_VERSION is stamped as a constant + returned in both modes', async ()
     const { result } = await runScript({ args: { pr: 1, execute } })
     assert.equal(typeof result.spineVersion, 'string', `spineVersion returned (execute=${execute})`)
   }
+})
+
+// ===================== TOKEN-SCOPE PREFLIGHT (#248), conditional on stage-vs-execute =====================
+test('#248 STAGE mode (execute:false) with a write-capable token fails fast before any gh PR call', async () => {
+  await assert.rejects(
+    runScript({ args: { pr: 1, execute: false }, tokenScope: { authStatus: "Token scopes: 'repo'", scopesHeader: '' } }),
+    /write-capable/i,
+  )
+})
+
+test('#248 STAGE mode with a read-only classic token proceeds and verifies as usual', async () => {
+  const { result, calls } = await runScript({
+    args: { pr: 1, execute: false }, tokenScope: { authStatus: "Token scopes: 'read:org'", scopesHeader: '' },
+  })
+  assert.equal(result.executed, false)
+  const check = calls.agents.find((a) => a.opts.label === 'check-gh-token-scope')
+  assert.ok(check, 'the preflight check ran in stage mode')
+  assert.equal(check.opts.agentType, 'Explore', 'the preflight check is read-only')
+  assert.ok(byPrefix(calls, 'verify:#').length === 1, 'verify still runs after a clean preflight')
+})
+
+test('#248 EXECUTE:true SKIPS the token-scope check entirely — a write-capable token still merges', async () => {
+  const { result, calls } = await runScript({
+    args: { pr: 1, execute: true }, tokenScope: { authStatus: "Token scopes: 'repo'", scopesHeader: '' },
+  })
+  assert.equal(calls.agents.filter((a) => a.opts.label === 'check-gh-token-scope').length, 0, 'no preflight agent spawned under execute:true')
+  assert.equal(result.merged, true, 'the merge still proceeds — execute mode needs write scope by design')
+})
+
+test('#248 an unresolvable token scope in stage mode logs a warning but does not fail', async () => {
+  const { result, calls } = await runScript({
+    args: { pr: 1, execute: false }, tokenScope: { authStatus: 'github.com\n  ✓ Logged in', scopesHeader: '' },
+  })
+  assert.equal(result.executed, false)
+  assert.ok(calls.logs.some((m) => /token-scope preflight/i.test(m) && /cannot verify|could not/i.test(m)), 'an unresolved-scope warning is logged')
+})
+
+test('#248 args.readonlyAgent scopes the stage-mode token-scope preflight too', async () => {
+  const { calls } = await runScript({ args: { pr: 1, execute: false, readonlyAgent: 'gh-ro' } })
+  const check = calls.agents.find((a) => a.opts.label === 'check-gh-token-scope')
+  assert.equal(check.opts.agentType, 'gh-ro', 'preflight honors the readonlyAgent override')
 })
 
 // ---- runner ----
