@@ -7,8 +7,9 @@ workflow: none
 # /ship — pre-PR checklist
 
 You are about to open a pull request. Run this checklist **in order**.
-Stop and report failure at the first red step — do not proceed past a failure
-without explicit confirmation from the user.
+When a step goes red, fix it, re-run that step, and continue. Stop and ask
+only when the fix needs a product decision, is outside this branch's scope, or
+touches a guardrail file.
 
 ## 1. Verify worktree
 
@@ -49,7 +50,7 @@ gofmt, etc.), run it. Auto-fix what you can. Report unresolvable warnings.
 - `mypy`, `pyright`
 - `go vet`, `cargo clippy`
 
-Stop on errors.
+Fix errors, re-run, continue.
 
 ## 5. Re-read the spec
 

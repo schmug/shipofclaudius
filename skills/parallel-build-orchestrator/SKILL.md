@@ -49,7 +49,7 @@ Also flag **latent** overlap: two file-disjoint nodes fixing the *same defect cl
 
 Skipping this is how a build ships a node that fixed nothing. A reproduction takes minutes and is the difference between a plan and a wish list.
 
-Present `plan.md` and the parallel/sequential split for approval before fanning out. This is the last cheap moment to change the shape of the work.
+Write `plan.md`, record the split, then fan out. If the plan cuts a node or changes acceptance criteria, that is a product tradeoff: stop and ask.
 
 ## Phase 2 — Fan out
 
