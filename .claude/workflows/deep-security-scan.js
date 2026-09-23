@@ -361,12 +361,19 @@ function buildBundle(confirmed, ctx) {
   ]
   if (ctx.degradedWorkers > 0) exclusions.push(`${ctx.degradedWorkers} discovery worker(s) returned no result — those lenses' coverage is degraded`)
   if (!ctx.toolRan) exclusions.push('deterministic prefilter did not run (see prefilter coverage) — its pattern-matchable classes were not pre-swept')
+  // #249: a capped (not saturated) discovery loop means recall was still climbing when it
+  // stopped — surface that as its own exclusion (machine-readable, alongside the human-readable
+  // `discovery` block below) so a bundle consumer sees the caveat without parsing prose.
+  if (ctx.countsAreFloor) exclusions.push(`discovery hit the ${ctx.maxRounds}-round cap before saturating (stopped after round ${ctx.roundsRun} while still finding new candidates) — every finding count in this bundle is a FLOOR, not a converged result`)
   const coverage = {
     completeness: ctx.completeness,
     reviewed_surfaces: ctx.reviewedSurfaces,
     not_observed,
     exclusions,
     delta,
+    // #249: discovery's own stop condition, explicit and machine-readable — a bundle consumer
+    // (e.g. a cross-tool comparison) can gate on `counts_are_floor` instead of re-deriving it.
+    discovery: { rounds_run: ctx.roundsRun, max_rounds: ctx.maxRounds, terminal_state: ctx.terminalState, counts_are_floor: ctx.countsAreFloor },
   }
   const bundle = {
     schema_version: 'shipofclaudius.security-bundle/v1',
@@ -626,6 +633,20 @@ You are ONE of several independent workers with different lenses; do not try to 
 const unique = [...new Set(seen.values())]
 log(`Discovery merged: ${roundsRun} round(s) (${terminalState}), ${clean.length} worker passes, ~${filesReviewed} file-reviews, ${toolCandidates.length} tool candidates -> ${unique.length} unique after cumulative dedup.`)
 
+// Round-cap caveat (issue #249). The loop above already makes saturation (a dry round) the
+// PRIMARY stop condition and the round cap only a BACKSTOP (`added === 0` is checked before
+// `round === MAX_ROUNDS`), so a `capped` run is a real signal: MAX_ROUNDS still hadn't gone dry —
+// recall was still climbing when the loop stopped. Every count downstream (candidates/confirmed/
+// reportable/severity breakdown) is then a FLOOR, not a converged result. Computed in CODE (not
+// left to the report agent's prose, mirroring DISCLOSURE_WARNING below) so a caller reading the
+// return value — not just the narrative report — cannot miss it, and it travels WITH the counts
+// rather than living only in `terminal_state` for a consumer to notice or not.
+const COUNTS_ARE_FLOOR = terminalState === 'capped'
+const DISCOVERY_CAVEAT = COUNTS_ARE_FLOOR
+  ? `Discovery hit the ${MAX_ROUNDS}-round cap WITHOUT saturating — round ${roundsRun} still added new unique candidates when the loop stopped. Every count in this run (candidates/confirmed/reportable/severity breakdown) is a FLOOR, not a converged result: a further round would likely have surfaced more. Do not compare these counts against another scan/tool/run without that weighting.`
+  : ''
+if (COUNTS_ARE_FLOOR) log(`CAPPED, not saturated: ${DISCOVERY_CAVEAT}`)
+
 // Coverage context shared by the bundle's coverage doc (both the early return and the final one).
 const degradedWorkers = WORKERS.length - clean.length
 const toolRan = !!(toolReport && toolReport.ran)
@@ -637,13 +658,14 @@ const reviewedSurfaces = [
 // A whole-repo audit reviews risk-ranked surfaces but is never provably exhaustive -> "partial";
 // if not a single discovery lens returned, we cannot speak to coverage at all -> "unknown".
 const completeness = clean.length === 0 ? 'unknown' : 'partial'
-const coverageCtx = { reviewedSurfaces, degradedWorkers, toolRan, completeness }
+const coverageCtx = { reviewedSurfaces, degradedWorkers, toolRan, completeness, terminalState, roundsRun, maxRounds: MAX_ROUNDS, countsAreFloor: COUNTS_ARE_FLOOR }
 
 if (unique.length === 0) {
   const { bundle, sarif, newFindings } = buildBundle([], coverageCtx)
   return {
     target: TARGET, scope: SCOPE, rounds: WORKERS.length,
     rounds_run: roundsRun, terminal_state: terminalState,
+    counts_are_floor: COUNTS_ARE_FLOOR, discovery_caveat: DISCOVERY_CAVEAT,
     files_reviewed: filesReviewed, candidates: 0, reportable: [],
     tool_coverage: TOOL_COVERAGE,
     note: `No candidate vulnerabilities surfaced across ${roundsRun} discovery round(s) (terminal state: ${terminalState}). Treat as "covered these lenses, found nothing" — see workers' threat models for coverage.`,
@@ -851,7 +873,9 @@ const reportResult = await agent(
   `You are writing the final report for a deep security audit of ${SCOPE} (repo at "${TARGET}").
 
 Every reportable finding below was put through an INDEPENDENT FACTUAL-VERIFICATION (grounding) gate AFTER validation — a fresh agent re-checked each finding's file/line/root-cause/payload/fix against the actual source — and THEN a dedicated SEVERITY / ATTACK-PATH stage calibrated its severity (impact x reachability x preconditions) and applied a mechanical over-rating policy pass. This run: ${verify_counts.verified} verified, ${verify_counts.corrected} corrected (facts patched + re-validated), ${verify_counts.rejected} rejected (factually wrong — suppressed to the appendix)${verify_counts.unverified ? `, ${verify_counts.unverified} unverified (verify agent died — reported but flagged)` : ''}. Severity policy: ${JSON.stringify(severity_policy)} (kept/downgraded/dropped).
-
+${COUNTS_ARE_FLOOR ? `
+⚠ DISCOVERY HIT THE ROUND CAP, NOT SATURATED (issue #249): ${DISCOVERY_CAVEAT} This is not a footnote — you MUST state it in the SAME sentence or line as the finding-count summary itself, in BOTH report.html and report_md (e.g. "${unique.length} candidates → ${confirmedSet.length} confirmed → ${reportable.length} reportable — discovery hit the round cap, NOT saturated; treat these as floor counts"). Stating it only in the separate coverage statement (item 6 below) is not enough — a reader who only looks at the counts must still see the caveat.
+` : ''}
 Reportable findings (confirmed, factually grounded, at/above the ${THRESHOLD} threshold), highest severity first. Each "severity" is the CALIBRATED severity from the dedicated severity / attack-path stage (AFTER the over-rating policy pass) — render it as authoritative. Each also carries a "verify" object with its grounding outcome (for verify.outcome="corrected", render the corrected facts in the body AND note what changed as an audit trail) and a facts record + any anti_pattern that was applied:
 ${JSON.stringify(reportable, null, 2)}
 
@@ -887,7 +911,7 @@ Produce:
 3. report.html — use the template at ~/.claude/skills/security-scan/assets/report-template.html if it exists, filling its {{TOKENS}}; otherwise produce an equivalent single-file, self-contained HTML report. CRITICAL: HTML-escape every code snippet, identifier, path, and any scanned input before inserting it (& -> &amp; < -> &lt; > -> &gt; " -> &quot;) — a reviewed file may contain <script>. Set the verdict border color to the highest severity present. Write report.html and then VERIFY it exists (e.g. \`test -f\`); set html_written accordingly.
 4. report.md — compose the SAME report as a terminal/PR-friendly markdown summary: severity counts, each finding (title, severity, file:line, one-line fix), and the coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field of your structured output (the caller persists it).
 5. So report.md is never lost even if the caller does nothing: ALSO embed the full markdown into report.html as escaped text — exactly \`JSON.stringify(text).replace(/<\\//g, '<\\\\/')\`: JSON.stringify the markdown text, then replace every literal \`</\` in the result with \`<\\/\`, so no \`</\` survives and a \`</script\` terminator cannot appear in any letter-case (\`\\/\` stays a legal JSON escape) — and put that inside \`<script type="application/json" id="report-md-json">…</script>\`. Add a small "Download report.md" button whose click handler reads the script block's textContent, \`JSON.parse\`s it (which restores \`<\\/\` back to \`</\`), and builds the Blob from the resulting string.
-6. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md: the deterministic-prefilter line (tool + version + files scanned + findings ingested, or exactly why it was skipped/disabled), how many SATURATION ROUNDS ran (${roundsRun} of up to ${MAX_ROUNDS}) and the terminal state (${terminalState}: saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), how many workers/lenses ran per round, approx files reviewed, candidates found vs reported, and the honest limits (what was NOT deeply reviewed). Use the bundle's coverage doc: render completeness (${bundle.coverage.completeness}), the explicit "not scanned" exclusions, and — distinctly — the "not observed" classes (reviewed, none confirmed). "Not observed" must never read the same as "not scanned", "found nothing" must never read the same as "didn't look," and "stopped at the cap" must never read the same as "saturated."
+6. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md: the deterministic-prefilter line (tool + version + files scanned + findings ingested, or exactly why it was skipped/disabled), how many SATURATION ROUNDS ran (${roundsRun} of up to ${MAX_ROUNDS}) and the terminal state (${terminalState}: saturated=a round added nothing new / capped=hit the round cap / budget=budget floor reached), how many workers/lenses ran per round, approx files reviewed, candidates found vs reported, and the honest limits (what was NOT deeply reviewed). Use the bundle's coverage doc: render completeness (${bundle.coverage.completeness}), the explicit "not scanned" exclusions, and — distinctly — the "not observed" classes (reviewed, none confirmed). "Not observed" must never read the same as "not scanned", "found nothing" must never read the same as "didn't look," and "stopped at the cap" must never read the same as "saturated."${COUNTS_ARE_FLOOR ? ` This run was CAPPED — repeat the floor-counts caveat here too (do not rely on it appearing once near the top; a reader may jump straight to this section).` : ''}
 7. Embed the SEALED BUNDLE for interop the same way: JSON.stringify the bundle.json object above, replace every literal \`</\` in the result with \`<\\/\`, and embed it as \`<script type="application/json" id="bundle-json">…</script>\`; do the same for the SARIF object into \`<script type="application/json" id="results-sarif">…</script>\`. Add "Download bundle.json" and "Download results.sarif" buttons whose handlers read the script block's textContent, \`JSON.parse\` it (undoing the \`<\\/\` escape) to get the object back, and build the Blob from \`JSON.stringify(obj, null, 2)\`. Do NOT write these to disk yourself (the subagent guardrail blocks it) — the orchestrator returns them for the caller to persist.
 
 Return the structured object {output_dir, report_html_path, report_md, html_written, target_visibility, gitignore_ensured}. Do not invent findings beyond those given.`,
@@ -914,6 +938,10 @@ return {
   rounds: WORKERS.length,
   rounds_run: roundsRun,
   terminal_state: terminalState,
+  // #249: travels WITH the counts below (not just in terminal_state) so a caller reading
+  // candidates/confirmed/counts/reportable cannot miss that they're a floor, not a converged total.
+  counts_are_floor: COUNTS_ARE_FLOOR,
+  discovery_caveat: DISCOVERY_CAVEAT,
   files_reviewed: filesReviewed,
   tool_coverage: TOOL_COVERAGE,
   candidates: unique.length,
