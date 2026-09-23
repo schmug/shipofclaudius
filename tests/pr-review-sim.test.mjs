@@ -66,9 +66,7 @@ function defaultVerify() {
 function defaultReport() {
   return {
     output_dir: '/tmp/x/.pr-reviews/T-pr1',
-    report_html_path: '/tmp/x/.pr-reviews/T-pr1/report.html',
     report_md: '# PR Review\n\n## Coverage\nreviewed...',
-    html_written: true,
   }
 }
 
@@ -121,15 +119,23 @@ const byPrefix = (calls, prefix) => calls.agents.filter((a) => (a.opts.label || 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
-// ---- the <script>-embedding escape recipe (issue #179; executed here since the PR #189 review) ----
-// The report prompt tells the agent to embed report.md as escaped JSON text inside a
-// <script type="application/json"> block and names the recipe as literal code. This suite EXECUTES
-// that recipe instead of trusting the prose: escapeForScript's own source text is asserted to
-// contain the same string the prompt is asserted to contain, so the text the agent reads and the
-// code the test runs cannot drift apart. What the recipe guarantees — and all it guarantees — is
-// that no "</" survives in the output, hence no "</script" terminator in any letter-case or spacing.
-const RECIPE = "JSON.stringify(text).replace(/<\\//g, '<\\\\/')"
-const escapeForScript = (text) => JSON.stringify(text).replace(/<\//g, '<\\/')
+// ---- report.html escaping (issue #252): the workflow script now renders report.html with
+// CODE, not a model prompt instruction, so these tests execute the REAL rendering code (it
+// runs inside the AsyncFunction-wrapped script under runScript() below) against hostile
+// finding fields and the real markdown embed, rather than trusting prose.
+
+// Independent reference copy of the script's escapeHtml(), used only to predict what the
+// REAL code should have produced -- the assertions below check for THIS exact escaped form
+// inside result.report_html, so a drift between the two implementations fails the test.
+const escapeHtmlRef = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]))
+const decodeHtmlEntitiesRef = (s) => String(s)
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+
+// String-only breakout payloads (issue #179's set, plus the two issue #252 names explicitly:
+// an <img onerror> and a quote-breakout <svg onload>). Used both for per-field HTML-escaping
+// and for the report-md JSON-script-embed round-trip.
 const BREAKOUT_INPUTS = [
   '</script><script>alert(1)</script>',
   '</SCRIPT >',
@@ -138,18 +144,19 @@ const BREAKOUT_INPUTS = [
   '<</script>', // a "<" immediately before the "</"
   '<//script>',
   '<!--<script></script>-->',
-  '"quoted" \\ backslash\nnewline\ttab   line-sep \u{1F389} é',
-  { title: '</script>', body: 'a "b"\n</SCRIPT>' }, // an object goes through the same recipe
+  '"quoted" \\ backslash\nnewline\ttab \u2028 line-sep \u{1F389} \u00e9',
 ]
-function assertRecipeHolds(reportPrompt) {
-  assert.ok(escapeForScript.toString().includes(RECIPE), 'test discipline: the executed function IS the recipe text — edit both or neither')
-  assert.ok(reportPrompt.includes(RECIPE), `the report prompt names the escape recipe as exact code: ${RECIPE}`)
-  for (const input of BREAKOUT_INPUTS) {
-    const out = escapeForScript(input)
-    assert.ok(!out.includes('</'), `no "</" survives the recipe at all — ${JSON.stringify(input)} gave ${out}`)
-    assert.ok(!/<\/script/i.test(out), 'so a </script terminator cannot appear in any letter-case')
-    assert.deepEqual(JSON.parse(out), input, 'and JSON.parse restores the exact original')
-  }
+const HTML_BREAKOUTS = [...BREAKOUT_INPUTS, '<img src=x onerror=alert(1)>', '"><svg onload=alert(1)>']
+
+// Find the nearest enclosing element around `marker`'s first occurrence, so assertions can
+// check the anchoring/escaping of ONE finding's own row without being fooled by another's.
+function extractAround(html, marker, tag) {
+  const idx = html.indexOf(marker)
+  assert.ok(idx >= 0, `expected to find ${JSON.stringify(marker)} in the rendered HTML`)
+  const openTag = `<${tag}`
+  const start = html.lastIndexOf(openTag, idx)
+  const end = html.indexOf(`</${tag}>`, idx)
+  return html.slice(start, end)
 }
 
 // ============================ BASELINE / WIRING ============================
@@ -423,24 +430,142 @@ test('every subagent runs through a read-only agentType (Explore default + overr
   for (const a of c2.agents) assert.equal(a.opts.agentType, 'gh-ro', `${a.opts.label} honors override`)
 })
 
-test('the report agent escapes untrusted content and honors the report-md guardrail (no base64)', async () => {
+test('the report prompt no longer asks the model to author or escape HTML (issue #252)', async () => {
   const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
   const rp = calls.reportPrompt
-  assert.ok(/HTML-escape/i.test(rp), 'report HTML-escapes untrusted fields (diff snippets cannot break out)')
-  assert.ok(/do NOT write report\.md/i.test(rp), 'aligns with the subagent guardrail, does not fight it')
-  assert.ok(!/base64/i.test(rp), 'no base64 in the report prompt (issue #179)')
-  assert.ok(/application\/json/.test(rp), 'markdown embedded as escaped text in a JSON script block instead')
-  assert.ok(rp.includes('<\\/'), 'the </  breakout sequence is escaped for the JSON script block')
-  assert.ok(rp.includes('Download report.md'), 'html carries a download affordance')
-  assert.ok(/coverage/i.test(rp), 'coverage statement required in the report')
-  assert.ok(/elided/i.test(rp) && /integrity hash/i.test(rp), 'coverage statement discloses that integrity hashes were elided (issue #179)')
-  assert.equal(calls.reportOpts.agentType, 'Explore', 'report agent is read-only too')
+  assert.ok(!/HTML-escape/i.test(rp), 'no HTML-escaping instruction — the script escapes, not the model')
+  assert.ok(!/write report\.html/i.test(rp), 'the prompt never asks the model to write report.html')
+  assert.ok(!/application\/json/.test(rp), 'no <script type="application/json"> embedding instruction — that is now code, not prose')
+  assert.ok(/date -u/i.test(rp), 'the model is asked only for a UTC stamp — the script has no clock')
+  assert.ok(/report_md/.test(rp), 'the model returns report_md as free text')
+  assert.ok(/do NOT write it to disk|Do NOT write it to disk/.test(rp), 'aligns with the subagent guardrail, does not fight it')
+  assert.equal(calls.reportOpts.agentType, 'Explore', 'report agent is read-only')
   assert.equal(calls.reportOpts.effort, 'high', 'report agent pinned to high, not inherited')
 })
 
-test('the report prompt names the </ escape recipe as code AND the recipe holds when executed (issue #179)', async () => {
-  const { calls } = await runScript({ args: { number: 1, dimensions: ['security'] } })
-  assertRecipeHolds(calls.reportPrompt)
+test('report.html is rendered by CODE, not the model: coverage, hash-elision disclosure, md embed, download button', async () => {
+  const { result } = await runScript({ args: { number: 1, dimensions: ['security'] } })
+  const html = result.report_html
+  assert.ok(html && html.includes('<!DOCTYPE html>'), 'a real HTML document is returned as a first-class field, like report_md')
+  assert.ok(!/base64/i.test(html), 'no base64 anywhere in the rendered report (issue #179)')
+  assert.ok(/coverage/i.test(html), 'coverage statement rendered')
+  assert.ok(/elided/i.test(html) && /integrity hash/i.test(html), 'coverage statement discloses hash elision (issue #179)')
+  assert.ok(html.includes('application/json'), 'markdown embedded as escaped text in a JSON script block, not base64')
+  assert.ok(html.includes('Download report.md'), 'download affordance present')
+  assert.ok(result.report_dir && result.report_md, 'output dir and markdown text still surfaced for the caller to persist')
+})
+
+test('the report-md-json embed executes the real </ escape recipe on the ACTUAL agent-authored markdown (issue #179)', async () => {
+  const hostileMd = BREAKOUT_INPUTS.join('\n')
+  const { result } = await runScript({
+    args: { number: 1, dimensions: ['security'] },
+    report: () => ({ output_dir: '/tmp/x/.pr-reviews/T-pr1', report_md: hostileMd }),
+  })
+  const html = result.report_html
+  const m = html.match(/<script type="application\/json" id="report-md-json">([\s\S]*?)<\/script>/)
+  assert.ok(m, 'the report-md-json script block is present')
+  assert.ok(!/<\/script/i.test(m[1]), 'no "</script" terminator survives inside the embedded JSON, in any letter-case')
+  assert.equal(JSON.parse(m[1]), hostileMd, 'JSON.parse restores the exact original markdown, byte for byte')
+})
+
+// ============================ HTML ESCAPING (issue #252) — executes the REAL render code ============================
+// Unlike the old prompt-only assertions, these feed hostile content into finding fields and
+// then inspect result.report_html — the ACTUAL output of the workflow's own escapeHtml() /
+// renderReportHtml(), executed inside the AsyncFunction wrapper, not a copy trusted on faith.
+
+test('report.html escapes every attacker-controlled finding field, surfaced AND appendix, for every breakout payload', async () => {
+  const dims = HTML_BREAKOUTS.map((_, i) => `dim${i}`)
+  // The payload is embedded IN title/file (per issue #252's acceptance wording) but prefixed
+  // with the distinguishing index digits, since several payloads normalize to the same
+  // alphanumeric string once the workflow's own dedup key strips non-alnum chars (e.g.
+  // '</SCRIPT >' and '</ScRiPt\t>' both reduce to "script") and would otherwise collapse.
+  const review = (n, key) => {
+    const i = dims.indexOf(key)
+    const payload = HTML_BREAKOUTS[i]
+    return {
+      dimension: key,
+      findings: [{
+        title: `finding-${i}-${payload}`, file: `f${i}-${payload}.js`, line: 1, category: payload,
+        severity: 'high', confidence: 'high', rationale: payload, evidence: payload, suggestion: payload,
+      }],
+    }
+  }
+  // Alternate confirmed (surfaces) / needs-info (appendix) so both report sections are covered.
+  const verify = (n, key) => {
+    const i = dims.indexOf(key)
+    return i % 2 === 0
+      ? { disposition: 'confirmed', confidence: 'high', severity: 'high', rationale: 'real', refutation: 'x' }
+      : { disposition: 'needs-info', confidence: 'low', severity: 'low', rationale: 'unclear', refutation: 'x' }
+  }
+  const { result } = await runScript({ args: { number: 1, dimensions: dims }, review, verify })
+  const html = result.report_html
+  assert.ok(result.findings.length > 0, 'some findings surfaced')
+  assert.ok(result.appendix_count > 0, 'some findings suppressed to the appendix')
+
+  for (const payload of HTML_BREAKOUTS) {
+    assert.ok(!html.includes(payload), `raw payload must never appear verbatim in the output: ${JSON.stringify(payload)}`)
+    assert.ok(html.includes(escapeHtmlRef(payload)), `escaped form present as visible text: ${JSON.stringify(payload)}`)
+    assert.equal(decodeHtmlEntitiesRef(escapeHtmlRef(payload)), payload, 'sanity: the reference escaper round-trips')
+  }
+
+  // No data-originated <script>/<img>/<svg> tag or on*= attribute anywhere in the document.
+  const scriptTagCount = (html.match(/<script\b/gi) || []).length
+  assert.equal(scriptTagCount, 2, 'exactly the two template-owned <script> tags (report-md-json + download handler) — none injected by data')
+  assert.ok(!/<img\b/i.test(html), 'no <img> tag anywhere in the document')
+  assert.ok(!/<svg\b/i.test(html), 'no <svg> tag anywhere in the document')
+  assert.ok(!/<[a-zA-Z][^>]*\son\w+\s*=/i.test(html), 'no actual on*= HTML attribute anywhere — only escaped, inert text')
+})
+
+// ============================ DIFF ANCHOR CHECK (issue #252) ============================
+
+test('a finding whose file:line is inside a diff hunk renders anchored (no marker)', async () => {
+  const diffFixture = (n) => ({
+    nonce: `dif-${n}-anchor`,
+    raw: [
+      'diff --git a/app.js b/app.js',
+      '--- a/app.js',
+      '+++ b/app.js',
+      '@@ -10,3 +10,4 @@',
+      ' context',
+      '+added line 11',
+      '+added line 12',
+      ' context',
+      '',
+    ].join('\n'),
+  })
+  const review = (n, key) => ({
+    dimension: key,
+    findings: [{ title: 'in-hunk finding', file: 'app.js', line: 11, category: key, severity: 'high', confidence: 'high', rationale: 'r', evidence: 'e', suggestion: 's' }],
+  })
+  const { result } = await runScript({ args: { number: 1, dimensions: ['security'] }, diff: diffFixture, review })
+  assert.equal(result.findings.length, 1)
+  const row = extractAround(result.report_html, 'in-hunk finding', 'div')
+  assert.ok(!row.includes('not in diff'), 'a line inside the hunk range is NOT marked "not in diff"')
+})
+
+test('a finding whose file:line falls OUTSIDE every diff hunk is kept and visibly marked, never dropped', async () => {
+  const diffFixture = (n) => ({
+    nonce: `dif-${n}-anchor`,
+    raw: [
+      'diff --git a/app.js b/app.js',
+      '--- a/app.js',
+      '+++ b/app.js',
+      '@@ -10,3 +10,4 @@',
+      ' context',
+      '+added line 11',
+      '+added line 12',
+      ' context',
+      '',
+    ].join('\n'),
+  })
+  const review = (n, key) => ({
+    dimension: key,
+    findings: [{ title: 'out-of-hunk finding', file: 'app.js', line: 500, category: key, severity: 'high', confidence: 'high', rationale: 'r', evidence: 'e', suggestion: 's' }],
+  })
+  const { result } = await runScript({ args: { number: 1, dimensions: ['security'] }, diff: diffFixture, review })
+  assert.equal(result.findings.length, 1, 'the out-of-diff finding survives verification and is not dropped')
+  const row = extractAround(result.report_html, 'out-of-hunk finding', 'div')
+  assert.ok(row.includes('not in diff'), 'a line outside every hunk IS marked "not in diff"')
 })
 
 // ============================ RESILIENCE ============================

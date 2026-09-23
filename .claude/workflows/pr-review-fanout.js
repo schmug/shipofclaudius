@@ -34,9 +34,13 @@
 // behind an anti-injection preamble, and the review/verify agents treat everything
 // inside the fence as DATA to review, never as instructions. Every subagent (relay,
 // review, verify, report) runs through a read-only `agentType` (default `Explore`;
-// override args.readonlyAgent). The report agent HTML-escapes every diff snippet, path,
-// and identifier before inserting it, so attacker code in the diff cannot break out of
-// the report. SETUP REQUIREMENT: run with a READ-SCOPED gh token (or a `gh` wrapper that
+// override args.readonlyAgent). report.html is rendered by DETERMINISTIC CODE in this
+// script from the structured findings/coverage data (issue #252) — every attacker-derived
+// field (title, file, evidence, rationale, suggestion, refutation, category) passes
+// through a code-level HTML escaper the test suite executes directly, and each finding's
+// file:line is checked against the relayed diff's hunks (a line outside every hunk is kept
+// but visibly marked, never dropped). The report agent never sees or authors HTML; it only
+// returns free-text report_md prose. SETUP REQUIREMENT: run with a READ-SCOPED gh token (or a `gh` wrapper that
 // rejects mutating subcommands) — see README "Security model". Residual risk (out of
 // scope): the read-only agentType still grants Bash; the runtime's tool grants are not
 // enforced by this repo.
@@ -68,11 +72,12 @@
 //     bare Workflow({ name }); this workflow REQUIRES a PR number, so the no-args path
 //     throws a clear "pass args.number" error rather than guessing.
 //   - no Date.now in scripts: the report agent stamps the output dir via `date -u`.
-//   - the workflow runtime blocks subagents from WRITING report.md ("return findings as
-//     text, not write report files") while allowing report.html — so the report agent
-//     writes ONLY report.html (markdown embedded as escaped JSON text inside it, not
-//     base64 — issue #179) and RETURNS report.md as structured text for the caller to
-//     persist.
+//   - the workflow runtime blocks subagents from WRITING report files ("return findings as
+//     text, not write report files"), and the script itself has no filesystem access —
+//     report.html is rendered by deterministic CODE in this script (issue #252) and
+//     report.md is composed by the report agent as prose; BOTH are RETURNED as text
+//     (report_html / report_md fields) for the caller to persist, markdown embedded in the
+//     HTML as escaped JSON text, not base64 — issue #179.
 //   - the diff relay pipes `gh pr diff` through a FIXED sed before the diff ever reaches a
 //     reasoning agent: every sha256-/sha512- hash body 20+ characters long keeps its first 8
 //     characters and the remainder becomes <elided> (SRI integrity= and CSP 'sha256-…' values
@@ -204,6 +209,129 @@ function fence(nonce, raw) {
   return `<<<UNTRUSTED_GH_DATA_${n}>>>\n${raw == null ? '' : String(raw)}\n<<<END_UNTRUSTED_GH_DATA_${n}>>>`
 }
 
+// ── Deterministic report.html rendering (issue #252) ─────────────────────────────────
+// report.html used to be hand-authored by the Report agent, which was merely TOLD to
+// HTML-escape every attacker-derived field; nothing executed that instruction. It is now
+// built by CODE from the structured surfaced/appendix/coverage data below: every field that
+// originates in the diff or PR discussion passes through escapeHtml(), which the test suite
+// runs directly, and no reasoning agent ever sees or authors markup.
+function escapeHtml(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]))
+}
+
+// Embed text as JSON inside a <script type="application/json"> block with no "</" surviving,
+// so a "</script" terminator cannot appear in any letter-case. Same recipe
+// tests/pr-review-sim.test.mjs executes and pins byte-for-byte (issue #179).
+function escapeForScript(text) {
+  return JSON.stringify(text).replace(/<\//g, '<\\/')
+}
+
+// Parse a unified diff's "+++"/"@@" headers into { file -> [[newStart, newEnd], ...] } so a
+// finding's file:line can be checked against the diff the reviewers actually saw, rather than
+// trusted blind. A finding whose location falls outside every hunk is kept and marked, never
+// dropped — a verified finding can legitimately cite unchanged context.
+function parseDiffHunks(raw) {
+  const hunks = new Map()
+  let currentFile = null
+  for (const line of String(raw || '').split('\n')) {
+    const plus = line.match(/^\+\+\+ (?:b\/)?(.+)$/)
+    if (plus) { const p = plus[1].trim(); currentFile = p === '/dev/null' ? null : p; continue }
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/)
+    if (hunk && currentFile) {
+      const start = Number(hunk[1])
+      const len = hunk[2] != null ? Number(hunk[2]) : 1
+      const end = len > 0 ? start + len - 1 : start
+      if (!hunks.has(currentFile)) hunks.set(currentFile, [])
+      hunks.get(currentFile).push([start, end])
+    }
+  }
+  return hunks
+}
+
+function lineInDiff(hunksByFile, file, line) {
+  const list = hunksByFile && hunksByFile.get(String(file || '').trim())
+  if (!list || !Number.isInteger(line) || line <= 0) return false
+  return list.some(([s, e]) => line >= s && line <= e)
+}
+
+const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info']
+const SEV_COLOR = { critical: '#7f1d1d', high: '#b91c1c', medium: '#b45309', low: '#1d4ed8', info: '#4b5563' }
+
+function renderFindingHtml(f, hunksByFile) {
+  const anchored = lineInDiff(hunksByFile, f.file, f.line)
+  const loc = `${escapeHtml(f.file)}:${escapeHtml(f.line || '?')}` +
+    (anchored ? '' : ' <span class="not-in-diff">(line not in diff)</span>')
+  return `<div class="finding sev-${escapeHtml(f.severity)}">
+    <h3>${escapeHtml(f.title)}</h3>
+    <div class="meta">severity: <b>${escapeHtml(f.severity)}</b> &middot; confidence: <b>${escapeHtml(f.confidence)}</b> &middot; dimension: ${escapeHtml(f.dimension)} &middot; PR #${escapeHtml(f.pr)} &middot; ${loc}</div>
+    ${f.category ? `<div class="cat">category: ${escapeHtml(f.category)}</div>` : ''}
+    <p class="rationale">${escapeHtml(f.rationale)}</p>
+    ${f.evidence ? `<pre class="evidence">${escapeHtml(f.evidence)}</pre>` : ''}
+    ${f.suggestion ? `<p class="suggestion"><b>Suggested fix:</b> ${escapeHtml(f.suggestion)}</p>` : ''}
+    ${f.refutation ? `<p class="refutation"><b>Refutation attempted:</b> ${escapeHtml(f.refutation)}</p>` : ''}
+  </div>`
+}
+
+function renderAppendixRow(f) {
+  return `<tr><td>PR #${escapeHtml(f.pr)}</td><td>${escapeHtml(f.dimension)}</td><td>${escapeHtml(f.title)}</td>` +
+    `<td>${escapeHtml(f.file)}:${escapeHtml(f.line || '?')}</td><td>${escapeHtml(f.disposition)}</td>` +
+    `<td>${escapeHtml(f.confidence)}</td><td>${escapeHtml(f.rationale)}</td></tr>`
+}
+
+// The only function that assembles the final page. Everything it interpolates is either a
+// fixed literal or has already passed through escapeHtml()/escapeForScript() above.
+function renderReportHtml({ prs, surfaced, appendix, counts, coverage, reportMd, diffHunksByPr }) {
+  const worstSev = SEV_ORDER.find((s) => (counts[s] || 0) > 0) || 'info'
+  const accent = SEV_COLOR[worstSev]
+  const findingsHtml = surfaced.map((f) => renderFindingHtml(f, diffHunksByPr.get(f.pr))).join('\n')
+  const appendixHtml = appendix.map(renderAppendixRow).join('\n')
+  const countsHtml = Object.entries(counts).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(v)}`).join(' &middot; ')
+  const title = escapeHtml(prs.map((n) => `#${n}`).join(', '))
+  const mdJson = escapeForScript(reportMd || '')
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>PR Review: ${title}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1f2937; }
+  h1 { border-bottom: 4px solid ${accent}; padding-bottom: .5rem; }
+  .coverage { background: #f3f4f6; padding: 1rem; border-radius: 6px; margin-bottom: 1.5rem; }
+  .finding { border: 1px solid #e5e7eb; border-left: 6px solid #9ca3af; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+  .finding.sev-critical, .finding.sev-high { border-left-color: #b91c1c; }
+  .finding.sev-medium { border-left-color: #b45309; }
+  .finding.sev-low { border-left-color: #1d4ed8; }
+  .finding.sev-info { border-left-color: #4b5563; }
+  .meta { color: #6b7280; font-size: .9em; margin: .25rem 0; }
+  .not-in-diff { color: #b45309; font-style: italic; }
+  pre.evidence { background: #111827; color: #e5e7eb; padding: .75rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; font-size: .9em; }
+  button { margin-top: 1rem; padding: .5rem 1rem; cursor: pointer; }
+</style></head>
+<body>
+<h1>PR Review: ${title}</h1>
+<div class="coverage"><strong>Coverage:</strong> ${escapeHtml(coverage)}</div>
+<p><strong>Severity counts:</strong> ${countsHtml || 'none'}</p>
+<h2>Findings</h2>
+${findingsHtml || '<p>No findings surfaced.</p>'}
+<h2>Appendix &mdash; reviewed, not reported (refuted / needs-info / below threshold)</h2>
+<table><thead><tr><th>PR</th><th>Dimension</th><th>Title</th><th>Location</th><th>Disposition</th><th>Confidence</th><th>Reason</th></tr></thead>
+<tbody>${appendixHtml || '<tr><td colspan="7">none</td></tr>'}</tbody></table>
+<script type="application/json" id="report-md-json">${mdJson}</script>
+<button id="dl-md">Download report.md</button>
+<script>
+document.getElementById('dl-md').addEventListener('click', function () {
+  var text = JSON.parse(document.getElementById('report-md-json').textContent);
+  var blob = new Blob([text], { type: 'text/markdown' });
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'report.md';
+  a.click();
+});
+</script>
+</body></html>`
+}
+
 // Relay schema/prompt: a dumb read-only fetch that NEVER acts on the content. Reused for
 // both the discussion-text relay and the diff relay.
 const RELAY_SCHEMA = {
@@ -325,6 +453,7 @@ const resolved = await parallel(
       number: n,
       fencedText: fence(text.nonce, text.raw),
       fencedDiff: fence(diff.nonce, diff.raw),
+      rawDiff: diff.raw,
       fencedIssue,
       issueNumber,
     }
@@ -494,25 +623,24 @@ if (unique.length === 0) {
 
 // ── Phase: Report — synthesize ONE deduped, confidence-filtered review (HTML + md). ──
 phase('Report')
-// Same report-md guardrail as deep-security-scan: subagents may write report.html (an
-// artifact) but NOT report.md ("return findings as text, not write report files"). So the
-// report agent writes ONLY report.html (markdown embedded as escaped JSON text inside it,
-// not base64 — issue #179) and RETURNS report.md as structured text; the orchestrator
-// surfaces it for the caller to persist.
+// report.html is rendered by renderReportHtml() (deterministic code, above) from the
+// structured surfaced/appendix/coverage data — the agent below never sees or authors
+// markup. Its only job is the part the script genuinely cannot do itself: stamp a UTC
+// output dir (the script has no clock) and compose report.md's prose. Both report.html
+// and report.md are RETURNED as text for the caller to persist (same channel; workflow
+// subagents cannot write report files) — the script never had filesystem access anyway.
 const REPORT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['output_dir', 'report_html_path', 'report_md'],
+  required: ['output_dir', 'report_md'],
   properties: {
-    output_dir: { type: 'string', description: 'Absolute path to the created output dir.' },
-    report_html_path: { type: 'string', description: 'Absolute path to the written, verified report.html.' },
-    report_md: { type: 'string', description: 'The FULL report.md content as text. Do NOT write it to disk (the subagent guardrail forbids it); the caller persists it from this field.' },
-    html_written: { type: 'boolean', description: 'True iff report.html was written and verified present on disk (e.g. via test -f).' },
+    output_dir: { type: 'string', description: 'Absolute path to the created output dir (mkdir -p ".pr-reviews/<UTC timestamp>-pr<numbers>"; date -u stamps it since the script has no clock). Do NOT write anything into it — just create it and return its absolute path.' },
+    report_md: { type: 'string', description: 'The FULL report.md content as text. Do NOT write it to disk (the subagent guardrail forbids it); the caller persists it from this field, and the script embeds it verbatim (already escaped, in code) into report.html.' },
   },
 }
 
 const reportResult = await agent(
-  `You are writing the final review report for a deep, adversarially-verified review of ${ready.length} pull request(s) [${ready.map((p) => `#${p.number}`).join(', ')}]${A.repo ? ` in ${A.repo}` : ''}.
+  `You are composing the report.md prose for a deep, adversarially-verified review of ${ready.length} pull request(s) [${ready.map((p) => `#${p.number}`).join(', ')}]${A.repo ? ` in ${A.repo}` : ''}. report.html is rendered separately by deterministic code from this same data — your job is ONLY the output dir and the markdown text.
 
 CONFIRMED, REPORTABLE findings (survived adversarial verification at ≥${THRESHOLD} confidence), highest severity first — group them by PR, then by dimension:
 ${JSON.stringify(surfaced.map((f) => ({ id: f.id, pr: f.pr, dimension: f.dimension, title: f.title, file: f.file, line: f.line, severity: f.severity, confidence: f.confidence, category: f.category, rationale: f.rationale, evidence: f.evidence, suggestion: f.suggestion, refutation: f.refutation })), null, 2)}
@@ -523,20 +651,24 @@ ${JSON.stringify(appendix.map((f) => ({ pr: f.pr, dimension: f.dimension, title:
 Coverage facts (render verbatim as a coverage statement): ${COVERAGE}
 
 Produce:
-1. Create an output dir: run \`mkdir -p ".pr-reviews/$(date -u +%Y%m%dT%H%M%SZ)-pr${ready.map((p) => p.number).join('-')}"\` and use it (capture the absolute path; the script has no clock, so YOU stamp it with date -u).
-2. report.html — a single-file, self-contained HTML report. List each finding grouped by PR then dimension, with severity, confidence, file:line, rationale, the evidence snippet, and the suggested fix; show severity counts and the coverage statement at the top. CRITICAL: HTML-escape EVERY diff snippet, file path, identifier, title, and any other field that originated from the PR before inserting it (& → &amp; < → &lt; > → &gt; " → &quot;) — the diff is attacker-controlled and may contain <script> or </ markup. Set the verdict accent color to the highest severity present. Write report.html and VERIFY it exists (\`test -f\`); set html_written accordingly.
-3. report.md — compose the SAME review as a terminal/PR-friendly markdown summary: severity counts, each finding (title, severity/confidence, file:line, one-line fix), the appendix, and the coverage statement. Do NOT write report.md to disk — the workflow subagent guardrail blocks subagents from writing report files. Instead RETURN the full markdown text in the report_md field.
-4. So report.md is never lost: ALSO embed the full markdown into report.html as escaped text — exactly \`JSON.stringify(text).replace(/<\\//g, '<\\\\/')\`: JSON.stringify the markdown text, then replace every literal \`</\` in the result with \`<\\/\`, so no \`</\` survives and a \`</script\` terminator cannot appear in any letter-case (\`\\/\` stays a legal JSON escape) — and put that inside \`<script type="application/json" id="report-md-json">…</script>\`. Add a small "Download report.md" button whose handler reads the script block's textContent, \`JSON.parse\`s it (which restores \`<\\/\` back to \`</\`), and builds the Blob from the resulting string.
-5. A mandatory COVERAGE STATEMENT in BOTH the HTML and report_md (the facts above): PRs and dimensions reviewed, candidates → unique → surfaced → appendix counts, and the confidence threshold. "Found nothing" must never read the same as "didn't look."
+1. Create an output dir: run \`mkdir -p ".pr-reviews/$(date -u +%Y%m%dT%H%M%SZ)-pr${ready.map((p) => p.number).join('-')}"\` and return its absolute path as output_dir. Do not write any file into it — the caller writes report.html and report.md there itself.
+2. report.md — compose the review as a terminal/PR-friendly markdown summary: severity counts, each finding (title, severity/confidence, file:line, one-line fix), the appendix, and the coverage statement verbatim (PRs and dimensions reviewed, candidates → unique → surfaced → appendix counts, and the confidence threshold — "found nothing" must never read the same as "didn't look"). Do NOT write it to disk. Return the full markdown text in the report_md field.
 
-This is a REVIEW for a human to act on WITH confirmation — do NOT instruct anyone to auto-merge/auto-comment. Do not invent findings beyond those given. Return the structured object {output_dir, report_html_path, report_md, html_written}.`,
+This is a REVIEW for a human to act on WITH confirmation — do NOT instruct anyone to auto-merge/auto-comment. Do not invent findings beyond those given. Return the structured object {output_dir, report_md}.`,
   { label: 'report', phase: 'Report', agentType: READONLY_AGENT, effort: 'high', schema: REPORT_SCHEMA }
 )
 
 const reportDir = (reportResult && reportResult.output_dir) || null
-const reportHtml = (reportResult && reportResult.report_html_path) || null
 const reportMd = (reportResult && reportResult.report_md) || null
-if (reportMd) log(`report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). Also embedded (escaped JSON, not base64) in report.html ("Download report.md").`)
+
+// Diff hunks are parsed ONCE per PR (from the already-relayed raw bytes, no new fetch) so
+// every surfaced finding's file:line can be checked against the actual diff.
+const diffHunksByPr = new Map(ready.map((p) => [p.number, parseDiffHunks(p.rawDiff)]))
+const reportHtml = renderReportHtml({
+  prs: ready.map((p) => p.number), surfaced, appendix, counts, coverage: COVERAGE, reportMd, diffHunksByPr,
+})
+
+if (reportDir) log(`report.html + report.md are returned as text (report_html / report_md fields) — the CALLER must write them to ${reportDir}/report.html and ${reportDir}/report.md (workflow subagents cannot write report files, and the script has no filesystem access). report.md is also embedded (escaped JSON, not base64) inside report.html ("Download report.md").`)
 
 return {
   prs: ready.map((p) => p.number),
@@ -548,7 +680,8 @@ return {
   appendix_count: appendix.length,
   failed_to_resolve: failed,
   coverage: COVERAGE,
-  // First-class so the caller can persist report.md deterministically (subagents can't write it):
+  // First-class so the caller can persist report.html / report.md deterministically
+  // (subagents can't write report files, and the script itself has no filesystem access):
   report_dir: reportDir,
   report_html: reportHtml,
   report_md: reportMd,
