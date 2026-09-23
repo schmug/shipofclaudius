@@ -58,7 +58,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? `-R ${A.repo}` : ''
 
 // Normalize the target number: accept number / issue / pr, as an integer.

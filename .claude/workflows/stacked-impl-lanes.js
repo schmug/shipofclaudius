@@ -77,13 +77,17 @@
 export const meta = {
   name: 'stacked-impl-lanes',
   description: 'Implement issue-lanes to review-only PRs (parallel if disjoint, sequential+stacked if hub-coupled); security review on invariant lanes',
+  whenToUse: 'You have a dependency-ordered set of issue-lanes (typically from issue-triage-fanout) ready to implement and want them turned into review-only draft PRs, gated by security + defect-class review. Not for triage (use issue-triage-fanout) or landing the resulting stack (use stacked-merge-walk).',
   phases: [
     { title: 'Implement', detail: 'a read-only preflight agent skips lanes whose branch already has an open PR (state-derived idempotency; args.fresh bypasses); per remaining lane: read-only relays fetch the issue text, then a worktree-isolated agent implements from nonce-fenced data -> green local tests -> open a DRAFT PR' },
     { title: 'Review', detail: 'security-hardening-reviewer on each invariant-touching lane + a read-only doc-freshness critic and a read-only adversarial defect-class critic (one agent holding the whole taxonomy, must show verbatim command output) per opened lane; confidence sorts each reversible draft PR into auto_execute vs gated, and a gated lane both fails to advance the stack base and stops the sequential walk — its dependents come back BLOCKED_ON_PREDECESSOR rather than being built on a stale base (the workflow never merges)' },
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const MODE = A.mode === 'sequential' ? 'sequential' : 'parallel'
 const BASE0 = A.base || 'main'
 const REPOFLAG = A.repo ? `-R ${A.repo}` : ''

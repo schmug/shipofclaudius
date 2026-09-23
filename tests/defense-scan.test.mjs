@@ -186,7 +186,7 @@ test('layer schemas used during a run are satisfiable', async () => {
 test('layer 1 always composes deep-security-scan via workflow()', async () => {
   const map = {}
   const { calls } = await runScript({ args: { target: '/tmp/fake', scope: 'repo', rounds: 3, threshold: 'medium' }, map })
-  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  const wf = calls.workflows.find((w) => w.name === 'shipofclaudius:deep-security-scan')
   assert.ok(wf, 'deep-security-scan must be invoked via workflow()')
   assert.equal(wf.args.target, '/tmp/fake')
   assert.equal(wf.args.rounds, 3)
@@ -485,7 +485,7 @@ test('all six layers RAN: merged report carries findings from every layer', asyn
 test('args may arrive as a JSON string (parse-guard, like Phase A)', async () => {
   const map = {}
   const { calls } = await runScript({ args: JSON.stringify({ target: '/tmp/json', rounds: 2 }), map })
-  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  const wf = calls.workflows.find((w) => w.name === 'shipofclaudius:deep-security-scan')
   assert.ok(wf, 'workflow invoked')
   assert.equal(wf.args.target, '/tmp/json', 'string args parsed before use')
 })
@@ -665,7 +665,7 @@ test('report prompt carries the bundle + SARIF for embedding', async () => {
 
 test('models: Layer 1 forwards the scan model args to deep-security-scan', async () => {
   const { calls } = await runScript({ args: { target: '/tmp/fake', discoveryModel: 'opus', validateModel: 'haiku' }, map: {} })
-  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  const wf = calls.workflows.find((w) => w.name === 'shipofclaudius:deep-security-scan')
   assert.ok(wf, 'Layer 1 composes deep-security-scan')
   assert.equal(wf.args.discoveryModel, 'opus', 'discoveryModel reaches Layer 1')
   assert.equal(wf.args.validateModel, 'haiku', 'validateModel reaches Layer 1')
@@ -673,7 +673,7 @@ test('models: Layer 1 forwards the scan model args to deep-security-scan', async
 
 test('models: forwarding is absent-safe — an unset arg is not forwarded as undefined-ish junk', async () => {
   const { calls } = await runScript({ args: { target: '/tmp/fake' }, map: {} })
-  const wf = calls.workflows.find((w) => w.name === 'deep-security-scan')
+  const wf = calls.workflows.find((w) => w.name === 'shipofclaudius:deep-security-scan')
   assert.ok(wf, 'Layer 1 still composes deep-security-scan with no model args')
   for (const k of ['discoveryModel', 'validateModel']) {
     if (k in wf.args) assert.ok(typeof wf.args[k] === 'string' && wf.args[k], k + ' is either omitted or a real string')

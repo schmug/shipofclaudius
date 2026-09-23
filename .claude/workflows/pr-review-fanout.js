@@ -98,7 +98,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? `-R ${A.repo}` : ''
 const NOTES = A.notes || ''
 const THRESHOLD = (typeof A.threshold === 'string' && A.threshold.trim() ? A.threshold.trim() : 'medium').toLowerCase()

@@ -65,7 +65,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()

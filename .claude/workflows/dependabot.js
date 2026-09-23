@@ -6,12 +6,11 @@
 // handoff. This skill is INTAKE ONLY: it adds no triage/judgment logic of its own and
 // never files anything.
 //
-// Why a dedicated workflow (vs. a new arg on triage-finding): the plugin enforces a
-// strict 1:1 skill<->workflow mapping (tests/plugin-integrity.test.mjs), so a
-// discoverable `dependabot` skill needs its own `dependabot.js`. The alert->descriptor
-// map is also Dependabot-specific (a Dependabot alert has no single file:line — its
-// "location" is a manifest + a package + a version range), so it earns its own home and
-// its own sim test.
+// Why a dedicated workflow (vs. a new arg on triage-finding): a `/shipofclaudius:dependabot`
+// command needs its own registered workflow file to appear as its own command. The
+// alert->descriptor map is also Dependabot-specific (a Dependabot alert has no single
+// file:line — its "location" is a manifest + a package + a version range), so it earns
+// its own home and its own sim test.
 //
 // PROMPT-INJECTION HARDENING. A Dependabot alert's advisory summary / package strings
 // are GitHub-hosted, attacker-influenceable text. The ingest agent that fetches them
@@ -24,8 +23,7 @@
 // "Security model".
 //
 // Run:
-//   Workflow({ scriptPath: "~/.claude/workflows/dependabot.js",
-//              args: { triageScriptPath: "~/.claude/workflows/triage-finding.js" } })
+//   Workflow({ name: "shipofclaudius:dependabot" })
 //   - args.repo:         "owner/name" (optional; defaults to the gh-resolved repo).
 //   - args.state:        alert state to fetch (default "open").
 //   - args.minSeverity:  drop alerts below low|medium|high|critical (default: keep all).
@@ -38,9 +36,6 @@
 //   - args.notes:        repo-specific context (passthrough to triage-finding).
 //   - args.batchSize:    triage wave size (passthrough to triage-finding).
 //   - args.readonlyAgent:read-only agentType for the ingest agent (default "Explore"; passthrough).
-//   - args.triageScriptPath: resolved path to the sibling triage-finding.js (injected by
-//                        the wrapper skill via ${CLAUDE_PLUGIN_ROOT}); absent -> delegate
-//                        by the saved-workflow name "triage-finding".
 
 export const meta = {
   name: 'dependabot',
@@ -52,7 +47,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const TARGET = A.target || '.'
 const REPO = (typeof A.repo === 'string' && A.repo.trim()) ? A.repo.trim() : ''
 const STATE = (typeof A.state === 'string' && A.state.trim()) ? A.state.trim().toLowerCase() : 'open'
@@ -64,10 +62,6 @@ const MAX = (Number.isInteger(A.max) && A.max > 0) ? A.max : 200
 // Read-only agentType the ingest agent runs under. Default to the built-in `Explore`
 // (no Edit/Write/NotebookEdit/Agent), portable to anyone who copies this file.
 const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
-
-// Resolved path to the sibling triage-finding workflow (injected by the wrapper skill via
-// ${CLAUDE_PLUGIN_ROOT}). Absent -> delegate by saved-workflow name.
-const TRIAGE_SCRIPT = (typeof A.triageScriptPath === 'string' && A.triageScriptPath.trim()) ? A.triageScriptPath.trim() : ''
 
 // Spine stamp so hand-synced ~/.claude/workflows/ copies can be diffed for drift.
 const SPINE_VERSION = '1.0.0'
@@ -226,12 +220,10 @@ if (typeof A.handoff === 'string') triageArgs.handoff = A.handoff
 if (typeof A.notes === 'string') triageArgs.notes = A.notes
 if (Number.isInteger(A.batchSize)) triageArgs.batchSize = A.batchSize
 
-const triageRef = TRIAGE_SCRIPT ? { scriptPath: TRIAGE_SCRIPT } : 'triage-finding'
-
 let triage = null
 try {
   log(`Delegating ${findings.length} normalized Dependabot finding(s) to triage-finding.`)
-  triage = await workflow(triageRef, triageArgs)
+  triage = await workflow('shipofclaudius:triage-finding', triageArgs)
 } catch (e) {
   // Graceful degrade to intake-only: hand back the normalized findings so the caller can
   // run triage-finding directly. The skill's surface is unchanged — just two-step.
