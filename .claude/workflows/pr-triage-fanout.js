@@ -261,6 +261,68 @@ const FETCH_PROMPT = (n) =>
 const GATHER_LIMIT = 200
 phase('Gather')
 
+// ── Ambient gh token scope preflight (#248). Workflow scripts cannot run gh directly, so a
+// read-only agent captures `gh auth status` + the `X-OAuth-Scopes` response header, and this
+// function — in SCRIPT CODE, auditable, not hidden in a prompt — decides whether the ambient
+// token is safe for this READ-ONLY workflow. A classic PAT/OAuth token reports its scopes on
+// one of those two surfaces; any repo-family scope on a classic token grants FULL read+write
+// (classic scopes have no read-only repo split — see README "Required setup: a read-scoped gh
+// token"), so its presence fails the run fast instead of merely documenting the requirement in
+// a setup note the operator has to remember. A fine-grained PAT or GitHub App installation
+// token reports no scopes list at all on either surface — that case can't be proven either way
+// from here, so it is UNRESOLVED (logged, run proceeds) rather than treated as a pass.
+const WRITE_CAPABLE_SCOPES = ['repo', 'public_repo']
+function parseScopeList(text) {
+  const m = /token scopes:\s*(.*)/i.exec(typeof text === 'string' ? text : '')
+  if (!m) return null
+  const raw = m[1].trim()
+  if (!raw || /^(none|'none'|"none")$/i.test(raw)) return []
+  return raw.split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '').toLowerCase()).filter(Boolean)
+}
+function classifyTokenScope(authStatus, scopesHeader) {
+  const finish = (scopes) => {
+    const hit = scopes.filter((s) => WRITE_CAPABLE_SCOPES.includes(s))
+    return hit.length
+      ? { resolved: true, writeCapable: true, scopes, reason: `classic token scope(s) ${hit.join(', ')} grant full read+write — classic PAT/OAuth scopes have no read-only repo split` }
+      : { resolved: true, writeCapable: false, scopes, reason: 'no repo-family write scope reported' }
+  }
+  const fromStatus = parseScopeList(authStatus)
+  if (fromStatus != null) return finish(fromStatus)
+  if (typeof scopesHeader === 'string' && scopesHeader.trim() !== '') {
+    const list = scopesHeader.replace(/^x-oauth-scopes:\s*/i, '').trim().split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    return finish(list)
+  }
+  return { resolved: false, writeCapable: false, scopes: [], reason: 'no "Token scopes" / X-OAuth-Scopes surface reported (likely a fine-grained PAT or GitHub App token — cannot verify read-only from here)' }
+}
+
+const TOKEN_SCOPE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['authStatus', 'scopesHeader'],
+  properties: {
+    authStatus: { type: 'string', description: 'Verbatim combined stdout+stderr of `gh auth status`.' },
+    scopesHeader: { type: 'string', description: 'Verbatim `x-oauth-scopes` response header line from `gh api -i user`, or "" if absent.' },
+  },
+}
+const TOKEN_SCOPE_PROMPT =
+  `You are a READ-ONLY preflight check. Determine what scope the ambient \`gh\` token carries so the ` +
+  `orchestrator can decide whether it is safe to run this READ-ONLY workflow. Do exactly this and nothing else:\n` +
+  `1. Run \`gh auth status\` and capture its combined stdout+stderr verbatim (it writes to stderr).\n` +
+  `2. Run \`gh api -i user 2>/dev/null | grep -i '^x-oauth-scopes:'\` and capture its output verbatim (may be empty).\n` +
+  `Return { authStatus, scopesHeader } with the verbatim output of steps 1 and 2 (scopesHeader "" if empty/absent). ` +
+  `Do NOT edit, comment, merge, label, push, or open anything. Run no mutating command.`
+
+const tokenScopeRaw = await agent(TOKEN_SCOPE_PROMPT, { label: 'check-gh-token-scope', phase: 'Gather', agentType: READONLY_AGENT, schema: TOKEN_SCOPE_SCHEMA, effort: 'low' })
+const tokenScope = classifyTokenScope(tokenScopeRaw && tokenScopeRaw.authStatus, tokenScopeRaw && tokenScopeRaw.scopesHeader)
+if (tokenScope.writeCapable) {
+  throw new Error(
+    `pr-triage-fanout: refusing to run — the ambient gh token is write-capable (${tokenScope.reason}). ` +
+    `This workflow is READ-ONLY and must run under a read-scoped token (a fine-grained PAT limited to read on ` +
+    `Contents/Issues/Pull requests/Metadata, or a gh wrapper that rejects mutating subcommands) — see README ` +
+    `"Required setup: a read-scoped gh token". Detected scope(s): ${tokenScope.scopes.join(', ') || '(none)'}.`)
+}
+log(tokenScope.resolved
+  ? `Token-scope preflight: ambient gh token reports no write-capable scope (${tokenScope.scopes.join(', ') || '(none)'}). Proceeding.`
+  : `Token-scope preflight: ${tokenScope.reason} — proceeding, but confirm manually per README "Required setup: a read-scoped gh token".`)
+
 const CANDIDATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
