@@ -341,6 +341,19 @@ test('a regenerated gate that drops a condition fails closed rather than passing
   assert.ok(result.failed.includes('gate_integrity'), 'and it is reported as an integrity failure')
 })
 
+test('a regenerated gate that duplicates a condition fails closed — the verdict must name exactly nine', async () => {
+  const { result } = await runScript({
+    args: baseArgs(),
+    mutate: (src) => {
+      const out = src.replace('    checkRiskPaths(input, config),\n', '    checkRiskPaths(input, config),\n    checkRiskPaths(input, config),\n')
+      assert.notEqual(out, src, 'the mutation applied')
+      return out
+    },
+  })
+  assert.equal(result.pass, false, 'ten conditions are not nine, even when every one passes')
+  assert.ok(result.disagreements.some((d) => /`no_risk_paths` more than once/.test(d)), 'the duplicate is named')
+})
+
 test('a gate that throws is never read as either answer', async () => {
   const { result } = await runScript({
     args: baseArgs(),

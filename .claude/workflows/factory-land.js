@@ -880,8 +880,12 @@ if (verdict && typeof verdict === 'object') {
     if (!c) { disagreements.push(`verdict omits the required condition \`${id}\``); continue }
     if (c.pass !== true) reportedFailed.push(id)
   }
+  const named = new Set()
   for (const c of conditions) {
-    if (!EXPECTED_CONDITIONS.includes(String(c && c.id))) disagreements.push(`verdict carries an unrecognized condition \`${c && c.id}\``)
+    const id = String(c && c.id)
+    if (!EXPECTED_CONDITIONS.includes(id)) disagreements.push(`verdict carries an unrecognized condition \`${c && c.id}\``)
+    else if (named.has(id)) disagreements.push(`verdict names \`${id}\` more than once`)
+    named.add(id)
   }
   if (verdict.pass !== true && reportedFailed.length === 0 && disagreements.length === 0) {
     disagreements.push('verdict.pass is not true but every condition reports pass — the record is inconsistent')

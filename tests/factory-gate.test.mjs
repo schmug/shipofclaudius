@@ -548,6 +548,9 @@ test('inline: extract and splice refuse missing, duplicated, or reversed markers
     assert.equal(extractInlineBlock(bad), null, `malformed markers are not read: ${JSON.stringify(bad.slice(0, 30))}`)
     assert.throws(() => spliceInlineBlock(bad, 'x'), /markers/, 'and are never written through')
   }
+  for (const marker of [BEGIN_MARKER, END_MARKER]) {
+    assert.throws(() => spliceInlineBlock(good, `a\n${marker}\nb`), /block contains a marker/, 'a block carrying a marker is never written')
+  }
 })
 
 // ---- runner ----

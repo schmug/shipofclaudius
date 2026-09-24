@@ -53,6 +53,9 @@ export function extractInlineBlock(source) {
 /** `source` with the text between the markers replaced by `block`. Throws when the markers are malformed. */
 export function spliceInlineBlock(source, block) {
   if (extractInlineBlock(source) === null) throw new Error('inline markers missing, duplicated, or out of order')
+  if (String(block).includes(BEGIN_MARKER) || String(block).includes(END_MARKER)) {
+    throw new Error('block contains a marker — writing it would leave the markers ambiguous')
+  }
   const s = String(source)
   const b = s.indexOf(BEGIN_MARKER) + BEGIN_MARKER.length
   const e = s.indexOf(END_MARKER)
