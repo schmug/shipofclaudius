@@ -103,7 +103,7 @@ Drain the spool the next time `gh issue create` succeeds. **Rotate first, then
 read — never truncate in place:**
 
 ```bash
-mv ~/.claude/concerns-spool.jsonl "~/.claude/concerns-spool.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+mv "$HOME/.claude/concerns-spool.jsonl" "$HOME/.claude/concerns-spool.$(date -u +%Y%m%dT%H%M%SZ).jsonl"
 ```
 
 `mv` on the same filesystem is atomic, so a concurrent session's in-flight

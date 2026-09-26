@@ -88,7 +88,19 @@ REPO=$(git rev-parse --path-format=absolute --git-common-dir); REPO=${REPO%/.git
 SLUG=<owner/repo>; N=<issue-number>
 BASE=$(gh repo view "$SLUG" --json defaultBranchRef --jq .defaultBranchRef.name)
 WT="$REPO/../$(basename "$REPO")-issue-$N"
-git -C "$REPO" fetch --quiet origin "$BASE"
+git -C "$REPO" fetch --quiet origin
+gh pr list --repo "$SLUG" --state all --search "$N" --json number,title,state,url
+git -C "$REPO" log origin/"$BASE" --oneline --grep "#$N"
+```
+
+Check both results before provisioning anything. A peer session may already have shipped
+this issue: an /insights report on 2026-09-23 found at least four sessions that fully
+re-implemented work another session had already merged. `--search` also matches PRs that
+only mention the number, so read the titles. If an open or merged PR covers the issue, do
+not launch; report the PR to the user and stop. A commit on `origin/$BASE` that references
+`#$N` is the same signal for a PR merged without the issue number in its title.
+
+```bash
 git -C "$REPO" worktree add -b "issue-$N" "$WT" "origin/$BASE"
 ```
 
@@ -165,11 +177,20 @@ to main. If the default branch has a server-side ruleset/protection with require
 checks, squash-merge or enable auto-merge once everything is green; if not, or you can't
 verify the gate (fail closed), stop at the open PR and say which gate is missing. If the
 issue body is underspecified, state your assumptions before coding.
+
+Nobody will answer questions during this run. If you are blocked, stop and state what is
+blocked and what you tried. Keep an acceptance checklist in ../implement-<number>.tasks.md
+and tick items as they pass. Finish with: PR URL, test counts (N passing, M failing), each
+acceptance item shipped or not, and anything you could not verify.
 ```
 
 Keep that closing directive short — the child loads the repo's own CLAUDE.md and the
 injected global one, so you are pointing at guardrails, not restating them. Don't add
 guardrails the issue didn't ask for; the goal is a faithful hand-off of the filed work.
+The last paragraph is run shape, not a guardrail: the child runs up to 120 turns with
+nobody reading. Its checklist sits beside the JSON result, outside the worktree, so it is
+never committed; a child under this allowlist wrote to `../` with zero permission denials
+(measured 2026-09-23).
 
 ## Step 5 — Confirm
 
