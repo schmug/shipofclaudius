@@ -285,7 +285,21 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 // tests pass") also passed; it exercises neither clause. The never-run-check clause's
 // presence is pinned by the regression test below; its block behaviour was not part of
 // this battery.
-const PROMPT_SHA256_16 = '502aba2764499865'
+// 2026-09-26: added the paused-on-a-user-question exemption (with its unattended and
+// runnable-check limits) and pinned `model: claude-sonnet-5`. Measured two ways:
+// - Live: 27 `claude -p` sessions (session model claude-sonnet-5), 9 prompts x {old wording +
+//   default model, new wording + default model, new wording + sonnet}, loaded via --plugin-dir
+//   with the installed copy disabled. New wording + sonnet: 9 sessions, 10 evaluations, 1 block
+//   (the doubt-about-correctness control, which passed once the agent resolved the doubt); both
+//   trivial sessions evaluated once and passed. Single-turn question prompts did not block under
+//   the old wording either, so this battery shows no regression, not the fix.
+// - Replay: 34 real Stop evaluations from 14 days of transcripts, re-judged with the harness's
+//   stop-hook system prompt over a flattened transcript. Of 28 that blocked in production but
+//   should pass (question to the user, recited exemption, already recorded): old wording +
+//   default model passed 21, new wording + sonnet passed 27; 6/6 production passes stayed
+//   passes. Recall on genuine concerns is NOT established — the sample held one clean positive
+//   (new + sonnet blocked it). Fidelity is low: old + default reproduced 7 of the 28 blocks.
+const PROMPT_SHA256_16 = 'e2137e224258e909'
 
 test('stop hook: the condition wording is hash-pinned', () => {
   const actual = createHash('sha256').update(stopEntries[0].prompt || '').digest('hex').slice(0, 16)
@@ -306,6 +320,36 @@ test('stop hook: exempts legitimately in-flight background work from "unresolved
   assert.match(p, /is not unresolved/i, 'states the exemption as a condition, not an instruction')
   assert.match(p, /pending check, not a skipped one/i,
     'distinguishes a started-but-not-yet-returned check from a never-run one')
+})
+
+test('stop hook: a question the session is paused on for the user is not unresolved', () => {
+  const p = stopEntries[0].prompt || ''
+  // 2026-09-25: over 14 days of transcripts, 39% of 600 blocks cited a turn that ended by
+  // asking the user something ("Want me to fix both, or file them as issues?", "Does
+  // section 5 look right?"). That question is unanswered at every Stop by construction, so
+  // the "question raised and never answered" clause matched it and the session was reprompted
+  // into filler ("Waiting on your answer."). Keyed on the pause, not on the final message:
+  // after one block the final message is that filler and the question sits a turn earlier.
+  assert.match(p, /a question the session is paused on, waiting for the user's reply, is not unresolved/i,
+    'exempts a question the session is paused on for the user')
+  // Without this an agent can turn a check it should run into "Want me to check it?".
+  assert.match(p, /unless it hands the user a check the session could have run itself/i,
+    'a question that hands the user a runnable check stays unresolved')
+  // Unattended runs have no reader, so a question left in chat there is still unresolved
+  // (global CLAUDE.md: unattended, chat is a no-op). The <scheduled-task> frame is the one
+  // marker a transcript reliably carries; TTY and env vars do not reach the evaluator.
+  assert.match(p, /does not cover an unattended run/i, 'keeps unattended runs outside the exemption')
+  assert.ok(p.includes('<scheduled-task>'), 'names the transcript marker of an unattended run')
+  assert.ok(p.includes('a question raised and never answered'),
+    'keeps the base clause for questions the session raised and dropped')
+})
+
+test('stop hook: the evaluator is pinned to a model that applies the exemptions', () => {
+  // Unset, a prompt hook runs on the default small fast model (CLI 2.1.278 schema: "If not
+  // specified, uses the default small fast model"). On that model 26% of 600 blocks recited
+  // an exemption ("two subagents are actively running… the session is waiting") and blocked
+  // anyway, so adding exemption text alone does not change its verdicts.
+  assert.equal(stopEntries[0].model, 'claude-sonnet-5', 'sets model on the Stop entry')
 })
 
 test('stop hook: an unstarted-check completion claim is still unresolved (no regression)', () => {
