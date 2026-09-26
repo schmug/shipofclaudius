@@ -210,10 +210,25 @@ first Stop evaluation and `True` on the one following a block. The binary's guid
 > For Stop/SubagentStop hooks, check `stop_hook_active` in the input and return success while
 > it's true. Set `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` to raise this limit.
 
-A prompt hook does not read the input directly, so it cannot check `stop_hook_active` itself.
-It closes on its own **only if the filing actually happens** — and that is a weaker guarantee
-than it first appears. If `gh` is unauthenticated, or the agent simply does not comply, the
-condition stays false and the hook blocks again.
+**Corrected 2026-09-21.** A prompt hook *can* read the input: `$ARGUMENTS` anywhere in the
+`prompt` is substituted with the hook input JSON before the evaluator sees it. Verified by
+static analysis of the 2.1.269 binary — the substitution pattern
+(`\$ARGUMENTS\[\d+\]|\$ARGUMENTS|\$\d+(?!\w)`) and the field's own doc string ("Prompt to
+evaluate with LLM. Use $ARGUMENTS placeholder for hook input JSON"). The condition now carries
+`$ARGUMENTS` and counts `stop_hook_active: true` as satisfying it.
+
+That is a probabilistic guard, not a hard one — the evaluator is a model, and it both ignores
+and over-applies the clause. Measured replay (§10, 2026-09-21), flag set true: with the clause
+at the *end* of the condition, 2 of 3 probes blocked anyway. Moved to the second sentence, 3 of
+9 blocked — and all three were the same transcript slice, one cut mid-tool-call, which is not a
+Stop boundary at all (a Stop hook never fires there). On the two genuine boundaries it held 6 of
+6. The inverse also appeared once in 27: the evaluator cited `stop_hook_active` as satisfying
+the condition on a call where the flag was **false**. Place the clause early, treat it as a
+tendency, and keep `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` as the only hard backstop.
+
+Without that clause the hook closed on its own **only if the filing actually happened** — a
+weaker guarantee than it first appears. If `gh` is unauthenticated, or the agent simply does not
+comply, the condition stays false and the hook blocks again.
 
 Measured three times, on the default cap: an unsatisfiable condition ran **9**, **14**, and
 **13** evaluations before release — the last an independent reviewer's run against the shipped
@@ -228,6 +243,13 @@ Two mitigations, both required:
    `gh` call still terminates the loop on the next evaluation.
 2. The condition must be satisfiable by an agent that has decided there is nothing to file. The
    `Default to satisfied` clause is what makes "I looked and found nothing" a valid exit.
+3. **(2026-09-21)** Some items are unresolvable *by the session*, not merely unfiled — the one
+   that matters is a decision handed to Cory, which CLAUDE.md's trigger-1 rule requires be left
+   pending. `file-concerns` cannot file those, so before this they could only loop. The evaluator
+   may answer `{"ok": false, "impossible": true, "reason": ...}`, which the harness honours by
+   allowing the stop (2.1.269: the judge's system prompt offers the shape; the dispatcher
+   branches `impossible ? "impossible" : "met"` and emits `Hooks: Prompt hook condition judged
+   impossible`). The condition names that case explicitly.
 
 **Mitigation 1 is weakest exactly where the feature is aimed.** Spooling requires Bash, and §2
 notes that unattended runs are both where the capture matters most and where tools may be
@@ -314,6 +336,14 @@ re-run or attributed to compaction (vs. one of the other five reset transitions 
 from this session — that requires the real local transcripts referenced in #204's Pointers, which
 this environment does not have. The mechanism above is the most evidence-supported explanation on
 offer, not a confirmed root cause for every one of the 27 sessions.
+
+**Superseded 2026-09-21 — a cheaper fix landed instead.** The proposal below rests on the §4.4
+claim that a prompt hook cannot read `stop_hook_active`, which is wrong: `$ARGUMENTS` puts the
+whole hook input in front of the evaluator, and `{"ok": false, "impossible": true}` ends the turn
+cleanly for a condition only Cory can satisfy. Both are wording changes to the existing prompt
+hook, so the counter-file redesign was not needed. Keep the paragraph: if the wording guard
+proves too soft in practice (it is probabilistic — §4.4), this is still the shape of the hard
+version, and its reasoning about the harness's counter resets stands.
 
 **Fix — proposed, not implemented here.** Per #204's own constraint ("Any change to the Stop hook
 is a guardrail change ... propose it and get Cory's go-ahead before landing"), this update stops
@@ -534,6 +564,29 @@ harness lives in this session's scratchpad and is disposable.
     hooks are not yet supported outside REPL" both still present, corroborating item 4 across the
     `2.1.251` → `2.1.263` drift. Supersedes item 9's "3 evaluations" as a general guarantee: that
     result holds only for a run short enough, or context-light enough, never to hit compaction.
+14. **(2026-09-21) The cap's *value* is 8; only its counter is unstable.** Static analysis of
+    `2.1.269`: `Mp = a.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP ?? 8`, overriding when `Mp > 0 && Bd > Mp`,
+    where `Bd` is the consecutive-block count. That reconciles items 8, 9 and 13 — 8 is the
+    constant, the 9/13/14-evaluation totals are the counter resetting mid-run, and `=2` firing at
+    the third block is `Bd > Mp` exactly. Item 8's "do not encode it as a constant" still stands
+    for the *observed total*, which is what matters operationally.
+15. **(2026-09-21) A prompt hook can read its input, via `$ARGUMENTS`** — see §4.4. This is what
+    made the loop guard reachable without the command-hook redesign in §4.4.1.
+16. **(2026-09-21) `{"ok": false, "impossible": true}` ends the turn cleanly.** The evaluator's
+    own system prompt offers the shape and the dispatcher branches on it (`2.1.269`). It is the
+    only exit for a condition that only the user can satisfy.
+
+**Measured 2026-09-21 — block rate, old wording vs new (§4.4, #204).** Replay harness: the
+judge's system prompt, user wrapper and response schema lifted verbatim from the `2.1.269`
+binary, run against 12 real local transcripts at 14 stop points, on Haiku, two clean runs
+(99 judge calls total including a discarded first run). Old condition: **16/26 blocked (62%)** —
+far above the one-in-three ceiling `tests/session-end-concerns.test.mjs` sets, i.e. it was too
+eager quite apart from the loop bug. New condition: **5/27 blocked (19%)**, plus 6 `impossible`,
+so the turn ends cleanly in 81% of evaluations. The `model-settings-autodetection` session that
+ran to the cap (9 blocks, 3 consecutive) returns `impossible` or satisfied under the new wording
+at every stop point sampled. Caveats worth keeping: n is small, Haiku is noisy run to run, and
+one short session blocks under *both* conditions for what reads as a legitimate catch (a
+requested review left at reconnaissance) — that one is not a regression from this change.
 
 **Still open — check before relying on these:**
 
