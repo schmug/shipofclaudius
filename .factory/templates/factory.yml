@@ -26,7 +26,9 @@ on:
   issues:
     types: [labeled]
   pull_request_target:
-    types: [labeled]          # the human-minted `fix-verified` trust token arrives here
+    types: [labeled, synchronize]  # `labeled`: the human-minted trust token arrives here.
+                                    # `synchronize`: a new commit landed — void-stale-verification
+                                    # below removes a `fix-verified` that no longer covers the head.
   pull_request:
     types: [opened, synchronize, reopened]   # UNPRIVILEGED — runs the fixture-evidence producer
   schedule:
@@ -279,6 +281,38 @@ jobs:
           path: factory-evidence.json
           retention-days: 7
 
+  # ── The stale-verification voider (#268) ────────────────────────────────────────────────────
+  # `fix-verified` certifies ONE reviewed head, not the PR in general. `synchronize` fires on every
+  # new commit, so this job sees a push before any land path can act on the old approval. It NEVER
+  # checks out, builds, or executes the PR's code — it only removes one specific, fixed label and
+  # leaves a comment. It cannot add a label or remove any other, so a PR author gains nothing by
+  # controlling when it fires beyond losing their own stale trust token.
+  #
+  # This is the FAST, VISIBLE half of the fix. The land and land-sweep jobs below carry their own
+  # independent re-check (the GUARANTEED half) for the case where this job hasn't finished yet.
+  void-stale-verification:
+    needs: killswitch
+    if: >-
+      needs.killswitch.outputs.paused == 'false' &&
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'synchronize' &&
+      contains(github.event.pull_request.labels.*.name, 'fix-verified')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Void the trust token — the head it certified just changed
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --remove-label fix-verified
+          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body \
+            'Removed `fix-verified`: the head changed after a human applied it, and the label certifies one specific reviewed head. Re-review the new head and re-apply the label if it still looks right.'
+
   # ── The unattended land trigger (#65) ────────────────────────────────────────────────────────
   # `fix-verified` is BOTH gate condition 2 and the land job's clock. Removing the human is
   # therefore not one flag but a LADDER (see .factory/templates/README.md "Arming ladder"), and its
@@ -349,6 +383,24 @@ jobs:
             base="$(gh pr view "$pr" --repo "$TARGET_REPO" --json baseRefName --jq .baseRefName)"
             head_sha="$(gh pr view "$pr" --repo "$TARGET_REPO" --json headRefOid --jq .headRefOid)"
 
+            # Self-heal (#268): void-stale-verification above removes a stale `fix-verified`
+            # asynchronously, on a DIFFERENT concurrency-group key from this cron sweep, so it is
+            # not guaranteed to have finished before this loop reads labels. Re-derive freshness
+            # HERE, in the same job that is about to gate and merge, so a missed or delayed
+            # `synchronize` event can never let a label that predates this head reach the gate.
+            if gh pr view "$pr" --repo "$TARGET_REPO" --json labels --jq '.labels[].name' | grep -qx 'fix-verified'; then
+              label_ts="$(gh api "repos/$TARGET_REPO/issues/$pr/events" --paginate \
+                --jq '.[] | select(.event=="labeled" and (.label.name // "")=="fix-verified") | .created_at' \
+                2>/dev/null | tail -n1 || true)"
+              head_ts="$(gh api "repos/$TARGET_REPO/commits/$head_sha" --jq '.commit.committer.date' 2>/dev/null || true)"
+              if [ -z "${label_ts:-}" ] || [ -z "${head_ts:-}" ] || [[ "$label_ts" < "$head_ts" ]]; then
+                echo "::warning::#$pr — fix-verified predates head $head_sha (label ${label_ts:-unresolved}, head ${head_ts:-unresolved}) — voiding it."
+                gh pr edit "$pr" --repo "$TARGET_REPO" --remove-label fix-verified || true
+                gh pr comment "$pr" --repo "$TARGET_REPO" --body \
+                  'fix-verified was removed before this sweep gated the PR: the head changed after a human applied it. Re-review and re-apply if it still looks right.' || true
+              fi
+            fi
+
             rm -f factory-evidence.json
             run_id="$(gh run list --repo "$TARGET_REPO" --commit "$head_sha" --event pull_request --json databaseId --limit 1 --jq '.[0].databaseId')"
             if [ -n "${run_id:-}" ] && [ "$run_id" != "null" ]; then
@@ -414,6 +466,32 @@ jobs:
           path: .factory-plugin
           token: ${{ secrets.FACTORY_GH_TOKEN }}
           persist-credentials: false
+
+      # Self-heal (#268): void-stale-verification's `synchronize` job removes a stale
+      # `fix-verified` asynchronously and is not guaranteed to have finished before this `labeled`
+      # run reads labels (e.g. a push racing the very label application that triggered this job).
+      # Re-derive freshness HERE, before anything below reads the label, so this job can never
+      # ready, gate, or merge on a token that predates its own head.
+      - name: Void a stale fix-verified before gating (self-heal)
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if gh pr view "$PR_NUMBER" --repo "$TARGET_REPO" --json labels --jq '.labels[].name' | grep -qx 'fix-verified'; then
+            label_ts="$(gh api "repos/$TARGET_REPO/issues/$PR_NUMBER/events" --paginate \
+              --jq '.[] | select(.event=="labeled" and (.label.name // "")=="fix-verified") | .created_at' \
+              2>/dev/null | tail -n1 || true)"
+            head_ts="$(gh api "repos/$TARGET_REPO/commits/$HEAD_SHA" --jq '.commit.committer.date' 2>/dev/null || true)"
+            if [ -z "${label_ts:-}" ] || [ -z "${head_ts:-}" ] || [[ "$label_ts" < "$head_ts" ]]; then
+              echo "::warning::fix-verified predates head $HEAD_SHA (label ${label_ts:-unresolved}, head ${head_ts:-unresolved}) — voiding it before the gate runs."
+              gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --remove-label fix-verified || true
+            else
+              echo "fix-verified (labeled $label_ts) covers the current head (committed $head_ts)."
+            fi
+          fi
 
       # THE DRAFT DEADLOCK. `factory-issue-fix` opens a DRAFT (its write ladder deliberately ends
       # there), and a draft PR reports `mergeStateStatus: DRAFT`, which gate condition 8 rejects —

@@ -360,6 +360,37 @@ test('factory.yml: untrusted GitHub context reaches run: blocks only via env', a
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
 })
 
+test('factory.yml: a push voids a stale fix-verified via a dedicated synchronize job (#268)', async () => {
+  const y = await factoryCode()
+  assert.ok(/types: \[labeled, synchronize\]/.test(y), 'pull_request_target also listens for synchronize')
+  const jobs = factoryJobs(y)
+  const voider = jobs['void-stale-verification']
+  assert.ok(voider, 'a dedicated stale-verification voider job exists')
+  assert.ok(/needs: killswitch/.test(voider) && /needs\.killswitch\.outputs\.paused == 'false'/.test(voider),
+    'it is killswitch-gated like every other privileged job')
+  assert.ok(/github\.event_name == 'pull_request_target'/.test(voider) && /github\.event\.action == 'synchronize'/.test(voider),
+    'it only fires on a new commit to an existing PR')
+  assert.ok(!/uses:\s*actions\/checkout/.test(voider) && !/git\s+checkout/.test(voider),
+    'it never checks out anything — removing a label needs no repo')
+  assert.ok(/--remove-label fix-verified/.test(voider), 'it removes exactly the trust token')
+  assert.ok(!/--add-label/.test(voider), 'it never adds a label')
+})
+
+test('factory.yml: land and land-sweep void a stale fix-verified before the gate reads labels (#268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const name of ['land', 'land-sweep']) {
+    const body = jobs[name]
+    assert.ok(body, `${name} job exists`)
+    const voidIdx = body.indexOf('remove-label fix-verified')
+    const buildIdx = body.indexOf('build-input.mjs')
+    assert.ok(voidIdx > 0 && buildIdx > 0 && voidIdx < buildIdx,
+      `${name} must void a stale fix-verified BEFORE build-input.mjs reads current labels — the ` +
+      'synchronize job above is not guaranteed to have finished first, so each land path must ' +
+      'guarantee freshness itself, not merely benefit from the faster job when it wins the race')
+  }
+})
+
 // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim no
 // check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The contract
 // is "the count only goes UP", which `npm test` prints; no doc may restate a number.
