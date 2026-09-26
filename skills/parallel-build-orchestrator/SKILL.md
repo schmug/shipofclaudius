@@ -70,7 +70,7 @@ Run overlapping clusters as separate sequential invocations; run the disjoint ba
 No node is accepted on the implementer's word. For each opened PR, run **both** gates. A node is `PASS` only when both clear.
 
 **Gate A — empirical re-verification (this skill's own step; nothing delegable does it).**
-In a fresh worktree checked out at the PR head, a reviewer that did not write the code runs, itself:
+Dispatch the plugin's **`shipofclaudius:reviewer`** agent by name (`Agent` tool, `subagent_type: "shipofclaudius:reviewer"`) — never an unnamed or `general-purpose` subagent, which carries Write/Edit/Agent and can patch the code it is grading. The reviewer's frontmatter allows only Read/Grep/Glob/Bash and sets `model: sonnet` as the floor; pass `model: opus` per call for a risky diff (concurrency, auth, migrations, schema). Because it may not run `git worktree add`, create the fresh worktree checked out at the PR head yourself and put its path in the prompt, together with the charter's `focus` text and the verdict contract from `references/reviewer-charter.md`. That reviewer — which did not write the code — runs, itself:
 
 1. the node's exact `verify` command, and
 2. the repo's full suite.

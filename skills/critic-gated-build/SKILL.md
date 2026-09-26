@@ -13,7 +13,7 @@ Run an entire build — intake → spec → TDD implementation → deploy → in
 Use AskUserQuestion in 2–3 batched rounds for only the load-bearing decisions; recommend a default in each:
 
 1. Stack/hosting, data layer, identity model.
-2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: fresh-context subagent of the building model (disclose the reduced independence).
+2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: the plugin's **`shipofclaudius:reviewer`** agent, dispatched by name (`Agent` tool, `subagent_type: "shipofclaudius:reviewer"`) — fresh context, no Write/Edit/Agent by frontmatter, `model: sonnet` floor (raise per call). It keeps Bash so it can run the checks you name, so git-write restraint is by its rules, not a boundary (see #247); hand it a clone or worktree you can afford to lose. Never an unnamed subagent of the building model. Disclose the reduced independence: it is still the builder's model family.
 3. **Done bar** — default: every rubric category ≥ 8/10 on **two consecutive cycles**.
 4. **Cycle cap** — default 12; on cap, stop and report gaps instead of thrashing.
 5. Deploy target, repo name/visibility, check-in points (default: first deploy + completion only).
