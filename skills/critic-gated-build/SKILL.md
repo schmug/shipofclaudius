@@ -13,7 +13,7 @@ Run an entire build — intake → spec → TDD implementation → deploy → in
 Use AskUserQuestion in 2–3 batched rounds for only the load-bearing decisions; recommend a default in each:
 
 1. Stack/hosting, data layer, identity model.
-2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: fresh-context subagent of the building model (disclose the reduced independence).
+2. **Critic provider** — prefer a genuinely third-party CLI already authenticated on the machine (probe: `which codex gemini` and `ls ~/.codex/auth.json`; smoke-test `codex exec --skip-git-repo-check --sandbox read-only "Reply CRITIC_ONLINE" < /dev/null`). Fallback: the plugin's **`shipofclaudius:reviewer`** agent, dispatched by name (`Agent` tool, `subagent_type: "shipofclaudius:reviewer"`) — fresh context, no Write/Edit/Agent by frontmatter, `model: sonnet` floor (raise per call). It keeps Bash so it can run the checks you name, so git-write restraint is by its rules, not a boundary (see #247); hand it a clone or worktree you can afford to lose. Never an unnamed subagent of the building model. Disclose the reduced independence: it is still the builder's model family.
 3. **Done bar** — default: every rubric category ≥ 8/10 on **two consecutive cycles**.
 4. **Cycle cap** — default 12; on cap, stop and report gaps instead of thrashing.
 5. Deploy target, repo name/visibility, check-in points (default: first deploy + completion only).
@@ -47,13 +47,14 @@ Loop discipline:
 
 - Run the critic in the background; keep working only on things that can't race it.
 - **Fix every finding each cycle, minors included** — polish minors left on the table become next cycle's 7s, and a pass streak resets on any category < 8 (observed: pass → fail → pass → pass).
+- After each cycle update `critic-reports/STATUS.md` with the cycle number, the five scores, the pass streak, open findings with links, and any `BLOCKED_BY_PERMISSION`. Read the streak from this file. A run of up to 12 cycles gets summarized, and a streak held only in context is lost with it.
 - Expect platform-level findings the app can't fix (zone HSTS overrides, injected analytics vs. strict CSP). Capture them, document the boundary in the report, and hand the decision to the user — never change zone/org-wide settings unilaterally.
 
 ## Phase 3 — Completion protocol
 
 On two consecutive passes (or the cap):
 
-1. File remaining findings as self-contained GitHub issues (task, `path:line` pointers, constraints, acceptance criteria, out-of-scope); spawn implementation chips for the code-shaped ones.
+1. File remaining findings as self-contained GitHub issues (task, `path:line` pointers, constraints, acceptance criteria, out-of-scope); run the `implement-issue` skill on the code-shaped ones, one child per issue.
 2. Commit final critic reports; update project memory with the score trajectory and open boundaries.
 3. Final report to the user: score table per cycle, what shipped, what's theirs to decide (platform settings), any process slips — reported honestly.
 

@@ -50,10 +50,10 @@ If the project being audited is **dmarcheck**, project-local invariants take pre
 ## Security review
 
 ### Blocking (must fix before merge)
-- <file:line> — <invariant violated> — <CLAUDE.md or PR reference>
+- <file:line> — <invariant broken> — <why it's wrong> — <how to show it fails: an input, request, or command>
 
-### High-priority warnings
-- <file:line> — <what's suspicious and why>
+### Couldn't confirm
+- <file:line> — <suspicion> — <where you looked>
 
 ### Verified
 - <invariants explicitly checked and passing>
@@ -67,7 +67,8 @@ If no issues, say "No blocking issues found" and enumerate what you verified.
 ## Rules
 
 - Cite `file:line` for every finding.
-- Prefer false positives to false negatives — surface anything suspicious, but mark confidence.
+- List only problems you'd block the merge for. For each one, give the file and line, the invariant it breaks, why it's wrong, and how to show it fails (an input, request, or command).
+- A suspicion you could not confirm goes under Couldn't confirm, not Blocking.
 - Don't review style, tests, or refactoring — linters and CI handle those.
 - If the diff doesn't touch your scope, say so in one line and exit.
 - Never mark something Verified unless you actually `Read` the relevant code in this run.

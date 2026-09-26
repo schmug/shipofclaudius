@@ -205,6 +205,47 @@ test('an empty factory queue is a clean no-op, not an error or a guess', async (
   assert.equal(byPrefix(calls, 'reproduce').length, 0, 'no reasoning agent is spent either')
 })
 
+// ---------- #261: a positional/free-text issue number must resolve in script code, or refuse ----------
+// Before the fix, ANY args lacking a literal {issue|number} field — a bare number, a numeric
+// string, or the { notes } shape a `{ notes: args }` catch-guard produces from free text — fell
+// through to the self-bootstrap branch and silently fixed the OLDEST factory-queue issue instead.
+// In a live run this opens a draft PR for the wrong bug. Each resolving case below must target
+// #123 with ZERO bootstrap agent calls, and fails on the unfixed code for exactly that reason:
+// result.issue === 417 (the bootstrap stub's candidate) instead of 123.
+
+test('#261: a bare number resolves the issue with no self-bootstrap', async () => {
+  const { result, calls } = await runScript({ args: 123 })
+  assert.equal(result.issue, 123, 'args:123 targets issue 123, not the bootstrapped queue')
+  assert.equal(byPrefix(calls, 'bootstrap').length, 0, 'no bootstrap agent runs')
+})
+
+test('#261: a numeric string resolves the issue with no self-bootstrap', async () => {
+  const { result, calls } = await runScript({ args: '123' })
+  assert.equal(result.issue, 123, "args:'123' targets issue 123, not the bootstrapped queue")
+  assert.equal(byPrefix(calls, 'bootstrap').length, 0, 'no bootstrap agent runs')
+})
+
+test('#261: a leading "#N" in args.notes resolves the issue with no self-bootstrap', async () => {
+  const { result, calls } = await runScript({ args: { notes: '#123' } })
+  assert.equal(result.issue, 123, "args:{notes:'#123'} targets issue 123, not the bootstrapped queue")
+  assert.equal(byPrefix(calls, 'bootstrap').length, 0, 'no bootstrap agent runs')
+})
+
+test('#261: free text that names no resolvable issue dispatches NO agent and returns needs_args', async () => {
+  const { result, calls } = await runScript({ args: { notes: 'fix the flaky thing' } })
+  assert.equal(calls.agents.length, 0, 'zero agents are dispatched — free text is never handed to a model to extract a number from')
+  assert.equal(result.outcome, 'needs_args', 'a first-class needs_args outcome, not a fix on the wrong issue')
+  assert.notEqual(result.issue, 417, 'the bootstrapped queue is never substituted for an unresolvable target')
+})
+
+test('#261: genuinely empty args (undefined, {}, whitespace notes) still self-bootstrap', async () => {
+  for (const args of [undefined, {}, { notes: '  ' }]) {
+    const { result, calls } = await runScript({ args })
+    assert.equal(byPrefix(calls, 'bootstrap').length, 1, `args=${JSON.stringify(args)}: exactly one bootstrap agent runs`)
+    assert.equal(result.issue, 417, `args=${JSON.stringify(args)}: the bootstrapped oldest candidate is advanced`)
+  }
+})
+
 // ---------- phase ordering ----------
 
 test('phase ordering: reproduce strictly before diagnose before verify before fix', async () => {

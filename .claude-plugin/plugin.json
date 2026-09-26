@@ -1,6 +1,9 @@
 {
   "name": "shipofclaudius",
   "description": "Curated dynamic workflows (issue/PR triage, research, stacked impl + merge, and security scans) as first-class plugin workflow commands.",
-  "agents": ["./.claude/agents/security-hardening-reviewer.md"],
+  "agents": [
+    "./.claude/agents/security-hardening-reviewer.md",
+    "./.claude/agents/reviewer.md"
+  ],
   "workflows": "./.claude/workflows"
 }

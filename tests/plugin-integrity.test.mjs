@@ -485,6 +485,63 @@ test('.claude/agents/ is registered in plugin.json (it is NOT an auto-discovery 
   }
 })
 
+// ---- the reviewer agent: read-only, sonnet floor, no memory (#242) ----
+// parallel-build-orchestrator's Gate A and critic-gated-build's fallback critic dispatch a
+// reviewer that did not write the code. Before #242 both said "a reviewer" / "a fresh-context
+// subagent" and named nothing, so the dispatch fell through to general-purpose -- which has
+// Write, Edit and Agent, i.e. a grader that can patch the code it is grading. The contract is
+// enforced by the frontmatter, so the frontmatter is what this test pins: exactly the four
+// inspection tools, `model: sonnet` as the floor (dispatchers raise it per call), and no
+// `memory:` (a reviewer that remembers a prior repo grades the wrong contract).
+const frontmatter = (md) => {
+  const m = md.match(/^---\n([\s\S]*?)\n---/)
+  assert.ok(m, 'has frontmatter')
+  return m[1]
+}
+
+test('reviewer agent ships read-only on the sonnet floor with no memory (#242)', async () => {
+  const fm = frontmatter(await read('.claude/agents/reviewer.md'))
+  assert.match(fm, /^name: reviewer$/m, 'registers as <plugin>:reviewer')
+  assert.match(fm, /^description: \S/m, 'non-empty description')
+  const tools = fm.match(/^tools:\s*(.+)$/m)
+  assert.ok(tools, 'declares an explicit tools allowlist (omitting it inherits everything)')
+  assert.deepEqual(tools[1].split(',').map((t) => t.trim()).sort(), ['Bash', 'Glob', 'Grep', 'Read'],
+    'exactly Read/Grep/Glob/Bash -- no Write, Edit, NotebookEdit, or Agent')
+  assert.match(fm, /^model: sonnet$/m, 'sonnet is the floor; raise per call, never here')
+  assert.doesNotMatch(fm, /^memory:/m, 'no memory: a reviewer that remembers a prior repo grades the wrong contract')
+})
+
+// A skill-prose dispatch is not a workflow `agentType:` -- the scan above never sees it -- so
+// the same two rules are applied here to the process skills' bodies: the name is namespaced
+// (`<plugin>:<name>` is what an installer registers) and the bare remainder ships. Any
+// `<plugin>:<x>` token in a skill body that is not itself a shipped skill is taken to be an
+// agent dispatch. The two sites #242 names are pinned by paragraph so that the rule cannot be
+// satisfied by a mention somewhere else in the file.
+test('Gate A and the critic fallback dispatch the shipped reviewer by its namespaced name (#242)', async () => {
+  const pluginName = (await readJSON('.claude-plugin/plugin.json')).name
+  const prefix = `${pluginName}:`
+  const shipped = await shippedAgentNames()
+  const skills = new Set(await skillNames())
+  for (const name of skills) {
+    const md = await read(`skills/${name}/SKILL.md`)
+    for (const m of md.matchAll(new RegExp(`${pluginName}:([\\w-]+)`, 'g'))) {
+      if (skills.has(m[1])) continue
+      assert.ok(shipped.has(m[1]),
+        `skills/${name}/SKILL.md dispatches "${prefix}${m[1]}" but no .claude/agents/*.md declares \`name: ${m[1]}\``)
+    }
+  }
+  const pbo = await read('skills/parallel-build-orchestrator/SKILL.md')
+  const gateA = pbo.slice(pbo.indexOf('**Gate A'), pbo.indexOf('**Gate B'))
+  assert.ok(gateA.length > 0, 'parallel-build-orchestrator still has a Gate A section before Gate B')
+  assert.ok(gateA.includes(`${prefix}reviewer`),
+    `Gate A must name its dispatch: "${prefix}reviewer", not "a reviewer"`)
+  const cgb = await read('skills/critic-gated-build/SKILL.md')
+  const fallback = cgb.split('\n').find((l) => /critic provider/i.test(l) && /fallback/i.test(l))
+  assert.ok(fallback, 'critic-gated-build still describes a critic-provider fallback')
+  assert.ok(fallback.includes(`${prefix}reviewer`),
+    `the critic fallback must name its dispatch: "${prefix}reviewer", not "fresh-context subagent"`)
+})
+
 test('every workflow has a suite, and every suite is in the package.json test chain', async () => {
   // CLAUDE.md says plugin-integrity "fails the build if you break" the rule that package.json's
   // test script lists each suite explicitly. It did not — nothing here ever opened package.json,

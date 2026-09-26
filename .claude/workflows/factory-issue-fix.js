@@ -562,12 +562,57 @@ function renderReport(num, parts) {
 // decides the label set (see the header note on why label writes stay out of the model).
 const transition = (add, remove, comment) => ({ labels: { add, remove }, comment: comment || '' })
 
+// ── Resolve the target issue in script code, BEFORE any agent runs and BEFORE phase('Reproduce').
+// Never ask a model to extract an issue number from free text — that is exactly the guess this
+// check exists to prevent.
+//
+// Checks, in order: A.issue, A.number (the documented shape), a bare A itself (covers args:123 and
+// args:'123' — JSON.parse produces the bare number 123, whose .issue/.number are undefined), then
+// A.notes (covers { notes: '#123' } — what a `{ notes: args }` catch-guard elsewhere produces from
+// free text like '#123'). Only a bare positive integer, a numeric string, or a leading '#N' ever
+// resolves; anything else ('fix issue 123') is left unresolved on purpose.
+function parseIssueRef(v) {
+  if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v
+  if (typeof v === 'string') {
+    const m = v.trim().match(/^#?(\d+)$/)
+    if (m) {
+      const n = Number(m[1])
+      if (Number.isInteger(n) && n > 0) return n
+    }
+  }
+  return null
+}
+let ISSUE = null
+if (A != null && typeof A === 'object' && A.issue != null) ISSUE = parseIssueRef(A.issue)
+if (ISSUE == null && A != null && typeof A === 'object' && A.number != null) ISSUE = parseIssueRef(A.number)
+if (ISSUE == null) ISSUE = parseIssueRef(A)
+if (ISSUE == null && A != null && typeof A === 'object' && typeof A.notes === 'string') ISSUE = parseIssueRef(A.notes)
+
+// Self-bootstrap runs ONLY when args is genuinely empty: undefined, null, {}, or an object whose
+// only key is an empty/whitespace `notes` (what a `{ notes: args }` catch-guard produces for "").
+// Any OTHER args that resolves to no issue is a caller error, not an invitation to substitute a
+// different issue — that substitution (fixing the factory queue's oldest bug instead of the one
+// actually named) is the defect this check exists to close.
+const ARGS_EMPTY = A === undefined || A === null ||
+  (typeof A === 'object' && !Array.isArray(A) && (
+    Object.keys(A).length === 0 ||
+    (Object.keys(A).length === 1 && typeof A.notes === 'string' && !A.notes.trim())
+  ))
+
+if (ISSUE == null && !ARGS_EMPTY) {
+  log('factory-issue-fix: args resolved to no issue and args is not empty — refusing to substitute the factory queue for an unresolvable target.')
+  return {
+    outcome: 'needs_args',
+    hint: 'factory-issue-fix could not resolve an issue number from args. Pass { issue: <N> } (a number, a numeric string, or a leading "#N" in args itself or args.notes), or call with no args (or empty args) to self-bootstrap from the factory queue.',
+    issue: null, spineVersion: SPINE_VERSION,
+  }
+}
+
 // ── Phase: Reproduce ──
 phase('Reproduce')
 
-// Self-bootstrap: no issue passed => gather the factory's queue read-only and take the oldest.
-let ISSUE = Number(A.issue != null ? A.issue : A.number)
-if (!Number.isInteger(ISSUE) || ISSUE <= 0) {
+if (ISSUE == null) {
+  // args is genuinely empty => gather the factory's queue read-only and take the oldest.
   const boot = await agent(BOOTSTRAP_PROMPT, { label: 'bootstrap-queue', phase: 'Reproduce', agentType: READONLY_AGENT, schema: BOOTSTRAP_SCHEMA })
   const cands = (boot && Array.isArray(boot.candidates) ? boot.candidates : [])
     .map((c) => Number(c && c.number)).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => a - b)

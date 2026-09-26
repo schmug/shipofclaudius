@@ -1,6 +1,7 @@
 // Content-contract test for the gate-merge policy process skills — the skills in
 // POLICY_SKILLS below — plus the autonomy-block checks on parallel-build-orchestrator
-// and critic-gated-build. Node built-ins only; zero token cost.
+// and critic-gated-build, and the security-hardening-reviewer agent's report contract.
+// Node built-ins only; zero token cost.
 // Asserts each POLICY_SKILLS entry exists as a `workflow: none` process skill, carries the
 // load-bearing gate-merge policy language (agents merge through a server-side
 // ruleset/protection with required CI checks; UNKNOWN/detection failure fails
@@ -40,6 +41,17 @@ test('ship: merges through the mechanical gate, fail closed', async () => {
 
 test('ship: keeps the never-push-directly-to-main step', async () => {
   assert.ok(/Never push directly to main/.test(await skill('ship')))
+})
+
+// A red step is fixed and re-run, not reported and abandoned: the old "stop at the first red
+// step" line contradicted step 2's "If tests fail, fix them". Stops are reserved for calls the
+// agent cannot make alone.
+test('ship: a red step is fixed and re-run; it stops only for a product, scope, or guardrail call', async () => {
+  const md = (await skill('ship')).replace(/\s+/g, ' ')
+  assert.ok(!/Stop and report failure at the first red step/.test(md), 'the stop-at-first-red rule is gone')
+  assert.ok(/When a step goes red, fix it, re-run that step, and continue\./.test(md), 'red steps are fixed and re-run')
+  assert.ok(/Stop and ask only when the fix needs a product decision, is outside this branch's scope, or touches a guardrail file\./.test(md), 'names the three stop conditions')
+  assert.ok(/Fix errors, re-run, continue\./.test(md) && !/Stop on errors\./.test(md), 'the typecheck step follows the same rule')
 })
 
 test('pr-workflow: exists as a process skill', async () => {
@@ -110,6 +122,16 @@ test('parallel-build-orchestrator: Phase 5 routes an unpatched security follow-u
   assert.ok(/not yet fixed/i.test(stop), 'the autonomy block pre-approves follow-up filing, so its stop list carries the same exception')
 })
 
+// Phase 1 used to stop for plan approval, contradicting the autonomy block's "proceed without
+// asking: planning, worktrees, lane fan-out". Only a product tradeoff in the plan stops it.
+test('parallel-build-orchestrator: Phase 1 fans out without an approval stop unless the plan is a product tradeoff', async () => {
+  const md = await skill('parallel-build-orchestrator')
+  const p1 = md.slice(md.indexOf('## Phase 1'), md.indexOf('## Phase 2'))
+  assert.ok(!/for approval before fanning out/.test(p1), 'the plan-approval stop is gone')
+  assert.ok(/Write `plan\.md`, record the split, then fan out\./.test(p1), 'Phase 1 ends by fanning out')
+  assert.ok(/cuts a node or changes acceptance criteria, that is a product tradeoff: stop and ask\./.test(p1), 'a product tradeoff still stops')
+})
+
 test('critic-gated-build: exists as a process skill', async () => {
   assertProcessSkill('critic-gated-build', await skill('critic-gated-build'))
 })
@@ -122,6 +144,40 @@ test('critic-gated-build: defines what "autonomy begins" means and names its exc
   assert.ok(/first-deploy/i.test(md), 'names the first-deploy check-in exception')
   assert.ok(/platform-setting/i.test(md), 'names the platform-setting decision exception')
   assert.ok(/Before ending your turn, check your last paragraph\./.test(md), 'the last-paragraph rule is present')
+})
+
+// The two-consecutive-pass streak spans up to 12 cycles. A long run gets summarized, so a streak
+// held only in context is lost; the loop keeps it in a committed file and reads it back.
+test('critic-gated-build: the pass streak lives in critic-reports/STATUS.md, not in context', async () => {
+  const md = await skill('critic-gated-build')
+  const loop = md.slice(md.indexOf('Loop discipline:'), md.indexOf('## Phase 3'))
+  assert.ok(loop.includes('critic-reports/STATUS.md'), 'names the status file')
+  for (const field of ['cycle number', 'five scores', 'pass streak', 'open findings', 'BLOCKED_BY_PERMISSION']) {
+    assert.ok(loop.includes(field), `STATUS.md records: ${field}`)
+  }
+  assert.ok(/Read the streak from this file\./.test(loop), 'the streak is read back from the file')
+})
+
+// implement-issue superseded spawn_task chips; completion must route code-shaped findings there.
+test('critic-gated-build: completion hands code-shaped findings to implement-issue, not chips', async () => {
+  const md = await skill('critic-gated-build')
+  const p3 = md.slice(md.indexOf('## Phase 3'), md.indexOf('## Templates'))
+  assert.ok(!/chips?\b/i.test(p3), 'no chip hand-off survives')
+  assert.ok(/run the `implement-issue` skill on the code-shaped ones, one child per issue/.test(p3), 'routes through implement-issue')
+})
+
+// The reviewer is a merge gate for fix-finding and stacked-impl-lanes. A recall-biased "surface
+// anything suspicious" list mixes blockers with guesses; blockers must carry a failure demo and
+// unconfirmed suspicions go in their own section.
+test('security-hardening-reviewer: lists only merge-blocking problems, each with a failure demo; suspicions are parked separately', async () => {
+  const md = await read('.claude/agents/security-hardening-reviewer.md')
+  assert.ok(!/Prefer false positives to false negatives/.test(md), 'the recall-over-precision rule is gone')
+  assert.ok(md.includes("List only problems you'd block the merge for."), 'blocking-only rule')
+  assert.ok(/the file and line, the invariant it breaks, why it's wrong, and how to show it fails \(an input, request, or command\)/.test(md), 'each blocker carries its failure demonstration')
+  const fmt = md.slice(md.indexOf('## Output format'), md.indexOf('## Rules'))
+  assert.ok(fmt.includes("### Couldn't confirm") && fmt.includes('<file:line> — <suspicion> — <where you looked>'), "Couldn't confirm section with its line shape")
+  assert.ok(fmt.includes('### Verified') && fmt.includes('### Not applicable'), 'Verified and Not applicable survive')
+  assert.ok(!fmt.includes('### High-priority warnings'), 'the unscoped warnings bucket is gone')
 })
 
 test('factory-intake: exists as a process skill and its autonomy block names exactly four check-ins', async () => {

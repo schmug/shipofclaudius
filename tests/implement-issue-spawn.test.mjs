@@ -99,6 +99,33 @@ test('the child works in its own worktree, off the default branch', async () => 
     'the worktree must be cut from the default branch, not the current one')
 })
 
+// OBSERVED (/insights, 2026-09-23): at least 4 sessions fully re-implemented an issue a peer
+// session had already merged (e.g. schmug/clodcast #179/#180 for #174). The only PR lookup ran
+// after the child exited. The dedupe has to run before the launch, against a fresh fetch.
+test('an issue already covered by an open or merged PR is found before the child launches', async () => {
+  const md = await skill()
+  const launch = md.indexOf('claude -p "$BRIEF"')
+  const fetch = md.search(/git -C "\$REPO" fetch --quiet origin\n/)
+  const prs = md.search(/gh pr list --repo "\$SLUG" --state all --search "\$N"/)
+  const commits = md.search(/git -C "\$REPO" log origin\/"\$BASE" --oneline --grep "#\$N"/)
+  assert.ok(launch > 0, 'the launch command is present')
+  for (const [what, at] of [['full fetch', fetch], ['PR search', prs], ['commit grep', commits]]) {
+    assert.ok(at > 0 && at < launch, `${what} runs before the launch`)
+  }
+  assert.match(md.slice(prs, launch).replace(/\s+/g, ' '), /do not launch/i, 'a covering PR stops the launch')
+})
+
+// The child runs up to 120 turns with nobody reading. It needs a blocked-state rule, a
+// checklist that survives context summarization, and a report shape the parent can verify.
+test('the brief tells the child nobody answers, where to keep its checklist, and how to finish', async () => {
+  const md = await skill()
+  const brief = md.slice(md.indexOf('Implement GitHub issue #<number>'), md.indexOf('Keep that closing directive short')).replace(/\s+/g, ' ')
+  assert.ok(brief.includes('Nobody will answer questions during this run.'), 'no-questions rule')
+  assert.match(brief, /If you are blocked, stop and state what is blocked and what you tried\./, 'blocked-state rule')
+  assert.match(brief, /acceptance checklist in \.\.\/implement-<number>\.tasks\.md/, 'checklist file outside the worktree')
+  assert.match(brief, /Finish with: PR URL, test counts \(N passing, M failing\), each acceptance item shipped or not, and anything you could not verify\./, 'final report shape')
+})
+
 // A backgrounded child inherits the parent's stdin. Without a redirect it stalls on a
 // "no stdin data received in 3s" warning before proceeding.
 test('the launch redirects stdin so a backgrounded child does not stall', async () => {
