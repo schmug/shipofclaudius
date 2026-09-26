@@ -52,6 +52,7 @@
 export const meta = {
   name: 'fix-finding',
   description: 'Minimally remediate ONE confirmed security finding (or prove it is already fixed): read-only reachability triage -> failing regression test first -> smallest behavior-preserving fix -> adversarial control-not-weakened review -> draft PR (never pushes to main).',
+  whenToUse: 'You have ONE confirmed security finding and want it minimally remediated behind a draft PR, with a failing regression test first and an adversarial control-not-weakened review. Not for generating findings (use deep-security-scan / security-diff-scan / triage-finding) or merging the result (a human, or a separate merge workflow).',
   phases: [
     { title: 'Triage', detail: 'a read-only idempotency preflight skips the run if the fix branch already has an open PR; then a read-only triage agent confirms the finding is REACHABLE on current code and names the narrowest fix boundary — ALREADY_FIXED / NOT_REACHABLE short-circuit to a first-class no_change outcome (no write, no invented change)' },
     { title: 'Fix', detail: 'a worktree-isolated, write-capable agent writes a FAILING regression test FIRST, makes the smallest behavior-preserving change scoped to the triage boundary, proves the test fails-on-revert and the original attacker path no longer reproduces, keeps lint/type/test green, and opens a DRAFT PR (never pushes to main)' },
@@ -59,7 +60,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const FINDING = A.finding
 if (!FINDING || typeof FINDING !== 'object' || Array.isArray(FINDING)) {
   throw new Error('fix-finding: args.finding is required — one confirmed finding object per run ({ title, file, line, vuln_class, evidence, attacker_story, fix, severity }). Bulk remediation is out of scope; drive this once per finding.')

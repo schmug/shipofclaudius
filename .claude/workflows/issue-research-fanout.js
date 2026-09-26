@@ -72,7 +72,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? `-R ${A.repo}` : ''
 let NUMBERS = Array.isArray(A.numbers) ? A.numbers : []
 const TRIAGED = Array.isArray(A.triaged) ? A.triaged : []

@@ -11,6 +11,7 @@ import { stripNonSemantic, extractCloses, extractScopeGlobs } from '../packages/
 import { normalizeConfig, MANDATORY_DENYLIST, DEFAULTS } from '../packages/factory-gate/src/config.mjs'
 import { evaluate, renderVerdict, CONDITION_ORDER, checkFixtureEvidence } from '../packages/factory-gate/src/gate-core.mjs'
 import { buildGateInput, normalizeChecks, resolveLinkedIssue, requiredContextsPath } from '../packages/factory-gate/src/build-input.mjs'
+import { toInlineSource, extractInlineBlock, spliceInlineBlock, BEGIN_MARKER, END_MARKER } from '../packages/factory-gate/src/inline.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -525,6 +526,31 @@ test('cond9: omitting source entirely fails closed (an old-shaped payload is not
 test('cond9: still auto-passes when the config does not require it', () => {
   const v = checkFixtureEvidence({ evidence: null }, { requireFixtureEvidence: false })
   assert.equal(v.pass, true, 'opt-in condition stays opt-in')
+})
+
+// ---------- inline: the copy factory-land.js carries (#262) ----------
+
+test('inline: a module loses only its import lines and export keywords', () => {
+  const src = "import { a } from './a.mjs'\n// keep\nexport const X = 1\nexport function f() { return 'export ' }\nconst y = 2"
+  assert.equal(toInlineSource(src), "// keep\nconst X = 1\nfunction f() { return 'export ' }\nconst y = 2")
+})
+
+test('inline: extract and splice refuse missing, duplicated, or reversed markers', () => {
+  const good = `head\n${BEGIN_MARKER}\nold\n${END_MARKER}\ntail`
+  assert.equal(extractInlineBlock(good), 'old')
+  assert.equal(spliceInlineBlock(good, 'new'), `head\n${BEGIN_MARKER}\nnew\n${END_MARKER}\ntail`)
+  for (const bad of [
+    'no markers',
+    `${BEGIN_MARKER}\nonly begin`,
+    `${END_MARKER}\n${BEGIN_MARKER}`,
+    `${BEGIN_MARKER}\na\n${END_MARKER}\n${BEGIN_MARKER}\nb\n${END_MARKER}`,
+  ]) {
+    assert.equal(extractInlineBlock(bad), null, `malformed markers are not read: ${JSON.stringify(bad.slice(0, 30))}`)
+    assert.throws(() => spliceInlineBlock(bad, 'x'), /markers/, 'and are never written through')
+  }
+  for (const marker of [BEGIN_MARKER, END_MARKER]) {
+    assert.throws(() => spliceInlineBlock(good, `a\n${marker}\nb`), /block contains a marker/, 'a block carrying a marker is never written')
+  }
 })
 
 // ---- runner ----

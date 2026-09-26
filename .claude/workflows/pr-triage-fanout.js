@@ -79,6 +79,7 @@
 export const meta = {
   name: 'pr-triage-fanout',
   description: 'Read-only fan-out: one agent per open PR → MERGE/CLOSE/REBASE/FIX_CI/COMMENT/AWAITING_HUMAN/ESCALATE with CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated gh user by default, or args.author; bots & other authors excluded). Auto-gathers all open PRs when none are passed.',
+  whenToUse: 'You want your open PRs classified by CI/mergeability/review state before deciding what to land or fix. Not for a deep single-PR review (use pr-review-fanout) or actually merging (use merge-pr-with-gate / stacked-merge-walk).',
   phases: [
     { title: 'Gather', detail: 'one read-only agent lists open PRs (or views the passed numbers) + resolves the gh user; the author filter is applied in code. A read-only discover agent resolves the required-status-check list once.' },
     { title: 'Triage', detail: 'a read-checkpoint loads prior verdicts and skips unchanged-and-done PRs; then per remaining kept PR (in sequential waves of <=8): a read-only relay fetches the untrusted PR text, then a read-only agent classifies it from nonce-fenced data + trusted CI/mergeability metadata + the pre-discovered required-check list' },
@@ -86,7 +87,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? `-R ${A.repo}` : ''
 const AUTHOR_ARG = (typeof A.author === 'string' && A.author.trim()) ? A.author.trim() : ''
 const NOTES = A.notes || ''

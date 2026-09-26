@@ -34,10 +34,6 @@ test('marketplace.json is valid JSON, lists the plugin, and pins no version', as
 
 import { readdir } from 'node:fs/promises'
 
-// The single source of truth for the bundled-script reference. If Task 4's smoke test
-// forces the fallback, change ONLY this line (and re-run the suite).
-const wfRef = (name) => `\${CLAUDE_PLUGIN_ROOT}/.claude/workflows/${name}.js`
-
 const workflowNames = async () =>
   (await readdir(new URL('.claude/workflows/', ROOT)))
     .filter((f) => f.endsWith('.js'))
@@ -50,8 +46,7 @@ const skillNames = async () => {
 }
 
 // Process skills are session-long playbooks, not Workflow wrappers. They opt out
-// of the 1:1 mapping EXPLICITLY via `workflow: none` in frontmatter — an absent
-// workflow script alone is still an orphan and still fails the 1:1 check.
+// of the 1:1 mapping EXPLICITLY via `workflow: none` in frontmatter.
 const isProcessSkill = async (name) => {
   const md = await read(`skills/${name}/SKILL.md`)
   return /^workflow:\s*none$/m.test(md)
@@ -66,10 +61,26 @@ const partitionedSkills = async () => {
   return { wrappers, process }
 }
 
-test('every workflow has exactly one wrapper skill, and vice versa (1:1, no orphans)', async () => {
+// #254: the 18 workflows are registered as first-class plugin components
+// (plugin.json's "workflows" key) and launch directly as
+// `Workflow({ name: 'shipofclaudius:<name>' })`. There is no wrapper skill left to
+// Read-then-`script` them, so a same-named skill would only be dead code the
+// workflow silently shadows — the inverted 1:1 rule is "never both".
+test('no skill shares a name with a workflow (the workflow owns that command name; a stale skill would mislead)', async () => {
+  const wfNames = new Set(await workflowNames())
+  for (const name of await skillNames()) {
+    assert.ok(!wfNames.has(name),
+      `skills/${name} collides with workflow meta.name "${name}" — delete the skill, the plugin-registered workflow now owns this command`)
+  }
+})
+
+// Every remaining skill is a session-long playbook now, not a Workflow wrapper — that
+// entry point no longer exists. A skill that forgets to declare `workflow: none` is
+// ambiguous about which contract it follows.
+test('every skill is an explicitly declared process skill (the Workflow-wrapper skill shape is retired)', async () => {
   const { wrappers } = await partitionedSkills()
-  assert.deepEqual(wrappers, await workflowNames(),
-    'non-process skills/<name>/ set must equal .claude/workflows/<name>.js set')
+  assert.deepEqual(wrappers, [],
+    `these skills do not declare "workflow: none" in frontmatter, but no Workflow-wrapper skill shape exists any more: ${wrappers.join(', ')}`)
 })
 
 test('process skills: declared explicitly, self-consistent, and never Workflow wrappers', async () => {
@@ -83,6 +94,50 @@ test('process skills: declared explicitly, self-consistent, and never Workflow w
     for (const m of md.matchAll(/references\/([\w.-]+)/g)) {
       await read(`skills/${name}/references/${m[1]}`)
     }
+  }
+})
+
+test('.claude-plugin/plugin.json registers .claude/workflows (it is NOT an auto-discovery path inside a plugin)', async () => {
+  // Plugins auto-discover a ROOT `workflows/` directory only (verified empirically against
+  // 2.1.278/2.1.281, see #254's evidence table). `.claude/workflows/` is the project scope —
+  // it covers contributors with this repo checked out, but an installer gets nothing unless
+  // plugin.json names the path explicitly, exactly like the "agents" key above.
+  const m = await readJSON('.claude-plugin/plugin.json')
+  assert.ok(
+    m.workflows === './.claude/workflows' || m.workflows === './.claude/workflows/',
+    '.claude-plugin/plugin.json must set "workflows": "./.claude/workflows" — otherwise a fresh install loads none')
+})
+
+test('every workflow meta has a non-empty description AND whenToUse', async () => {
+  // The `/shipofclaudius:<name>` slash command and its listing entry are generated from
+  // `meta` alone (name/description/whenToUse/phases) — the harness never reads the .js body
+  // at invoke time. A missing whenToUse ships a command with no "when to reach for this"
+  // guidance in the generated listing.
+  for (const name of await workflowNames()) {
+    const src = await read(`.claude/workflows/${name}.js`)
+    const m = src.match(/export const meta = \{[\s\S]*?\n\}/)
+    assert.ok(m, `${name}: no \`export const meta = { ... }\` literal found`)
+    const block = m[0]
+    assert.match(block, /description:\s*(['"])\S/, `${name}: meta.description is empty or missing`)
+    assert.match(block, /whenToUse:\s*(['"])\S/, `${name}: meta.whenToUse is empty or missing`)
+  }
+})
+
+// #254: a slash-command invocation arrives as a raw string, not JSON (`/shipofclaudius:foo
+// 12 14` -> `Workflow({ args: "12 14" })`). Every workflow's args guard must treat a non-JSON
+// string as free text and still self-bootstrap, rather than throwing `JSON.parse` before any
+// code runs. This extracts and executes each file's OWN guard expression (not a shared
+// constant), so it genuinely covers all 18, not just the pattern used to write them.
+test('every workflow\'s args guard accepts a non-JSON string without throwing (#254)', async () => {
+  for (const name of await workflowNames()) {
+    const src = await read(`.claude/workflows/${name}.js`)
+    const m = src.match(/const A = \(\(\) => \{[\s\S]*?\n\}\)\(\)/)
+    assert.ok(m, `${name}: no \`const A = (() => { ... })()\` args guard found — did it regress to a bare JSON.parse?`)
+    const fn = new Function('args', `${m[0]}\nreturn A`)
+    let result
+    assert.doesNotThrow(() => { result = fn('12 14 repo=foo') },
+      `${name}: the args guard throws on a non-JSON string instead of self-bootstrapping`)
+    assert.ok(result && typeof result === 'object', `${name}: the args guard must still return an object for a non-JSON string`)
   }
 })
 
@@ -175,25 +230,6 @@ test('implement-issue: the description keeps the recovered casual + /issue-compa
 
   assert.doesNotMatch(d, /\bwatch|\bmonitor|handshake/i,
     'the watch phase is post-trigger machinery — describing it here only dilutes matching')
-})
-
-// #213: Workflow({ scriptPath }) refuses any path outside the session's own working
-// directory (or an added directory) — including a real plugin-cache path, even after
-// it has been Read in-session. A plugin's bundled workflow is never under the
-// installing session's cwd, so the wrapper contract is Read-then-`script`, not
-// scriptPath: read the bundled file, then pass its exact contents as `script`.
-test('each wrapper Reads its own bundled workflow then invokes Workflow via `script` (not scriptPath) + has a description', async () => {
-  for (const name of await workflowNames()) {
-    const md = await read(`skills/${name}/SKILL.md`)
-    assert.ok(/^---[\s\S]*?\ndescription:\s*\S.*\n[\s\S]*?---/m.test(md), `${name}: frontmatter has a non-empty description`)
-    assert.ok(md.includes(`name: ${name}`), `${name}: frontmatter name matches the workflow`)
-    assert.ok(md.includes(wfRef(name)), `${name}: references its own bundled script path (${wfRef(name)}) to Read`)
-    assert.match(md, /\bRead\b/, `${name}: instructs reading the bundled script before invoking Workflow`)
-    assert.match(md, /Workflow\(\{\s*script:/,
-      `${name}: invokes Workflow with \`script\` (the file's contents), not \`scriptPath\``)
-    assert.doesNotMatch(md, /Workflow\(\{\s*scriptPath:\s*"\$\{CLAUDE_PLUGIN_ROOT\}/,
-      `${name}: must not pass a plugin-cache path as scriptPath — Workflow refuses paths outside cwd (#213)`)
-  }
 })
 
 // ---- the Action template ----

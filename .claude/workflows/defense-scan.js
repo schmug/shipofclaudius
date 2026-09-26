@@ -74,7 +74,10 @@ export const meta = {
 }
 
 // ---- args (parse-guard: may arrive as a JSON string, like Phase A) ----
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const TARGET = A.target || '.'
 const SCOPE = A.scope || `the entire repository at ${TARGET}`
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
@@ -272,7 +275,7 @@ log(`Layer 1: composing deep-security-scan over ${SCOPE} (threshold=${THRESHOLD}
 let l1 = null
 let l1Error = null
 try {
-  l1 = await workflow('deep-security-scan', { target: TARGET, scope: SCOPE, rounds: ROUNDS, threshold: THRESHOLD, ...SCAN_MODELS })
+  l1 = await workflow('shipofclaudius:deep-security-scan', { target: TARGET, scope: SCOPE, rounds: ROUNDS, threshold: THRESHOLD, ...SCAN_MODELS })
 } catch (e) {
   l1Error = (e && e.message) ? e.message : String(e)
   log(`Layer 1 ERROR (fail-open): ${l1Error}`)

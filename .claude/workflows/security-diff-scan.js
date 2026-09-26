@@ -82,7 +82,10 @@ export const meta = {
 }
 
 // ---- args (parse-guard: may arrive as a JSON string, like deep-security-scan) ----
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const TARGET = A.target || '.'
 const THRESHOLD = (A.threshold || 'low').toLowerCase()
 

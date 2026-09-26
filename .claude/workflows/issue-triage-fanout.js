@@ -57,6 +57,7 @@
 export const meta = {
   name: 'issue-triage-fanout',
   description: 'Read-only fan-out: one agent per open issue → GREEN/DECISION/RESEARCH/DONE/BLOCKED with grouping + deps, then a synthesis pass into a grouped, dependency-ordered roadmap. Auto-gathers all open issues when none are passed; pass args.numbers to triage a subset.',
+  whenToUse: 'You want every open issue (or a subset via args.numbers) classified into a grouped, dependency-ordered roadmap before deciding what to work on. Not for resolving open research questions (use issue-research-fanout), implementing (use stacked-impl-lanes), or triaging PRs (use pr-triage-fanout).',
   phases: [
     { title: 'Gather', detail: 'when no args.numbers: one read-only agent runs gh issue list to collect open issue numbers' },
     { title: 'Triage', detail: 'a read-checkpoint loads prior results and skips unchanged-and-done issues; then per remaining issue (in sequential waves of <=8): a read-only relay agent fetches the untrusted issue text, then a read-only agent classifies it from nonce-fenced data' },
@@ -64,7 +65,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? `-R ${A.repo}` : ''
 let NUMBERS = Array.isArray(A.numbers) ? A.numbers : []
 const NOTES = A.notes || ''

@@ -63,7 +63,10 @@ export const meta = {
 }
 
 // ── Args (parse-guarded: args can arrive as a JSON string) ──
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPOFLAG = A.repo ? `-R ${A.repo}` : ''
 const BASE = (typeof A.base === 'string' && A.base.trim()) ? A.base.trim() : 'main'
 const FRESH = A.fresh === true

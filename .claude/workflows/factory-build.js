@@ -48,13 +48,17 @@
 export const meta = {
   name: 'factory-build',
   description: 'Software-factory build step: implement ONE approved spec as up to 4 candidate Workers in scratch clones of the project repo, deploy each to an Access-gated preview hostname via its own wrangler.preview.<key>.jsonc, open a draft PR per candidate, and return the preview URLs for the intake skill to score and present. Needs args from factory-intake; a bare run returns needs_args.',
+  whenToUse: 'You are the factory-intake skill and have an approved spec ready to build as up to 4 scored candidate implementations behind Access-gated previews. Not a standalone entry point — a bare invocation with no args returns needs_args.',
   phases: [
     { title: 'Preflight', detail: 'one read-only agent checks which candidate branches already have an open PR (state-derived idempotency; args.fresh bypasses, and the iterate target is never skipped)' },
     { title: 'Build', detail: 'per candidate, one write-capable agent in its own scratch clone: implement the spec to the candidate direction, run the gates, generate + commit wrangler.preview.<key>.jsonc, wrangler deploy --config it, open a DRAFT PR carrying the preview URL; a deploy failure is a first-class deploy_failed result, never a throw' },
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const READONLY_AGENT = (typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
 const SPINE_VERSION = '1.0.0'
 

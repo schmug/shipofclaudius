@@ -84,7 +84,7 @@ const test = (name, fn) => tests.push([name, fn])
 // ============================ INGEST (fetch alerts, read-only) ============================
 
 test('a single read-only ingest agent fetches Dependabot alerts via gh api', async () => {
-  const { calls } = await runScript({ args: { triageScriptPath: '/p/triage-finding.js' } })
+  const { calls } = await runScript({ args: {} })
   const ing = ingestAgents(calls)
   assert.equal(ing.length, 1, 'exactly one ingest agent runs')
   assert.ok(/dependabot\/alerts/i.test(ing[0].prompt), 'ingest hits the Dependabot alerts endpoint')
@@ -208,19 +208,14 @@ test('max caps the triaged set and logs the truncation', async () => {
 // ============================ DELEGATION (to triage-finding) ============================
 
 test('the normalized findings are delegated to triage-finding via workflow()', async () => {
-  const { calls, result } = await runScript({ args: { triageScriptPath: '/plugin/.claude/workflows/triage-finding.js' } })
+  const { calls, result } = await runScript({ args: {} })
   assert.equal(calls.workflowCalls.length, 1, 'exactly one delegation')
   const d = lastDelegate(calls)
-  assert.deepEqual(d.ref, { scriptPath: '/plugin/.claude/workflows/triage-finding.js' }, 'delegates by the injected sibling scriptPath')
+  assert.equal(d.ref, 'shipofclaudius:triage-finding', 'delegates by the plugin-qualified workflow name (#254: bare names fail from an installed session)')
   assert.ok(Array.isArray(d.args.findings) && d.args.findings.length === 3, 'the descriptor array is the delegated input')
   assert.equal(result.delegated, true, 'result marks delegation happened')
   assert.equal(result.triage, TRIAGE_RESULT, 'triage-finding result is surfaced under .triage')
   assert.equal(result.included, 3, 'included count surfaced')
-})
-
-test('without triageScriptPath, delegation falls back to the workflow name', async () => {
-  const { calls } = await runScript({ args: {} })
-  assert.equal(lastDelegate(calls).ref, 'triage-finding', 'falls back to the saved-workflow name')
 })
 
 test('passthrough args (handoff/notes/batchSize/repo/readonlyAgent) reach triage-finding', async () => {

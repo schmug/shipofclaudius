@@ -48,7 +48,10 @@ export const meta = {
   ],
 }
 
-const A = (typeof args === 'string') ? JSON.parse(args) : (args || {})
+const A = (() => {
+  if (typeof args !== 'string') return args || {}
+  try { return JSON.parse(args) } catch { return { notes: args } }
+})()
 const REPO = A.repo ? String(A.repo) : ''
 const EXECUTE = A.execute === true || A.execute === 'true'
 const EXTRA_LABELS = Array.isArray(A.labels) ? A.labels.filter((l) => typeof l === 'string') : []
