@@ -69,8 +69,8 @@
 // `gh pr create --body-file`) silently overwrite each other with no error and no write conflict.
 // This repo has no way to change where the harness points an agent's scratchpad, so IMPL_PROMPT
 // instead tells each impl agent to key any scratch file it needs off its OWN lane.key under
-// `${TMPDIR:-/tmp}` — the same per-key-under-/tmp idiom factory-land.js and factory-build.js
-// already use for exactly this reason — never the shared scratchpad. The instruction lives in the
+// `${TMPDIR:-/tmp}` — the same per-key-under-/tmp idiom factory-build.js already uses
+// for exactly this reason — never the shared scratchpad. The instruction lives in the
 // prompt itself, not in this file's comments or the wrapper skill's prose, so it reaches the agent
 // on every run regardless of what the caller remembered to say.
 

@@ -94,7 +94,7 @@ const THRESHOLD = (A.threshold || 'low').toLowerCase()
 // away from disclosing unpatched findings: a real run on schmug/PhishSOC committed its report and
 // opened PUBLIC PR #565, leaking 12 findings (9 High) with source→sink, file:line and fixes, and
 // partly re-leaking findings already held in private GHSA drafts. The default is now a scratch dir
-// OUTSIDE the tree (factory-land.js's \${TMPDIR:-/tmp} idiom), so a plain `git add -A` in the
+// OUTSIDE the tree (factory-build.js's \${TMPDIR:-/tmp} idiom), so a plain `git add -A` in the
 // target cannot stage a report. args.outputDir opts back in explicitly — and if it points inside
 // the tree, the report agent must ensure a .gitignore entry first.
 const OUTPUT_DIR_ARG = (typeof A.outputDir === 'string' && A.outputDir.trim()) ? A.outputDir.trim() : ''

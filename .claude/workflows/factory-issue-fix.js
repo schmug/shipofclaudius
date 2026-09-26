@@ -35,7 +35,8 @@
 // HARD RULES baked into the `fix` prompt (copied from fix-finding.js — they are load-bearing):
 // no advisor calls, no WebFetch/WebSearch, no CI polling (gh pr checks / sleep-loops trip the
 // no-progress watchdog), no merging, no --admin, no force-push, no push to main. It opens a DRAFT
-// PR and RETURNS. The write ladder ends at a draft; `factory-land` is the only thing that merges.
+// PR and RETURNS. The write ladder ends at a draft; the factory Action's `land` job is the only
+// thing that merges (`factory-land` is advisory since #264).
 //
 // PROMPT-INJECTION HARDENING (repo README §Security model) — all three parts, non-negotiable:
 //   1. A dedicated READ-ONLY `relay-issue` agent runs a FIXED `gh issue view` and mints a FRESH
@@ -46,14 +47,15 @@
 //      instructions.
 // RESIDUAL RISK (documented, same shape as the sibling write workflows): the `fix` actor is
 // necessarily write-capable, so a fenced injection it obeyed could still act. The fence + preamble
-// lower the probability; the deterministic `factory-land` gate — which an injected instruction
-// cannot move, because it is a `<=` comparison and not a judgement call — is the real backstop.
+// lower the probability; the deterministic gate in the factory Action's `land` job — which an
+// injected instruction cannot move, because it is a `<=` comparison and not a judgement call — is
+// the real backstop.
 // Run this under a WRITE-scoped gh token; the read-only siblings use the read-scoped one.
 
 export const meta = {
   name: 'factory-issue-fix',
   description: 'The software factory engine: turn ONE GitHub issue into a reproduced, diagnosed, independently-verified, fixed DRAFT PR. Reproduce (read-only, a bug that will not reproduce is never "fixed") -> Diagnose (root cause + narrowest boundary) -> Verify (INDEPENDENT model family: real bug or intended behaviour?) -> Fix (worktree-isolated, fixture-first, draft PR only). Self-bootstraps from the `factory`+`needs-repro` label when given no issue; startAt/stopAfter advance one phase per run and resume from the committed report.md. Never merges, never pushes main.',
-  whenToUse: 'You have a GitHub issue triaged INTO the factory (labelled `factory`) and want the autonomous loop to reproduce, diagnose, independently verify, and fix it behind a draft PR. Not for deciding WHICH issues enter the factory (that is issue-triage-fanout), and not for landing the resulting PR (that is factory-land).',
+  whenToUse: 'You have a GitHub issue triaged INTO the factory (labelled `factory`) and want the autonomous loop to reproduce, diagnose, independently verify, and fix it behind a draft PR. Not for deciding WHICH issues enter the factory (that is issue-triage-fanout), and not for landing the resulting PR (that is the factory Action; factory-land previews its verdict).',
   phases: [
     { title: 'Reproduce', detail: 'a read-only idempotency preflight skips the run if the factory branch already has an open PR; a read-only relay fetches the untrusted issue text behind a fresh nonce; then a read-only agent decides whether the bug REPRODUCES on the base and names the fixture, the test, the exact RED output, and the one reproducing command. NOT_REPRODUCED / NEEDS_INFO short-circuit with no write agent spent' },
     { title: 'Diagnose', detail: 'a read-only agent identifies the root cause as file:line + mechanism (never a guess) and the NARROWEST enforcement boundary where the fix belongs, with instrumentation or bisect evidence' },
@@ -872,13 +874,14 @@ function fixConfidence(im, dg, vf) {
   return Math.max(0, Math.min(1, c))
 }
 const confidence = fixConfidence(impl, diag, verification)
-// This autonomy value is the WORKFLOW'S OWN advisory hint, not a gate decision — factory-land's
-// deterministic gate is what actually lands anything, and it reads CI-produced evidence only. The
-// hint may therefore read the agent's self-report: being optimistic here cannot merge anything.
+// This autonomy value is the WORKFLOW'S OWN advisory hint, not a gate decision — the factory
+// Action's deterministic gate is what actually lands anything, and it reads CI-produced evidence
+// only. The hint may therefore read the agent's self-report: being optimistic here cannot merge
+// anything.
 const autonomy = (confidence >= T && impl.weakened_control !== true && fixture_self_report.redOnBase && fixture_self_report.greenOnHead) ? 'auto_execute' : 'gated'
 
 const report = renderReport(ISSUE, parts)
-log(`fix-proposed: draft PR ${impl.pr_url || ''} | self-reported red-on-base=${fixture_self_report.redOnBase} green-on-head=${fixture_self_report.greenOnHead} (NOT gate input — CI produces the gate's evidence) | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (mark-ready, merge) are NEVER taken here — factory-land gates the merge.`)
+log(`fix-proposed: draft PR ${impl.pr_url || ''} | self-reported red-on-base=${fixture_self_report.redOnBase} green-on-head=${fixture_self_report.greenOnHead} (NOT gate input — CI produces the gate's evidence) | confidence ${confidence.toFixed(2)} -> ${autonomy} (T=${T.toFixed(2)}, spine v${SPINE_VERSION}). IRREVERSIBLE actions (mark-ready, merge) are NEVER taken here — the factory Action gates the merge.`)
 
 return shell({
   outcome: 'fix_proposed', autonomy, phase_reached: 'fix', report,
