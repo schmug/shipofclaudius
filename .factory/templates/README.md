@@ -44,13 +44,34 @@ The contract these implement is [`docs/specs/2026-08-05-software-factory-design.
 reviewing the draft PR and its preview. `pipeline-paused` is the kill switch: apply it to any open
 issue and the whole factory halts on its next run, no PR or redeploy required.
 
+### `fix-verified` is voided by a head change
+
+The label certifies ONE reviewed head, not the PR in general. A push after it was applied means no
+human has looked at the new head, so the token must not survive the push. Two mechanisms enforce
+this, and both are required — neither alone is a guarantee:
+
+- **Fast and visible**: `void-stale-verification` runs on `pull_request_target: synchronize` and
+  removes `fix-verified` the moment a new commit lands on a PR that carries it — no checkout, no
+  build, just `gh pr edit --remove-label` and a comment explaining why. It cannot add a label or
+  remove any other, so a PR author gains nothing by controlling when it fires beyond losing their
+  own stale trust token.
+- **Guaranteed**: `land` and `land-sweep` each re-derive, independently and right before they read
+  labels for gating, whether the label's most recent `labeled` timeline event predates the head they
+  are about to act on — and remove it themselves first if so. This closes the one gap the job above
+  cannot: `land-sweep` fires on a cron, in a different concurrency group from the PR-keyed one the
+  `synchronize` voider shares with `land`, so it is never safe to assume the voider has already run.
+
+A human must re-apply the label after re-reviewing the new head — voiding is one-directional. This
+holds at every rung of the ladder below, including after rung 3 drops `fix-verified` from
+`requiredLabels`: the label is voided on a head change whether or not the gate is still reading it.
+
 ## Arming ladder — from human-gated to machine-gated
 
 Removing the human is **not one flag**. `fix-verified` is simultaneously gate condition 2 (a
-required label) and the land job's clock (`pull_request_target: [labeled]`), so turning on machine
-verification without also replacing the trigger produces a factory that never lands anything, and
-dropping the label requirement without machine evidence removes the check entirely rather than
-replacing it.
+required label) and the land job's clock (`pull_request_target: [labeled, synchronize]`), so turning
+on machine verification without also replacing the trigger produces a factory that never lands
+anything, and dropping the label requirement without machine evidence removes the check entirely
+rather than replacing it.
 
 Climb these in order. **Each rung has a precondition, and each is independently revertable.** Stop
 at any rung — every one of them is a valid resting posture, and rung 0 is the default.
