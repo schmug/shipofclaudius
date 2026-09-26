@@ -371,7 +371,17 @@ jobs:
 
             if [ "$code" = "0" ]; then
               # Never --admin, never --delete-branch: identical to the labelled path.
-              gh pr merge "$pr" --repo "$TARGET_REPO" --squash || echo "::warning::merge failed for #$pr"
+              # --match-head-commit binds this merge to $head_sha — the exact head build-input read
+              # a few lines up, and the same head the gate above judged. A push landing between that
+              # read and this call moves the PR's real head, and the merge is refused rather than
+              # squash-merging a commit the gate never saw.
+              if ! gh pr merge "$pr" --repo "$TARGET_REPO" --squash --match-head-commit "$head_sha"; then
+                echo "::error::Merge refused for #$pr — the PR head changed after the gate judged $head_sha."
+                printf '### Factory gate — ⛔ escalate\n\nThe gate approved head `%s`, but the merge was refused because the PR head changed before the merge ran (`--match-head-commit` mismatch). Escalating rather than merging the new head unreviewed — re-run the sweep to gate the current head.\n' \
+                  "$head_sha" > head-mismatch-comment.md
+                gh pr comment "$pr" --repo "$TARGET_REPO" --body-file head-mismatch-comment.md || true
+                gh pr edit "$pr" --repo "$TARGET_REPO" --add-label needs-you || true
+              fi
             elif [ "$code" = "2" ]; then
               gh pr edit "$pr" --repo "$TARGET_REPO" --add-label needs-you || true
               echo "::notice::#$pr escalated — see the audit comment."
@@ -462,6 +472,7 @@ jobs:
           if [ -f factory-evidence.json ]; then echo "Evidence downloaded from run $run_id."; fi
 
       - name: Build the gate input
+        id: build-input
         env:
           GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
         run: |
@@ -472,6 +483,17 @@ jobs:
             --base "${{ github.event.pull_request.base.ref }}" \
             --out gate-input.json \
             $( [ -f factory-evidence.json ] && echo "--evidence factory-evidence.json" )
+
+          # Record the exact head build-input just read the PR at — never the (possibly already
+          # stale, per the step above) event SHA. The merge below is bound to THIS value, not to
+          # `github.event.pull_request.head.sha`.
+          head_sha="$(node -e '
+            const fs = require("node:fs")
+            const d = JSON.parse(fs.readFileSync("gate-input.json", "utf8"))
+            if (!d.pr || !d.pr.headSha) process.exit(1)
+            process.stdout.write(d.pr.headSha)
+          ')"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
       # Exit 0 = merge, 2 = escalate, 1 = the gate itself broke. Three DISTINCT codes on purpose:
       # "the gate broke" must never be read as either answer.
@@ -510,15 +532,42 @@ jobs:
             --repo "${{ github.repository }}" --body-file comment.md
 
       - name: Squash-merge (only on a clean pass)
+        id: merge
         if: steps.gate.outputs.code == '0'
         env:
           GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           # No --admin (it would bypass the very protections the gate mirrors) and no
           # --delete-branch (a predecessor in a stack may still need the ref).
+          # --match-head-commit binds this merge to the exact SHA `Build the gate input` observed —
+          # a push landing between that read and this call moves the PR's real head, and the merge
+          # is refused rather than squash-merging a commit the gate never judged.
+          rc=0
           gh pr merge "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" --squash
+            --repo "${{ github.repository }}" --squash \
+            --match-head-commit "${{ steps.build-input.outputs.head_sha }}" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Escalate a head-mismatch refusal
+        if: steps.gate.outputs.code == '0' && steps.merge.outputs.rc != '0'
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TARGET_REPO: ${{ github.repository }}
+          WAS_DRAFT: ${{ github.event.pull_request.draft }}
+          JUDGED_SHA: ${{ steps.build-input.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          echo "::error::Merge refused — the PR head changed after the gate judged $JUDGED_SHA."
+          printf '### Factory gate — ⛔ escalate\n\nThe gate approved head `%s`, but the merge was refused because the PR head changed before the merge ran (`--match-head-commit` mismatch). Escalating rather than merging the new head unreviewed — this run will not retry against the new head; re-apply `fix-verified` (or wait for the next sweep) to gate it.\n' \
+            "$JUDGED_SHA" > head-mismatch-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body-file head-mismatch-comment.md
+          gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --add-label needs-you || true
+          # Put it back in draft so the write ladder still ends at a draft when the merge is refused.
+          if [ "$WAS_DRAFT" = "true" ]; then
+            gh pr ready "$PR_NUMBER" --repo "$TARGET_REPO" --undo || true
+          fi
 
       - name: Escalate
         if: always() && steps.gate.conclusion != 'skipped' && steps.gate.outputs.code != '0'
