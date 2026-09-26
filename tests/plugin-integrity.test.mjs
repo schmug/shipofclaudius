@@ -343,6 +343,34 @@ test('factory.yml: the merge is never forced', async () => {
   assert.ok(!/force/.test(y.slice(y.indexOf('  land:'))), 'never force-pushes')
 })
 
+test('factory.yml: both merge calls bind to the exact head the gate judged (#267)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const jobName of ['land', 'land-sweep']) {
+    const job = jobs[jobName]
+    assert.ok(job, `the ${jobName} job exists`)
+    const mergeCalls = job.split('\n').filter((l) => /gh pr merge\b/.test(l))
+    assert.ok(mergeCalls.length > 0, `${jobName} calls gh pr merge`)
+    // The flag can land on the same line as `gh pr merge` or a few continuation lines later, so
+    // scan forward from each call to the next blank line / step boundary rather than one line only.
+    const lines = job.split('\n')
+    lines.forEach((l, i) => {
+      if (!/gh pr merge\b/.test(l)) return
+      let j = i
+      while (j < lines.length && /\\\s*$/.test(lines[j])) j++
+      const block = lines.slice(i, j + 1).join('\n')
+      assert.match(block, /--match-head-commit/,
+        `${jobName}'s gh pr merge call must carry --match-head-commit, or a push landing after ` +
+        `build-input read the PR gets squash-merged without ever passing through the gate`)
+    })
+  }
+  // A refused merge (head moved) is a real escalation — a label plus an audit comment — never a
+  // bare ::warning:: annotation nobody acts on.
+  assert.ok(!/::warning::merge failed/.test(y), 'a match-head-commit refusal must escalate, not just warn')
+  assert.ok(/needs-you/.test(jobs.land) && /needs-you/.test(jobs['land-sweep']),
+    'both jobs label a refused/escalated PR needs-you')
+})
+
 test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
   const y = await factoryYml()
   // Previously a flat "never appears" ban. #64 needs the PR body to pick the fixture test, and the

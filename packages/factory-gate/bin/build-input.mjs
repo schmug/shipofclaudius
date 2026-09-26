@@ -66,7 +66,7 @@ async function main() {
 
   const R = a.repo ? ['-R', String(a.repo)] : []
   const pr = await ghJSON([...R, 'pr', 'view', String(a.pr), '--json',
-    'number,body,labels,files,additions,deletions,mergeStateStatus,baseRefName,statusCheckRollup'], `PR #${a.pr}`)
+    'number,body,labels,files,additions,deletions,mergeStateStatus,baseRefName,statusCheckRollup,headRefOid'], `PR #${a.pr}`)
 
   // Routing only — the gate re-extracts authoritatively and fails closed if this disagrees.
   const linked = resolveLinkedIssue(pr.body)
