@@ -23,7 +23,7 @@ A session-long process skill, `factory-intake`, that takes an idea in chat, rese
 
 ## 3. Decisions locked
 
-All answered by Cory on 2026-09-06 via `AskUserQuestion`; the "why" column is the consequence that binds the design.
+All answered by Schmug on 2026-09-06 via `AskUserQuestion`; the "why" column is the consequence that binds the design.
 
 | Decision | Choice | Consequence |
 |---|---|---|
@@ -227,7 +227,7 @@ The build agent declares no `agentType` (the runtime default, which is write-cap
 **The build prompt**, in order:
 
 1. `git clone` the repo into `${TMPDIR}/factory/<slug>/<key>/` (or `git fetch` + checkout when `iterate`), branch `factory/<key>` off `origin/<base>`.
-2. Read `spec_path` and the candidate `brief` + `direction`. Implement to the acceptance criteria. For `iterate`, the `feedback` text is fenced as untrusted data behind the anti-injection preamble (it is Cory's own words today, but the fence costs nothing and the shape must not depend on who typed it).
+2. Read `spec_path` and the candidate `brief` + `direction`. Implement to the acceptance criteria. For `iterate`, the `feedback` text is fenced as untrusted data behind the anti-injection preamble (it is Schmug's own words today, but the fence costs nothing and the shape must not depend on who typed it).
 3. Generate `wrangler.preview.<key>.jsonc` from `wrangler.preview.template.jsonc` (§7) with exactly `sed "s/{{KEY}}/<key>/g"`: name `factory-<slug>-<key>`, route `<slug>-<key>.<previewDomain>` with `custom_domain: true`. Commit it. (Shipped before the gates, not after: the dry run in step 4 needs the config to exist, and the intake skill byte-compares the file against that `sed`'s output, so any hand-edit marks the candidate tampered.)
 4. Gates: `npm ci` (or `npm install` with no lockfile), `npm test`, and `npx wrangler deploy --dry-run --config wrangler.preview.<key>.jsonc` green with exact output captured into `gates_output`.
 5. `npx wrangler deploy --config wrangler.preview.<key>.jsonc`. Capture the version id and the hostname line from the output. Any failure ⇒ `status: 'deploy_failed'` with the verbatim error in `blocker`, but still finish step 6.
@@ -277,18 +277,18 @@ Preview deploys use `--config wrangler.preview.<key>.jsonc` and nothing else. Pr
 
 ### 8.3 Secrets
 
-One Access **service token** with a **Service Auth** policy on the `*.preview.cortech.online` application (Cory creates both; the policy default for service tokens is `Service Auth`, not `Allow`, per the security reviewer's checklist). The client id and secret live in the shell as `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. Only `scripts/smoke.mjs` and `scripts/critic.mjs` read them, from `process.env`, and send them as headers. No agent prompt, schema, PR body, report, or commit ever contains the values; the sim greps every prompt for the two variable *names* and asserts they appear only in the "do not echo" sentence. The token is never attached to a production application.
+One Access **service token** with a **Service Auth** policy on the `*.preview.cortech.online` application (Schmug creates both; the policy default for service tokens is `Service Auth`, not `Allow`, per the security reviewer's checklist). The client id and secret live in the shell as `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. Only `scripts/smoke.mjs` and `scripts/critic.mjs` read them, from `process.env`, and send them as headers. No agent prompt, schema, PR body, report, or commit ever contains the values; the sim greps every prompt for the two variable *names* and asserts they appear only in the "do not echo" sentence. The token is never attached to a production application.
 
 ### 8.4 Spike evidence (2026-09-06)
 
-`wrangler deploy` of a hello-world Worker to `hello-a.preview.cortech.online` took 5 s; DNS answered immediately; TLS handshakes succeeded after **141 s**; the unauthenticated probe returned a 302 to `coryrankin.cloudflareaccess.com`, proving the wildcard app covers a hostname created after it; `PushNotification` reached the phone; Cory opened the page through Access and answered the `AskUserQuestion` from the Claude app; `wrangler delete --force` removed the Worker and its DNS record (confirmed at the authoritative nameserver). Both push settings were already `true` in `~/.claude/settings.json`.
+`wrangler deploy` of a hello-world Worker to `hello-a.preview.cortech.online` took 5 s; DNS answered immediately; TLS handshakes succeeded after **141 s**; the unauthenticated probe returned a 302 to `coryrankin.cloudflareaccess.com`, proving the wildcard app covers a hostname created after it; `PushNotification` reached the phone; Schmug opened the page through Access and answered the `AskUserQuestion` from the Claude app; `wrangler delete --force` removed the Worker and its DNS record (confirmed at the authoritative nameserver). Both push settings were already `true` in `~/.claude/settings.json`.
 
 ## 9. Write ladder
 
 ```
-research (read-only) → spec (Cory approves) → scaffold (push main of a NEW repo, ruleset)
+research (read-only) → spec (Schmug approves) → scaffold (push main of a NEW repo, ruleset)
 → draft PR per candidate → preview deploy (gated by Access)
-→ Cory approves (phone) → gh pr ready → merge-pr-with-gate execute:true
+→ Schmug approves (phone) → gh pr ready → merge-pr-with-gate execute:true
 → production deploy → delete previews
 ```
 
@@ -301,8 +301,8 @@ Three sources of text the model did not write:
 | Source | Trust | Handling |
 |---|---|---|
 | Web pages read during research | untrusted | Read only by the read-only research agent; verbatim text returned only inside `<<<UNTRUSTED_WEB_<nonce>>>>`, preamble first. The spec quotes none of it. |
-| The spec | Cory-approved | Given to the build agent as the task. It contains links, not excerpts. |
-| Iterate feedback | Cory's words | Fenced anyway (§6 step 2) so the prompt shape never depends on provenance. |
+| The spec | Schmug-approved | Given to the build agent as the task. It contains links, not excerpts. |
+| Iterate feedback | Schmug's words | Fenced anyway (§6 step 2) so the prompt shape never depends on provenance. |
 
 The build agent is **told** not to use WebFetch/WebSearch (it is the `HARD RULES` paragraph copied verbatim from `stacked-impl-lanes.js`); its tool grant is the runtime default, so that is an instruction the prompt carries, not a capability the runtime removes. In practice the network it touches is `git`, `gh`, `npm`, and `wrangler`. The scaffolded Worker must not proxy request-derived URLs (§7 `src/index.js`), so a candidate cannot become an open redirect or SSRF surface on a `cortech.online` hostname.
 
