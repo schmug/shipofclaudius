@@ -316,7 +316,7 @@ this environment does not have. The mechanism above is the most evidence-support
 offer, not a confirmed root cause for every one of the 27 sessions.
 
 **Fix — proposed, not implemented here.** Per #204's own constraint ("Any change to the Stop hook
-is a guardrail change ... propose it and get Cory's go-ahead before landing"), this update stops
+is a guardrail change ... propose it and get Schmug's go-ahead before landing"), this update stops
 at a proposal. A `command`-type Stop hook can read `stop_hook_active` directly (§4.3) and is the
 only hook type that can maintain its own state; the shape that would give this feature a bound
 the harness's internal reset cannot undermine is a small counter file keyed by `session_id`

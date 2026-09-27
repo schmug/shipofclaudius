@@ -20,7 +20,7 @@
 - **The hook must never wedge a session.** A `Stop` hook that errors or blocks unsatisfiably costs the user their session output (spec §9).
 - **Verbatim condition clause:** the prompt MUST contain `Default to satisfied` — it is the anti-nag guard and a content-contract test protects it.
 - **Verbatim sink:** `schmug/agent-notes`, label `concern`, spool at `~/.claude/concerns-spool.jsonl`.
-- Conventional commit prefixes (`feat:`, `fix:`, `test:`, `docs:`, `chore:`). Never author or sign as Cory.
+- Conventional commit prefixes (`feat:`, `fix:`, `test:`, `docs:`, `chore:`). Never author or sign as Schmug.
 
 ---
 
@@ -299,7 +299,7 @@ session: say what was claimed, what was not checked, and where the code is.
 | Good | Useless |
 |---|---|
 | "Said the merge gate blocks unsigned commits; never ran it against a scratch repo." | "Unsure about the gate." |
-| "Cut Windows path handling from `src/scan.ts` without telling Cory." | "Scope changed." |
+| "Cut Windows path handling from `src/scan.ts` without telling Schmug." | "Scope changed." |
 
 ## When `gh` fails
 
