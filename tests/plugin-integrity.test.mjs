@@ -138,6 +138,8 @@ test('every workflow\'s args guard accepts a non-JSON string without throwing (#
     assert.doesNotThrow(() => { result = fn('12 14 repo=foo') },
       `${name}: the args guard throws on a non-JSON string instead of self-bootstrapping`)
     assert.ok(result && typeof result === 'object', `${name}: the args guard must still return an object for a non-JSON string`)
+    // #278: an object alone is not enough — a guard returning `{}` would pass and drop the text.
+    assert.equal(result.notes, '12 14 repo=foo', `${name}: the args guard must preserve the non-JSON text as { notes }`)
   }
 })
 
@@ -702,6 +704,19 @@ test('.mcp.json registers the vent server, plugin-root-templated, pointing at a 
       'load time, so a baked-in absolute path works on one machine and breaks every other install')
     // Throws (failing the test) if the entry point does not exist at that path.
     await read(srv.args[0].slice(PREFIX.length))
+  }
+})
+
+// #278: the BLOCKED_BY_PERMISSION convention (#228) and the no-raw-`gh pr merge` rule lived in
+// three skills that #259 deleted. A caller of the plugin-registered workflow sees only `meta`,
+// so the guidance must be reachable from it.
+test('the merge workflows carry BLOCKED_BY_PERMISSION and the no-raw-gh-pr-merge rule in meta (#278)', async () => {
+  for (const name of ['merge-pr-with-gate', 'stacked-merge-walk', 'factory-land']) {
+    const src = await read(`.claude/workflows/${name}.js`)
+    const meta = src.match(/export const meta = \{[\s\S]*?\n\}/)
+    assert.ok(meta, `${name}: no meta block`)
+    assert.match(meta[0], /BLOCKED_BY_PERMISSION/, `${name}: meta must document the BLOCKED_BY_PERMISSION convention`)
+    assert.match(meta[0], /never run raw `?gh pr merge`?/i, `${name}: meta must say never to run raw gh pr merge`)
   }
 })
 

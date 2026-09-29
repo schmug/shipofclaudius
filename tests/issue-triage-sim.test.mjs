@@ -881,6 +881,16 @@ test('#178 the worked example reaches EVERY classify prompt in a wave, not just 
   }
 })
 
+test('#278 a raw non-JSON string args (slash-command shape) self-bootstraps end to end and the text reaches the classifier as context', async () => {
+  const RAW = '12 14 repo=foo'
+  const { result, calls } = await runScript({ args: RAW, gather: { numbers: [7] } })
+  assert.equal(agentsByLabelPrefix(calls, 'gather').length, 1, 'no args.numbers, so the workflow gathers issues itself')
+  const cls = agentsByLabelPrefix(calls, 'triage:#')
+  assert.equal(cls.length, 1, 'the gathered issue was classified')
+  assert.ok(cls[0].prompt.includes(`Repo-specific context: ${RAW}`), 'the raw text lands in A.notes and is passed to the classifier')
+  assert.ok(result && result.total === 1, 'the run completed and returned a result')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
