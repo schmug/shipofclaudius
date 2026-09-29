@@ -503,7 +503,11 @@ const CKPT_META_PROMPT = (nums) =>
 
 const CKPT_WRITE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['written'],
-  properties: { written: { type: 'boolean', description: 'true once the merged state file has been written.' } },
+  properties: {
+    written: { type: 'boolean', description: 'true once the merged state file has been written AND read back.' },
+    bytes: { type: 'integer', description: 'Size in bytes of the state file as reported by `wc -c` AFTER the write (0 if absent).' },
+    reason: { type: 'string', description: 'When written is false: the concrete reason (refusal, permission denial, command error). Empty on success.' },
+  },
 }
 const CKPT_WRITE_PROMPT = (path, json) =>
   `You are a READ-ONLY-on-GitHub checkpoint writer. Persist this workflow's read-checkpoint to the LOCAL state file ONLY.\n` +
@@ -511,7 +515,8 @@ const CKPT_WRITE_PROMPT = (path, json) =>
   `2. Write EXACTLY the following JSON (verbatim, no edits, no commentary) to \`${path}\`, overwriting any existing file:\n` +
   `<<<CKPT_STATE_JSON>>>\n${json}\n<<<END_CKPT_STATE_JSON>>>\n` +
   `(Write only the bytes BETWEEN the markers — not the markers themselves.)\n` +
-  `Return { written: true } on success. Touch ONLY that local file; do NOT edit, comment, relabel, push, merge, or open anything on GitHub; run no other mutating command.`
+  `3. Read it back: \`wc -c < "${path}"\` and return that number as bytes. If any step fails, was refused, or was denied, return { written: false, bytes: 0, reason: "<the actual error or refusal>" } — never claim success you did not observe.\n` +
+  `Return { written: true, bytes, reason: "" } on success. Touch ONLY that local file; do NOT edit, comment, relabel, push, merge, or open anything on GitHub; run no other mutating command.`
 
 // Parse the loaded state defensively: a missing/empty/malformed file yields {} (a clean
 // full run), never a throw. Returns an object keyed by issue number (string) → entry.
@@ -902,8 +907,22 @@ let checkpointWritten = false
 if (fresh.length) {
   const writeRes = await agent(CKPT_WRITE_PROMPT(CKPT_PATH || `$HOME/.claude/workflows/state/repo-${CKPT_WF}.json`, JSON.stringify(ckptState, null, 0)),
     { label: 'ckpt-write', phase: 'Research', agentType: READONLY_AGENT, schema: CKPT_WRITE_SCHEMA, effort: 'low' })
-  checkpointWritten = !!(writeRes && writeRes.written)
-  log(`Checkpoint: ${checkpointWritten ? 'wrote' : 'attempted to write'} ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'}.`)
+  // The agent's own `written` flag is not trusted alone: the read-back size must match the
+  // bytes we handed it (heredoc may append one trailing newline). A mismatch, a false flag,
+  // or no result at all is a FAILED write, and the log carries the agent's stated reason.
+  const ckptJson = JSON.stringify(ckptState, null, 0)
+  const expectedBytes = unescape(encodeURIComponent(ckptJson)).length
+  const gotBytes = writeRes && Number.isInteger(writeRes.bytes) ? writeRes.bytes : -1
+  const sizeOk = gotBytes === expectedBytes || gotBytes === expectedBytes + 1
+  checkpointWritten = !!(writeRes && writeRes.written) && sizeOk
+  if (checkpointWritten) {
+    log(`Checkpoint: wrote ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'} (${gotBytes} bytes verified).`)
+  } else {
+    const why = !writeRes ? 'writer agent returned no result'
+      : (!writeRes.written ? (writeRes.reason || 'writer reported written:false with no reason')
+        : `read-back size ${gotBytes} does not match the ${expectedBytes} bytes handed to the writer${writeRes.reason ? ` (${writeRes.reason})` : ''}`)
+    log(`Checkpoint: FAILED to write ${Object.keys(mergedEntries).length} merged entr(ies) to ${CKPT_PATH || '(default path)'} — ${why}. The next run will recompute instead of reusing.`)
+  }
 } else {
   log(`Checkpoint: nothing newly computed — leaving the existing state untouched.`)
 }
