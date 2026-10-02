@@ -12,9 +12,16 @@ export const SEVERITIES = Object.freeze(['info', 'low', 'medium', 'high', 'criti
 export const CONFIDENCES = Object.freeze(['low', 'medium', 'high'])
 export const EFFORTS = Object.freeze(['none', 'low', 'medium', 'high', 'xhigh', 'max'])
 export const ON_ERROR = Object.freeze(['open', 'closed'])
+// codex: `codex exec` on the user's Codex CLI login (a ChatGPT subscription, no API key).
+// api: one POST to the Responses API with OPENAI_API_KEY.
+export const BACKENDS = Object.freeze(['codex', 'api'])
 
 export const DEFAULTS = Object.freeze({
   mode: 'off',
+  backend: 'codex',
+  // gpt-6-luna needs codex-cli >= 0.159 on a ChatGPT login; 0.153.4 gets HTTP 400
+  // "not supported when using Codex with a ChatGPT account" (checked 2026-10-02).
+  codexBin: 'codex',
   model: 'gpt-6-luna',
   effort: 'max',
   threshold: 'high',
@@ -44,6 +51,8 @@ const str = (v, dflt) => (typeof v === 'string' && v.trim() ? v.trim() : dflt)
 export function loadConfig(env = process.env) {
   return {
     mode: pick(env.LUNA_GATE, MODES, DEFAULTS.mode),
+    backend: pick(env.LUNA_GATE_BACKEND, BACKENDS, DEFAULTS.backend),
+    codexBin: str(env.LUNA_GATE_CODEX_BIN, DEFAULTS.codexBin),
     model: str(env.LUNA_GATE_MODEL, DEFAULTS.model),
     effort: pick(env.LUNA_GATE_EFFORT, EFFORTS, DEFAULTS.effort),
     threshold: pick(env.LUNA_GATE_THRESHOLD, SEVERITIES, DEFAULTS.threshold),

@@ -7,17 +7,89 @@
 
 const SEPS = new Set([';', '&', '|', '(', ')', '\n'])
 
-// A small POSIX-ish tokenizer: quotes and backslashes are honoured, and unquoted
-// separators become `{ sep }` objects so they can never be confused with an argument
-// that happens to be the string ";".
+// Index just past the `)` closing the `$(` at s[i], or s.length. Quotes, nested parens
+// and heredoc bodies inside are skipped, so the usual
+//   --body "$(cat <<'EOF' ... EOF
+//   )"
+// stays one opaque token whatever the body says, including a stray `"` or `--base x`.
+function skipSubst(s, i) {
+  let depth = 0
+  const pending = []
+  for (let k = i + 1; k < s.length; k++) {
+    const c = s[k]
+    if (c === '\\') { k++; continue }
+    if (c === '\n' && pending.length) { k = skipHeredocBodies(s, k, pending) - 1; continue }
+    if (c === "'") { const e = s.indexOf("'", k + 1); if (e < 0) return s.length; k = e; continue }
+    if (c === '"') { k = skipDouble(s, k) - 1; continue }
+    if (c === '`') { const e = s.indexOf('`', k + 1); if (e < 0) return s.length; k = e; continue }
+    if (c === '<' && s[k + 1] === '<' && s[k + 2] !== '<') { k = readHeredocDelim(s, k, pending) - 1; continue }
+    if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return k + 1
+  }
+  return s.length
+}
+
+// Index just past the `"` closing the double quote opened at s[i].
+function skipDouble(s, i) {
+  for (let k = i + 1; k < s.length; k++) {
+    if (s[k] === '\\') { k++; continue }
+    if (s[k] === '$' && s[k + 1] === '(') { k = skipSubst(s, k) - 1; continue }
+    if (s[k] === '"') return k + 1
+  }
+  return s.length
+}
+
+// At `<<` (or `<<-`): records the delimiter in `pending`, returns the index after it.
+function readHeredocDelim(s, i, pending) {
+  let k = i + 2
+  const strip = s[k] === '-'
+  if (strip) k++
+  while (s[k] === ' ' || s[k] === '\t') k++
+  let word = ''
+  while (k < s.length && !/[\s;&|()<>]/.test(s[k])) {
+    const c = s[k]
+    if (c === "'" || c === '"') { const e = s.indexOf(c, k + 1); const end = e < 0 ? s.length : e; word += s.slice(k + 1, end); k = end + 1; continue }
+    if (c === '\\') { word += s[k + 1] ?? ''; k += 2; continue }
+    word += c; k++
+  }
+  if (word) pending.push({ word, strip })
+  return k
+}
+
+// At the newline that ends a line with pending heredocs: returns the index of the
+// newline after the last body's delimiter line (or s.length), emptying `pending`.
+function skipHeredocBodies(s, nl, pending) {
+  let k = nl
+  while (pending.length) {
+    const { word, strip } = pending.shift()
+    for (;;) {
+      if (k >= s.length) { pending.length = 0; return s.length }
+      const end = s.indexOf('\n', k + 1)
+      const line = s.slice(k + 1, end < 0 ? s.length : end)
+      k = end < 0 ? s.length : end
+      if ((strip ? line.replace(/^\t+/, '') : line) === word) break
+    }
+  }
+  return k
+}
+
+// A small POSIX-ish tokenizer: quotes, backslashes, `$(...)` and heredocs are honoured,
+// and unquoted separators become `{ sep }` objects so they can never be confused with an
+// argument that happens to be the string ";".
 export function tokenize(s) {
   const out = []
   let cur = ''
   let has = false
   let q = null
+  const pending = []
   const flush = () => { if (has || cur) out.push(cur); cur = ''; has = false }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
+    if (c === '$' && s[i + 1] === '(' && q !== "'") {
+      const j = skipSubst(s, i)
+      cur += s.slice(i, j); has = true; i = j - 1
+      continue
+    }
     if (q) {
       if (c === q) q = null
       else if (c === '\\' && q === '"' && i + 1 < s.length) cur += s[++i]
@@ -26,6 +98,8 @@ export function tokenize(s) {
     }
     if (c === "'" || c === '"') { q = c; has = true; continue }
     if (c === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; continue }
+    if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { flush(); i = readHeredocDelim(s, i, pending) - 1; continue }
+    if (c === '\n' && pending.length) { flush(); out.push({ sep: c }); i = skipHeredocBodies(s, i, pending) - 1; continue }
     if (SEPS.has(c)) { flush(); out.push({ sep: c }); continue }
     if (/\s/.test(c)) { flush(); continue }
     cur += c

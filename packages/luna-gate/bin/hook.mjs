@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PreToolUse hook: before Claude runs `gh pr create`, send the branch's change to
-// GPT-6 Luna (by default at max reasoning effort) for a security review.
+// GPT-6 Luna (by default at max reasoning effort, through `codex exec`) for a security review.
 //
 // Not registered by the plugin. Wire it into your own settings.json (see README,
 // "Pre-PR review gate"); nothing happens until LUNA_GATE is set to advisory or block.
@@ -56,10 +56,14 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
 // not for argv[1], so a symlinked install path would otherwise make the hook a silent no-op.
 const isEntry = () => { try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { return false } }
 if (isEntry()) {
+  // A closed stdout (EPIPE) is still exit 0. The deny payload can run past the 64 KiB pipe
+  // buffer, and stdout to a pipe is asynchronous on macOS, so exit only once it has drained;
+  // exiting straight after write() would truncate the JSON and silently drop the deny.
+  process.stdout.on('error', () => process.exit(0))
   let raw = ''
   try { raw = readStdin() } catch { process.exit(0) }
   main(raw).then(
-    (s) => { if (s) process.stdout.write(s + '\n'); process.exit(0) },
+    (s) => { if (s) process.stdout.write(s + '\n', () => process.exit(0)); else process.exit(0) },
     () => process.exit(0),
   )
 }

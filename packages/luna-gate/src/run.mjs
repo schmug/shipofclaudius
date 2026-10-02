@@ -1,11 +1,13 @@
 // The shared pipeline behind the hook and the CLI:
-//   remote skip -> collect change -> repo opt-out -> user ack -> cache -> model call.
+//   remote skip -> collect change -> repo opt-out -> user ack -> cache -> model call
+// (codex exec by default, or the Responses API with LUNA_GATE_BACKEND=api).
 // Returns an outcome object; never throws for an expected condition.
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { collectChange, optedOut, sha256 } from './git.mjs'
 import { buildRequest } from './prompt.mjs'
 import { callResponses, estimateCost, validateReview } from './openai.mjs'
+import { callCodex } from './codex.mjs'
 import { blockingFindings } from './decide.mjs'
 
 const cachePath = (cfg, key) => join(cfg.dir, 'cache', `${key}.json`)
@@ -57,7 +59,7 @@ export async function review({ cwd, base = null, head = null, cfg, fetchImpl, us
 
   try { await readFile(ackPath(cfg, change.ackKey)); return { kind: 'acked', change } } catch { /* not acked */ }
 
-  const { body, nonce } = buildRequest(change, cfg)
+  const { body, prompt, nonce } = buildRequest(change, cfg)
   const cacheKey = sha256(JSON.stringify({ m: cfg.model, e: cfg.effort, b: change.bundleHash }))
   let result = null
   let cached = false
@@ -69,7 +71,9 @@ export async function review({ cwd, base = null, head = null, cfg, fetchImpl, us
     } catch { /* miss */ }
   }
   if (!result) {
-    try { result = await callResponses(body, cfg, fetchImpl) } catch (e) { return { kind: 'error', message: e.message, change } }
+    try {
+      result = cfg.backend === 'api' ? await callResponses(body, cfg, fetchImpl) : await callCodex(prompt, cfg)
+    } catch (e) { return { kind: 'error', message: e.message, change } }
     if (useCache) await writeQuiet(cachePath(cfg, cacheKey), JSON.stringify({ at: new Date().toISOString(), review: result.review }))
   }
   return {

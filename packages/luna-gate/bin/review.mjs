@@ -63,8 +63,7 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
   }
   if (!a.json) {
     out(summaryLine(cfg, o))
-    if (o.review.summary) out(o.review.summary)
-    if (o.review.findings.length) out(renderFindings(o.review.findings, o.nonce))
+    if (o.review.summary || o.review.findings.length) out(renderFindings(o.review.findings, o.nonce, o.review.summary))
   }
   return o.blocking.length ? 1 : 0
 }
@@ -73,8 +72,10 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
 // not for argv[1], so a symlinked install path would otherwise make the hook a silent no-op.
 const isEntry = () => { try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { return false } }
 if (isEntry()) {
-  cli(process.argv.slice(2)).then((code) => process.exit(code), (e) => {
+  // exitCode, not exit(): stdout to a pipe is asynchronous on macOS, and exit() would
+  // drop whatever had not drained yet (a long --json report, say).
+  cli(process.argv.slice(2)).then((code) => { process.exitCode = code }, (e) => {
     console.error(`luna-gate: ${e?.message || e}`)
-    process.exit(loadConfig().onError === 'closed' ? 2 : 0)
+    process.exitCode = loadConfig().onError === 'closed' ? 2 : 0
   })
 }

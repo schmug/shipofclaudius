@@ -11,16 +11,18 @@ const MAX_BUFFER = 512 * 1024 * 1024
 export const MAX_FILE_BYTES = 200_000
 
 export const SENSITIVE_GLOBS = Object.freeze([
-  '**/.env', '**/.env.*', '**/.dev.vars', '**/.dev.vars.*', '**/.npmrc', '**/.pypirc', '**/.netrc',
-  '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx', '**/*.jks', '**/*.keystore',
-  '**/id_rsa*', '**/id_ecdsa*', '**/id_ed25519*', '**/credentials.json', '**/*.tfstate', '**/*.tfstate.*',
+  '**/.env', '**/.env.*', '**/*.env', '**/.envrc', '**/.dev.vars', '**/.dev.vars.*', '**/.npmrc', '**/.pypirc', '**/.netrc',
+  '**/.git-credentials', '**/.aws/credentials', '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx', '**/*.jks', '**/*.keystore', '**/*.ppk',
+  '**/id_rsa*', '**/id_dsa*', '**/id_ecdsa*', '**/id_ed25519*', '**/credentials.json', '**/*.tfstate', '**/*.tfstate.*',
 ])
 export const NOISE_GLOBS = Object.freeze([
   '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/bun.lockb', '**/bun.lock',
   '**/Cargo.lock', '**/poetry.lock', '**/uv.lock', '**/Gemfile.lock', '**/composer.lock', '**/go.sum',
   '**/*.min.js', '**/*.min.css', '**/*.map',
 ])
-const excludes = (globs) => globs.map((g) => `:(exclude,glob)${g}`)
+// icase: git pathspecs are case-sensitive even on a case-insensitive volume, so without it
+// `.ENV` or `Server.PEM` would be sent.
+const excludes = (globs) => globs.map((g) => `:(exclude,glob,icase)${g}`)
 const PATHSPEC = ['--', '.', ...excludes(SENSITIVE_GLOBS), ...excludes(NOISE_GLOBS)]
 
 export const git = (cwd, args) =>
