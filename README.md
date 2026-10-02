@@ -411,7 +411,7 @@ exit $status
 - a target repository other than `origin`, whether from `-R` (in any position gh accepts), `GH_REPO`, `gh repo set-default`, or another remote gh might pick when none is pinned;
 - more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
 - `gh` behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
-- a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$` or a backtick, since the shell computes it after the review;
+- a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
@@ -435,7 +435,7 @@ In `block` mode these are denied with a reason. In `advisory` mode they get a "n
 
 A repo can opt out by committing `.luna-gate.json` containing `{"enabled": false}`. The opt-out is honored when it is present at **either** the base or the head, because the point is to keep code from leaving the machine. When only the head has it (this change is the one adding it), the hook says so to the user rather than skipping silently, so a diff can't quietly exempt itself.
 
-**Acknowledging a false positive.** In block mode the deny reason tells Claude to fix real findings and to report false positives to you, not to work around them. To let one exact change through, run `node packages/luna-gate/bin/review.mjs --ack` in the repo. The ack is keyed to `merge-base..head`, so the next commit is reviewed again. An identical diff is served from the cache, which means retrying `gh pr create` costs nothing and gives the same verdict.
+**Acknowledging a false positive.** In block mode the deny reason tells Claude to fix real findings and to report false positives to you, not to work around them. To let one exact change through, run the `review.mjs --ack ...` command the deny reason prints; it names the reviewed range by SHA, so it covers that change and no other. (Plain `review.mjs --ack` in the repo acknowledges the default-base range.) The ack is keyed to `merge-base..head`, so the next commit is reviewed again. An identical diff is served from the cache, which means retrying `gh pr create` costs nothing and gives the same verdict.
 
 Invariants (`tests/luna-gate.test.mjs`):
 

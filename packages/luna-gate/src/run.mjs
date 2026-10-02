@@ -30,13 +30,13 @@ export function remoteSkipped(cfg, remotes) {
   return [remotes].flat().some((r) => r && re.test(r)) ? { skip: true, note: null } : { skip: false }
 }
 
-export async function prepare({ cwd, base, head, repo = null, ghHost = null, from = null, remoteUrl = null, cfg }) {
+export async function prepare({ cwd, base, head, repo = null, ghHost = null, from = null, remoteUrl = null, checkTarget = true, cfg }) {
   // Skip-listed repos are checked first, so they are left alone silently rather than
   // rejected or errored on.
   const root = repoRoot(cwd)
   const rs = remoteSkipped(cfg, [root ? originUrl(root) : '', remoteUrl])
   if (rs.skip) return { outcome: { kind: 'skip', note: rs.note } }
-  const change = collectChange(cwd, { base, head, repo, ghHost, from, maxBytes: cfg.maxBytes })
+  const change = collectChange(cwd, { base, head, repo, ghHost, from, checkTarget, maxBytes: cfg.maxBytes })
   if (change.reject) return { outcome: { kind: 'reject', message: change.reject } }
   if (change.error) return { outcome: { kind: 'error', message: change.error } }
   if (change.empty) {

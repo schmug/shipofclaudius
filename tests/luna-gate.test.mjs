@@ -84,6 +84,11 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
   assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
   assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
+  assert.deepEqual(findPrCreates('gh pr cre\\ate --head risky'), [{ base: null, head: 'risky', repo: null }], 'escaped spelling still matches')
+  assert.deepEqual(findPrCreates("gh pr cre''ate --head risky"), [{ base: null, head: 'risky', repo: null }])
+  assert.ok(findPrCreates('gh pr create --head risk?')[0].dynamic, 'a glob is expanded by the shell')
+  assert.ok(findPrCreates('gh pr create --head {risky,x}')[0].dynamic)
+  assert.ok(!findPrCreates('gh pr create --head release/1.2 --base main')[0].dynamic)
   assert.deepEqual(findPrCreates('gh pr create --head risky # --head safe'), [{ base: null, head: 'risky', repo: null }], 'a comment supplies no flags')
   assert.deepEqual(findPrCreates('gh pr create --title a#b --head x'), [{ base: null, head: 'x', repo: null }], '# inside a word is not a comment')
   assert.equal(commandCount('gh pr create --fill # c\ngit checkout x'), 2, 'a comment ends at the newline')
@@ -462,6 +467,29 @@ test('e2e: real fetch -> deny on a blocking finding; identical diff is served fr
   } finally { await srv.close() }
 })
 
+test('e2e: the deny reason\'s ack command acknowledges exactly the reviewed range', async () => {
+  // feat = B -> F1 -> F2; release forks at F1, so --base release reviews F1..F2 while
+  // --base main reviews B..F2: two different ranges.
+  const dir = await makeRepo()
+  await writeFile(join(dir, 'two.js'), 'second\n'); g(dir, 'add', 'two.js'); g(dir, 'commit', '-qm', 'F2')
+  g(dir, 'checkout', '-q', '-b', 'release', 'feat~1')
+  await writeFile(join(dir, 'rel.js'), 'r\n'); g(dir, 'add', 'rel.js'); g(dir, 'commit', '-qm', 'release only')
+  g(dir, 'checkout', '-q', 'feat')
+  const srv = await stubServer(() => [200, responseWith({ summary: '', findings: [F()] })])
+  const quiet = { out: () => {}, err: () => {} }
+  try {
+    const env = await envFor(srv)
+    const event = JSON.stringify({ tool_name: 'Bash', cwd: dir, tool_input: { command: 'gh pr create --base release --head feat' } })
+    const reason = JSON.parse(await hookMain(event, { env })).hookSpecificOutput.permissionDecisionReason
+    const m = reason.match(/--ack --cwd '([^']+)' --base ([0-9a-f]{40}) --head ([0-9a-f]{40})/)
+    assert.ok(m, 'the ack command names the range')
+    assert.equal(await cli(['--ack', '--cwd', m[1], '--base', m[2], '--head', m[3]], { env, ...quiet }), 0)
+    assert.match(JSON.parse(await hookMain(event, { env })).systemMessage, /acknowledged/, 'the blocked command now passes')
+    const plain = JSON.stringify({ tool_name: 'Bash', cwd: dir, tool_input: { command: 'gh pr create --base main' } })
+    assert.equal(JSON.parse(await hookMain(plain, { env })).hookSpecificOutput.permissionDecision, 'deny', 'a different range is not covered')
+  } finally { await srv.close() }
+})
+
 test('e2e: user ack lets the exact change through; a new commit is reviewed again', async () => {
   const dir = await makeRepo()
   const srv = await stubServer(() => [200, responseWith({ summary: '', findings: [F()] })])
@@ -806,7 +834,7 @@ test('process: real hook binary denies through the stub API', async () => {
     assert.equal(r.code, 0)
     const out = JSON.parse(r.stdout)
     assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
-    assert.ok(out.hookSpecificOutput.permissionDecisionReason.includes('review.mjs" --ack'))
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, /review\.mjs' --ack --cwd '[^']+' --base [0-9a-f]{40} --head [0-9a-f]{40}/)
     assert.equal((await readdir(join(env.LUNA_GATE_DIR, 'cache'))).length, 1)
   } finally { await srv.close() }
 })

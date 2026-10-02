@@ -196,15 +196,19 @@ const CREATE = new Set(['create', 'new'])  // `gh pr new` is gh's documented ali
 
 const SAFE_ASSIGN = /^(GH_REPO|GH_HOST|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GH_PROMPT_DISABLED|GH_NO_UPDATE_NOTIFIER|GH_SPINNER_DISABLED|GH_FORCE_TTY|GH_PAGER|PAGER|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TERM|LANG|LC_[A-Z]+)=/
 
-// A value the shell computes at run time ($VAR, $(...), backticks) cannot be resolved
-// here without executing it, so a range-selecting value that contains one is `dynamic`.
-const DYNAMIC = /[$`]/
+// A value the shell computes at run time cannot be resolved here without running it:
+// $VAR, $(...), backticks, and pathname/brace/tilde expansion (`--head risk?` becomes
+// `risky` if such a file exists). Git refnames cannot contain `* ? [ ~`, so rejecting
+// them (quoted or not; quoting is not tracked) never blocks a real branch.
+const DYNAMIC = /[$`*?[\]~{}]/
 
 // Every `gh pr create` / `gh pr new` the command would run, including inside `$(...)` /
 // backticks, as { base, head, repo } (each a string or null). `repo` also takes an inline
 // `GH_REPO=...` prefix. Empty when there is none.
 export function findPrCreates(command, depth = 0) {
-  if (typeof command !== 'string' || !/create|new/.test(command) || depth > 8) return []
+  // No raw-text prefilter: `gh pr cre\\ate` and `gh pr cre''ate` only read as `create`
+  // after tokenizing.
+  if (typeof command !== 'string' || depth > 8) return []
   const subs = []
   const t = tokenize(command, subs)
   const all = []

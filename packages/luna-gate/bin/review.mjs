@@ -43,7 +43,7 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
   const cfg = { ...loadConfig(env), mode: 'block' }
 
   if (a.ack) {
-    const prep = await prepare({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, cfg })
+    const prep = await prepare({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, checkTarget: false, cfg })
     if (prep.outcome) { err(`luna-gate: nothing to acknowledge (${prep.outcome.message || prep.outcome.note || 'change is not reviewed'})`); return 0 }
     await writeAck(cfg, prep.change)
     out(`luna-gate: acknowledged ${prep.change.mergeBase.slice(0, 12)}..${prep.change.headSha.slice(0, 12)}; the gate will let this exact change through.`)

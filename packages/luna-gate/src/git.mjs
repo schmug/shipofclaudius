@@ -139,16 +139,18 @@ export function optedOut(cwd, ref) {
 // refs would review a substitute. Not an error to fail open on; block mode denies it.
 // `from`: a pre-push hook's remote SHA. The range is then from..head DIRECTLY, not
 // merge-base..head, so a rewind or a force-push shows the commits it removes too.
-export function collectChange(cwd, { base = null, head = null, repo = null, ghHost = null, from = null, maxBytes }) {
+// `checkTarget: false` skips the gh-target rejections, for acknowledging an exact range
+// that was already reviewed (the ack names it by SHA).
+export function collectChange(cwd, { base = null, head = null, repo = null, ghHost = null, from = null, checkTarget = true, maxBytes }) {
   const root = repoRoot(cwd)
   if (!root) return { error: 'not inside a git repository' }
-  if (head && head.includes(':')) {
+  if (checkTarget && head && head.includes(':')) {
     return { reject: `\`--head ${head}\` names a branch in another user's repository, which luna-gate cannot review locally` }
   }
-  if (repo && !sameRepo(repo, originUrl(root), ghHost || undefined)) {
+  if (checkTarget && repo && !sameRepo(repo, originUrl(root), ghHost || undefined)) {
     return { reject: `\`--repo ${repo}\` (or GH_REPO) is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
   }
-  if (!repo) {
+  if (checkTarget && !repo) {
     const why = ghTargetMismatch(root)
     if (why) return { reject: `${why}; luna-gate only reviews PRs against origin` }
   }

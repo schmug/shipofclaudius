@@ -16,6 +16,7 @@ import { review } from '../src/run.mjs'
 import { hookOutput } from '../src/decide.mjs'
 
 const REVIEW_BIN = fileURLToPath(new URL('./review.mjs', import.meta.url))
+const shq = (p) => `'${String(p).replace(/'/g, `'\\''`)}'`
 
 function readStdin() {
   const chunks = []
@@ -62,7 +63,11 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
       outcome = { kind: 'error', message: e?.message || String(e) }
     }
   }
-  const out = hookOutput(cfg, outcome, { ackCommand: `node ${JSON.stringify(REVIEW_BIN)} --ack` })
+  // The ack names the exact reviewed range by SHA (and the repo root), so it can neither
+  // miss the change that was blocked nor cover a different one.
+  const c = outcome.change
+  const ackCommand = `node ${shq(REVIEW_BIN)} --ack` + (c ? ` --cwd ${shq(c.root)} --base ${c.mergeBase} --head ${c.headSha}` : '')
+  const out = hookOutput(cfg, outcome, { ackCommand })
   return out ? JSON.stringify(out) : null
 }
 
