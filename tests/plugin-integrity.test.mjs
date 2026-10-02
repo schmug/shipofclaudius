@@ -391,6 +391,21 @@ test('factory.yml: land and land-sweep void a stale fix-verified before the gate
   }
 })
 
+test('factory.yml: label freshness never trusts a pusher-settable commit date (#268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const name of ['land', 'land-sweep']) {
+    const body = jobs[name]
+    // `git commit --date` / GIT_COMMITTER_DATE let the pusher backdate a head so it reads as older
+    // than the human's label, and the self-heal would wave a stale fix-verified through.
+    assert.ok(!/committer\.date|author\.date/.test(body), `${name} must not date the head by a git date`)
+    assert.match(body, /actions\/runs\?head_sha=[^"]*&event=pull_request/,
+      `${name} dates the head by a server-stamped pull_request run`)
+    assert.match(body, /\.pull_requests\[\]\?; \.number == /,
+      `${name} counts only runs GitHub tied to THIS PR, so a pre-push of the same SHA elsewhere is not an alibi`)
+  }
+})
+
 // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim no
 // check can ever enforce — and it drifted by 18 across four terms before anyone noticed. The contract
 // is "the count only goes UP", which `npm test` prints; no doc may restate a number.

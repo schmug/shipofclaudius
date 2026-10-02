@@ -57,7 +57,9 @@ this, and both are required — neither alone is a guarantee:
   own stale trust token.
 - **Guaranteed**: `land` and `land-sweep` each re-derive, independently and right before they read
   labels for gating, whether the label's most recent `labeled` timeline event predates the head they
-  are about to act on — and remove it themselves first if so. This closes the one gap the job above
+  are about to act on — and remove it themselves first if so. The head is dated by the server-stamped
+  `created_at` of the earliest `pull_request` run GitHub tied to this PR for that SHA, never by the
+  commit's own date, which the pusher can backdate. No such run means the label is voided. This closes the one gap the job above
   cannot: `land-sweep` fires on a cron, in a different concurrency group from the PR-keyed one the
   `synchronize` voider shares with `land`, so it is never safe to assume the voider has already run.
 

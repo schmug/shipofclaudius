@@ -392,7 +392,14 @@ jobs:
               label_ts="$(gh api "repos/$TARGET_REPO/issues/$pr/events" --paginate \
                 --jq '.[] | select(.event=="labeled" and (.label.name // "")=="fix-verified") | .created_at' \
                 2>/dev/null | tail -n1 || true)"
-              head_ts="$(gh api "repos/$TARGET_REPO/commits/$head_sha" --jq '.commit.committer.date' 2>/dev/null || true)"
+              # When did $head_sha become THIS PR's head? Never the commit's committer date: git
+              # lets the pusher set it, so a backdated push would read as older than the label. Use
+              # the server-stamped created_at of the earliest `pull_request` run for this SHA that
+              # GitHub tied to this PR (a pre-push of the same SHA to another branch or PR does not
+              # count). No such run -> unresolved -> void (fail closed).
+              head_ts="$(gh api "repos/$TARGET_REPO/actions/runs?head_sha=$head_sha&event=pull_request&per_page=100" \
+                --jq "[.workflow_runs[] | select(any(.pull_requests[]?; .number == $pr)) | .created_at] | sort | .[0] // empty" \
+                2>/dev/null || true)"
               if [ -z "${label_ts:-}" ] || [ -z "${head_ts:-}" ] || [[ "$label_ts" < "$head_ts" ]]; then
                 echo "::warning::#$pr — fix-verified predates head $head_sha (label ${label_ts:-unresolved}, head ${head_ts:-unresolved}) — voiding it."
                 gh pr edit "$pr" --repo "$TARGET_REPO" --remove-label fix-verified || true
@@ -484,12 +491,16 @@ jobs:
             label_ts="$(gh api "repos/$TARGET_REPO/issues/$PR_NUMBER/events" --paginate \
               --jq '.[] | select(.event=="labeled" and (.label.name // "")=="fix-verified") | .created_at' \
               2>/dev/null | tail -n1 || true)"
-            head_ts="$(gh api "repos/$TARGET_REPO/commits/$HEAD_SHA" --jq '.commit.committer.date' 2>/dev/null || true)"
+            # Server-stamped, PR-scoped push time — never the pusher-settable committer date. See
+            # the matching block in land-sweep for why.
+            head_ts="$(gh api "repos/$TARGET_REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+              --jq "[.workflow_runs[] | select(any(.pull_requests[]?; .number == $PR_NUMBER)) | .created_at] | sort | .[0] // empty" \
+              2>/dev/null || true)"
             if [ -z "${label_ts:-}" ] || [ -z "${head_ts:-}" ] || [[ "$label_ts" < "$head_ts" ]]; then
               echo "::warning::fix-verified predates head $HEAD_SHA (label ${label_ts:-unresolved}, head ${head_ts:-unresolved}) — voiding it before the gate runs."
               gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --remove-label fix-verified || true
             else
-              echo "fix-verified (labeled $label_ts) covers the current head (committed $head_ts)."
+              echo "fix-verified (labeled $label_ts) covers the current head (first run $head_ts)."
             fi
           fi
 
