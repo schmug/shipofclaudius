@@ -137,7 +137,9 @@ export function optedOut(cwd, ref) {
 
 // `reject`: gh would open the PR from refs this machine cannot see, so reviewing local
 // refs would review a substitute. Not an error to fail open on; block mode denies it.
-export function collectChange(cwd, { base = null, head = null, repo = null, ghHost = null, maxBytes }) {
+// `from`: a pre-push hook's remote SHA. The range is then from..head DIRECTLY, not
+// merge-base..head, so a rewind or a force-push shows the commits it removes too.
+export function collectChange(cwd, { base = null, head = null, repo = null, ghHost = null, from = null, maxBytes }) {
   const root = repoRoot(cwd)
   if (!root) return { error: 'not inside a git repository' }
   if (head && head.includes(':')) {
@@ -150,13 +152,13 @@ export function collectChange(cwd, { base = null, head = null, repo = null, ghHo
     const why = ghTargetMismatch(root)
     if (why) return { reject: `${why}; luna-gate only reviews PRs against origin` }
   }
-  if (!base) base = ghMergeBase(root)
-  const baseRef = resolveBase(root, base)
-  if (!baseRef) return { error: `could not resolve a base branch${base ? ` for "${base}"` : ''}` }
+  if (!base && !from) base = ghMergeBase(root)
+  const baseRef = from ? isCommit(root, from) : resolveBase(root, base)
+  if (!baseRef) return { error: from ? `remote commit ${from} is not in this clone` : `could not resolve a base branch${base ? ` for "${base}"` : ''}` }
   const headRef = resolveHead(root, head)
   if (!headRef) return { error: `could not resolve the head branch "${head}"` }
   const headSha = tryGit(root, ['rev-parse', headRef])
-  const mergeBase = tryGit(root, ['merge-base', baseRef, headRef])
+  const mergeBase = from ? baseRef : tryGit(root, ['merge-base', baseRef, headRef])
   if (!mergeBase) return { error: `${baseRef} and ${headRef} share no history` }
 
   const range = [mergeBase, headSha]

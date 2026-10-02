@@ -388,10 +388,11 @@ For a git pre-push hook (for example via `git config --global core.hooksPath`), 
 status=0
 while read -r lref lsha rref rsha; do
   case "$lsha" in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion, nothing to review
-  # An existing remote ref is the base: review exactly what this push adds to it. A new ref
-  # (or a remote SHA this clone has not fetched) falls back to the default base.
-  base=; git cat-file -e "$rsha^{commit}" 2>/dev/null && base=$rsha
-  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" ${base:+--base "$base"} </dev/null || status=1
+  # An existing remote ref is diffed DIRECTLY against what replaces it (--from), so a
+  # rewind or force-push shows the commits it removes too. A new ref (or a remote SHA
+  # this clone has not fetched) falls back to the default base.
+  from=; git cat-file -e "$rsha^{commit}" 2>/dev/null && from=$rsha
+  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" ${from:+--from "$from"} </dev/null || status=1
 done
 exit $status
 ```

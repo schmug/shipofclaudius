@@ -2,7 +2,7 @@
 // Run the luna-gate review by hand, or from a git pre-push hook so changes made by ANY
 // agent or editor get the same review (the PreToolUse hook only sees Claude Code).
 //
-//   node review.mjs [--base <branch>] [--head <branch|commit>] [--remote-url <url>] [--cwd <dir>] [--json] [--no-cache]
+//   node review.mjs [--base <branch>] [--head <branch|commit>] [--remote-url <url>] [--from <remote-sha>] [--cwd <dir>] [--json] [--no-cache]
 //   node review.mjs --ack      # the user acknowledges the current change's findings
 //
 // Running it is the opt-in, so LUNA_GATE does not need to be set. The rest of the
@@ -18,13 +18,13 @@ import { loadConfig } from '../src/config.mjs'
 import { prepare, review, writeAck } from '../src/run.mjs'
 import { renderFindings, summaryLine } from '../src/decide.mjs'
 
-const USAGE = 'usage: review.mjs [--base <branch>] [--head <branch|commit>] [--remote-url <url>] [--cwd <dir>] [--json] [--no-cache] [--ack]'
+const USAGE = 'usage: review.mjs [--base <branch>] [--head <branch|commit>] [--remote-url <url>] [--from <remote-sha>] [--cwd <dir>] [--json] [--no-cache] [--ack]'
 
 export function parseArgs(argv) {
-  const a = { base: null, head: null, remoteUrl: null, cwd: process.cwd(), json: false, cache: true, ack: false, help: false }
+  const a = { base: null, head: null, from: null, remoteUrl: null, cwd: process.cwd(), json: false, cache: true, ack: false, help: false }
   for (let i = 0; i < argv.length; i++) {
     const t = argv[i]
-    if (t === '--base' || t === '--head' || t === '--cwd' || t === '--remote-url') {
+    if (t === '--base' || t === '--head' || t === '--cwd' || t === '--remote-url' || t === '--from') {
       if (!argv[i + 1]) throw new Error(`${t} needs a value`)
       a[t === '--remote-url' ? 'remoteUrl' : t.slice(2)] = argv[++i]
     } else if (t === '--json') a.json = true
@@ -43,14 +43,14 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
   const cfg = { ...loadConfig(env), mode: 'block' }
 
   if (a.ack) {
-    const prep = await prepare({ cwd: a.cwd, base: a.base, head: a.head, remoteUrl: a.remoteUrl, cfg })
+    const prep = await prepare({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, cfg })
     if (prep.outcome) { err(`luna-gate: nothing to acknowledge (${prep.outcome.message || prep.outcome.note || 'change is not reviewed'})`); return 0 }
     await writeAck(cfg, prep.change)
     out(`luna-gate: acknowledged ${prep.change.mergeBase.slice(0, 12)}..${prep.change.headSha.slice(0, 12)}; the gate will let this exact change through.`)
     return 0
   }
 
-  const o = await review({ cwd: a.cwd, base: a.base, head: a.head, remoteUrl: a.remoteUrl, cfg, fetchImpl, useCache: a.cache })
+  const o = await review({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, cfg, fetchImpl, useCache: a.cache })
   if (a.json) {
     const { change, ...rest } = o
     out(JSON.stringify({ ...rest, range: change ? `${change.mergeBase}..${change.headSha}` : null }, null, 2))

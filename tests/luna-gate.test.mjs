@@ -500,6 +500,23 @@ test('e2e: API failure fails open by default and closed on request', async () =>
   } finally { await srv.close() }
 })
 
+test('e2e: an inline GH_HOST= / GH_REPO= overrides the ambient value, even when empty', async () => {
+  const dir = await makeRepo()
+  g(dir, 'remote', 'add', 'origin', 'git@ghe.corp:schmug/proj.git')
+  g(dir, 'update-ref', 'refs/remotes/origin/main', 'main')
+  const srv = await stubServer(() => [200, responseWith({ summary: '', findings: [] })])
+  try {
+    const env = { ...(await envFor(srv)), GH_HOST: 'ghe.corp' }
+    const run = async (command, e = env) => JSON.parse(await hookMain(JSON.stringify({ tool_name: 'Bash', cwd: dir, tool_input: { command } }), { env: e }))
+    assert.match((await run('gh pr create -R schmug/proj --base main')).systemMessage, /reviewed/, 'ambient GH_HOST matches the enterprise origin')
+    assert.match((await run('GH_HOST= gh pr create -R schmug/proj --base main')).hookSpecificOutput.permissionDecisionReason,
+      /not this checkout's origin/, 'an explicitly cleared GH_HOST means github.com')
+    const withRepo = { ...env, GH_REPO: 'upstream/proj' }
+    assert.equal((await run('gh pr create --base main', withRepo)).hookSpecificOutput.permissionDecision, 'deny')
+    assert.match((await run('GH_REPO= gh pr create --base main', withRepo)).systemMessage, /reviewed/, 'an explicitly cleared GH_REPO defers to the remotes')
+  } finally { await srv.close() }
+})
+
 test('e2e: --head prefers the remote branch gh will use; omitted --base follows gh-merge-base', async () => {
   const dir = await makeRepo()
   g(dir, 'checkout', '-q', 'main'); g(dir, 'checkout', '-q', '-b', 'release')
@@ -697,7 +714,17 @@ test('pre-push: an existing remote ref is the base, so a push the default base a
   assert.throws(() => execFileSync('git', ['push', '-q', 'origin', 'feat:rel'], { cwd: dir, env, stdio: 'pipe' }),
     'B..F was reviewed against the remote rel, and the finding blocked the push')
   assert.ok((await fake.record()).stdin.includes('db.query'))
-  // A brand-new remote ref still works (default base, no empty --base argument).
+  // A rewind (force-push to an ancestor) is diffed from the remote SHA, so the commit it
+  // REMOVES is reviewed rather than collapsing to an empty merge-base range.
+  // (Every push here runs the installed hook, so each passes a fake codex — never the real one.)
+  const rewind = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [F()] }) })
+  const ok = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
+  execFileSync('git', ['push', '-q', 'origin', 'feat:ctl'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: ok.bin }, stdio: 'pipe' })
+  assert.throws(() => execFileSync('git', ['push', '-q', '-f', 'origin', 'feat~1:ctl'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: rewind.bin }, stdio: 'pipe' }),
+    'the rewind was reviewed and blocked')
+  const r = await rewind.record()
+  assert.ok(r.stdin.split('\n').some((l) => l.startsWith('-') && l.includes('db.query')), 'the removed lines were sent')
+  // A brand-new remote ref still works (default base, no empty --from argument).
   const clean = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
   execFileSync('git', ['push', '-q', 'origin', 'feat:brand-new'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: clean.bin }, stdio: 'pipe' })
 })

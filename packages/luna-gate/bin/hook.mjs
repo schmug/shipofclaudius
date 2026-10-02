@@ -52,7 +52,8 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
     const [pr] = prs
     try {
       outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head,
-        repo: pr.repo || env.GH_REPO || null, ghHost: pr.host || env.GH_HOST || null, cfg, fetchImpl })
+        repo: pr.repo || (pr.repoEnvSet ? null : env.GH_REPO) || null,
+        ghHost: pr.host !== undefined ? pr.host : (env.GH_HOST ?? null), cfg, fetchImpl })
     } catch (e) {
       outcome = { kind: 'error', message: e?.message || String(e) }
     }
