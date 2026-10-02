@@ -391,6 +391,16 @@ describe('prompt.submit', () => {
     expect(await spec($)).toContain('for "fix the bug in src/a.ts"')
   })
 
+  test('/spec on after a failed newest judge does not bring back the older score', async ($, on) => {
+    const w = world(on, [GOOD, 'not json'])
+    await scored($, w, 'fix the bug in src/a.ts')
+    await scored($, w, 'and the other one')
+    await spec($, 'on')
+    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await ui.find({ key: 'show' })).toBeUndefined()
+  })
+
   test('a path-led prompt keeps its submission order', async ($, on) => {
     const w = world(on, GOOD)
     await submit($, '/tmp is full')

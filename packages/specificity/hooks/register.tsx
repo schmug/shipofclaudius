@@ -244,8 +244,9 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'spec' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'on') {
+      // isHidden is not cleared: it means the newest prompt has no score, and
+      // only a new score may lift it, or an older one would pose as the latest.
       await update($, isBandOff, () => false)
-      await update($, isHidden, () => false)
       await update($, isCollapsed, () => false)
       return { text: mode === 'off' ? 'Band on, but the scorer is off (mode: off).' : 'Specificity band on.' }
     }
