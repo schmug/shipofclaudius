@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ModelCompleteResult, ModelForkResult, On, PromptOrigin } from 'claude-code'
+import type { ModelCompleteResult, ModelForkResult, On, PromptOrigin, SessionMessage } from 'claude-code'
 
 const GOOD = JSON.stringify({
   score: 72,
@@ -18,6 +18,10 @@ type World = {
   modelCalls: number
   toasts: string[]
   statuses: (string | undefined)[]
+  /** What `$.session.messages()` answers. */
+  messages: SessionMessage[]
+  /** The prompts the haiku judge was sent. */
+  asked: string[]
   /** While set, `$.command.list()` waits on it. */
   commandsHeld: Promise<void> | null
 }
@@ -36,14 +40,15 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], commandsHeld: null }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], commandsHeld: null }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
   })
-  on('session.messages', () => ({ value: [] }))
-  on('model.complete', async () => {
+  on('session.messages', () => ({ value: w.messages }))
+  on('model.complete', async ($, e) => {
     w.modelCalls += 1
+    w.asked.push(e.prompt)
     await w.clock.sleep(SLOW_MS)
     return complete(replies === null ? (reply as Reply) : (replies.shift() ?? GOOD))
   })
@@ -139,6 +144,21 @@ describe('prompt.submit', () => {
     await scored($, w, '/login should redirect after authentication')
     expect(w.modelCalls).toBe(2)
     expect(await spec($)).toContain('for "/login should redirect')
+  })
+
+  test("the judge reads only what came before the prompt, never Claude's answer to it", async ($, on) => {
+    const w = world(on, GOOD)
+    w.messages = [
+      { role: 'user', text: 'what options do I have?', toolUses: [] },
+      { role: 'assistant', text: 'Option 1, option 2 or option 3.', toolUses: [] },
+      { role: 'user', text: 'yes, do option 2', toolUses: [] },
+      { role: 'assistant', text: 'ANSWER-ALREADY-STARTED', toolUses: [] },
+    ]
+    await scored($, w, 'yes, do option 2')
+    const asked = w.asked[0] ?? ''
+    expect(asked).toContain('Option 1, option 2 or option 3.')
+    expect(asked).not.toContain('ANSWER-ALREADY-STARTED')
+    expect(asked.split('yes, do option 2')).toHaveLength(2)
   })
 
   test('a malformed reply produces no band and no toast', async ($, on) => {

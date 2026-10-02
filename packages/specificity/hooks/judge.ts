@@ -53,13 +53,17 @@ const TOOL_OUTPUT_CHARS = 120
 /**
  * The last `limit` messages as short lines: each message's text cut to a few
  * hundred characters, tool calls named with a short input, and tool output
- * kept only as a snippet. The prompt being scored is dropped if the session
- * already holds it, so the judge reads it once, as the prompt.
+ * kept only as a snippet. Everything from the prompt being scored onward is
+ * dropped, so the judge reads the prompt once and never Claude's answer to it.
  */
 export function buildContext(messages: readonly SessionMessage[], prompt: string, limit: number): string {
+  // The judge runs after the prompt entered the session, so the session may
+  // already hold the prompt and even the start of Claude's answer to it. Cut
+  // at the newest user message that is this prompt: only what came before it
+  // is context, or the answer would inflate the prompt's own score.
   const rows = [...messages]
-  const tail = rows.at(-1)
-  if (tail?.role === 'user' && tail.text.trim() === prompt.trim()) rows.pop()
+  const at = rows.findLastIndex(m => m.role === 'user' && m.text.trim() === prompt.trim())
+  if (at >= 0) rows.length = at
 
   const lines: string[] = []
   for (const m of rows.slice(Math.max(0, rows.length - limit))) {
