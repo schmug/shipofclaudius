@@ -10,6 +10,19 @@ const SEPS = new Set([';', '&', '|', '(', ')', '\n'])
 // (ambiguous / risky / an extra command), never as "nothing here".
 const MAX_DEPTH = 8
 
+// Index of the backtick closing the one at s[i] (or -1), skipping backslash escapes: in
+// `a \`b\` c` the escaped pair is a NESTED substitution, not the end.
+function backtickEnd(s, i) {
+  for (let k = i + 1; k < s.length; k++) {
+    if (s[k] === '\\') { k++; continue }
+    if (s[k] === '`') return k
+  }
+  return -1
+}
+// The command inside a backtick substitution, as the shell runs it: `\``, `\\` and `\$`
+// lose their backslash, so nested backticks become real substitutions again.
+const backtickBody = (raw) => raw.replace(/\\([`\\$])/g, '$1')
+
 // Index just past the `)` closing the `$(` at s[i], or s.length. Quotes, nested parens
 // and heredoc bodies inside are skipped, so the usual
 //   --body "$(cat <<'EOF' ... EOF
@@ -25,7 +38,7 @@ function skipSubst(s, i) {
     if (c === '#' && /[\s;&|(]/.test(s[k - 1])) { const e = s.indexOf('\n', k); if (e < 0) return s.length; k = e - 1; continue }
     if (c === "'") { const e = s.indexOf("'", k + 1); if (e < 0) return s.length; k = e; continue }
     if (c === '"') { k = skipDouble(s, k) - 1; continue }
-    if (c === '`') { const e = s.indexOf('`', k + 1); if (e < 0) return s.length; k = e; continue }
+    if (c === '`') { const e = backtickEnd(s, k); if (e < 0) return s.length; k = e; continue }
     if (c === '<' && s[k + 1] === '<' && s[k + 2] !== '<') { k = readHeredocDelim(s, k, pending) - 1; continue }
     if (c === '(') depth++
     else if (c === ')' && --depth === 0) return k + 1
@@ -160,9 +173,9 @@ export function tokenize(s, subs = [], meta = {}) {
     }
     if (c === '`' && q !== "'") {
       exp = true; if (!q) uq = true
-      const e = s.indexOf('`', i + 1)
+      const e = backtickEnd(s, i)
       const j = e < 0 ? s.length : e + 1
-      subs.push(s.slice(i + 1, e < 0 ? s.length : e))
+      subs.push(backtickBody(s.slice(i + 1, e < 0 ? s.length : e)))
       cur += s.slice(i, j); has = true; i = j - 1
       continue
     }
@@ -356,7 +369,14 @@ export function findPrCreates(command, depth = 0) {
 // `sh -c 'gh pr create'`, `eval "gh pr create"`. Their payload is analysed as a command,
 // and a computed payload counts as ambiguous. A `gh pr` with no visible subcommand
 // anywhere (`... | xargs gh pr`) is ambiguous too.
-const EVALUATORS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'eval', 'source', '.'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'csh', 'tcsh'])
+// Other programs that run code from their arguments; their payload is not shell, so any
+// use is ambiguous here.
+const INTERPRETERS = new Set(['python', 'python3', 'python2', 'node', 'nodejs', 'deno', 'bun', 'perl', 'ruby', 'php', 'osascript', 'awk', 'gawk'])
+// Words that run the rest of their simple command (after their own options) as a command.
+const WRAPPERS = new Set(['command', 'builtin', 'env', 'exec', 'nohup', 'time', 'nice', 'timeout', 'sudo', 'doas',
+  'xargs', 'stdbuf', 'ionice', 'chrt', 'setsid', 'unbuffer', 'caffeinate', 'script'])
+const RUNNERS = new Set([...SHELLS, ...INTERPRETERS, 'eval', 'source', '.'])
 export function hasAmbiguousGh(command, depth = 0) {
   if (typeof command !== 'string') return false
   if (depth > MAX_DEPTH) return true
@@ -381,13 +401,18 @@ export function hasAmbiguousGh(command, depth = 0) {
     if (!atStart || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i])) continue
     let end = i + 1
     while (end < t.length && typeof t[end] === 'string') end++
-    const word = t[i].split('/').pop()
-    if (EVALUATORS.has(word)) {
-      if (word === 'eval' || word === 'source' || word === '.') { if (payloadRisky(i + 1, end)) return true }
-      else {
-        const c = t.findIndex((x, n) => n > i && n < end && typeof x === 'string' && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x))
-        if (c > 0 && payloadRisky(c + 1, c + 2)) return true
-      }
+    const base = (x) => (typeof x === 'string' ? x.split('/').pop() : '')
+    const word = base(t[i])
+    // A wrapper's own options can take values (`env -C dir`, `sudo -u x`), so the wrapped
+    // command word cannot be located reliably: any runner or gh after it is ambiguous.
+    if (WRAPPERS.has(word) && t.slice(i + 1, end).some((x) => RUNNERS.has(base(x)) || isGh(x))) return true
+    if (word === 'eval' && payloadRisky(i + 1, end)) return true
+    // `source` / `.` run a FILE the parser cannot see; interpreters run non-shell code.
+    if (word === 'source' || word === '.' || INTERPRETERS.has(word)) return true
+    if (SHELLS.has(word)) {
+      const c = t.findIndex((x, n) => n > i && n < end && typeof x === 'string' && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x))
+      // Without -c the shell runs a script file or stdin, neither of which is visible here.
+      if (c < 0 || payloadRisky(c + 1, c + 2)) return true
     }
     const scratch = {}
     if (dyn(t[i])) {
