@@ -410,6 +410,7 @@ exit $status
 - a fork head (`--head owner:branch`);
 - a target repository other than `origin`, whether from `-R` (in any position gh accepts), `GH_REPO`, `gh repo set-default`, or another remote gh might pick when none is pinned;
 - more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
+- `gh` behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline `GIT_*` / `GH_CONFIG_DIR` override, either of which can point it at another repository than the one reviewed;
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
