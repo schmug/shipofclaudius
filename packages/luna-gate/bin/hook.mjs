@@ -46,6 +46,8 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   if (prs.length > 1) {
     // One review covers one range; approving the first would let the rest through unreviewed.
     outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
+  } else if (prs[0].wrapped) {
+    outcome = { kind: 'reject', message: '`gh pr create` runs behind a wrapper (such as `env -C`) or a GIT_*/GH_CONFIG_DIR override that can point it at another repository than this checkout' }
   } else if (commandCount(event.tool_input.command) > 1) {
     outcome = { kind: 'reject', message: '`gh pr create` shares this Bash call with other commands, which could change the checkout or refs after the review ran' }
   } else {

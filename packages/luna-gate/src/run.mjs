@@ -5,7 +5,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { collectChange, optedOut, sha256, repoRoot, originUrl } from './git.mjs'
-import { buildRequest } from './prompt.mjs'
+import { buildRequest, newNonce } from './prompt.mjs'
 import { callResponses, estimateCost, validateReview } from './openai.mjs'
 import { callCodex } from './codex.mjs'
 import { blockingFindings } from './decide.mjs'
@@ -64,7 +64,7 @@ export async function review({ cwd, base = null, head = null, repo = null, ghHos
 
   try { await readFile(ackPath(cfg, change.ackKey)); return { kind: 'acked', change } } catch { /* not acked */ }
 
-  const { body, prompt, nonce } = buildRequest(change, cfg)
+  const { body, prompt } = buildRequest(change, cfg)
   const cacheKey = sha256(JSON.stringify({ m: cfg.model, e: cfg.effort, b: change.bundleHash }))
   let result = null
   let cached = false
@@ -84,7 +84,9 @@ export async function review({ cwd, base = null, head = null, repo = null, ghHos
   return {
     kind: 'reviewed',
     change,
-    nonce,
+    // A FRESH nonce for fencing the findings. The request's nonce was shown to the
+    // reviewer, so a diff could steer it into writing that END marker and break out.
+    nonce: newNonce(),
     cached,
     review: result.review,
     blocking: blockingFindings(result.review.findings, cfg),

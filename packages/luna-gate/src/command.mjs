@@ -205,17 +205,24 @@ export function findPrCreates(command, depth = 0) {
   for (let i = 0; i + 2 < t.length; i++) {
     if (!isGh(t[i])) continue
     const found = { base: null, head: null, repo: null }
-    for (const k of ['host', 'repoEnvSet']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
+    for (const k of ['host', 'repoEnvSet', 'wrapped']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
     let k = skipRepoFlags(t, i + 1, found)
     if (t[k] !== 'pr') continue
     k = skipRepoFlags(t, k + 1, found)
     if (!CREATE.has(t[k])) continue
     // Inline assignments are tri-state: absent (undefined) defers to the ambient env, while
     // an explicit `GH_HOST=` / `GH_REPO=` (even empty) overrides it, as it does for gh.
-    for (let b = i - 1; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
+    let b = i - 1
+    for (; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
       if (t[b].startsWith('GH_REPO=')) { found.repoEnvSet = true; if (!found.repo) found.repo = t[b].slice(8) || null }
       if (t[b].startsWith('GH_HOST=') && found.host === undefined) found.host = t[b].slice(8)
+      // Git/gh context overrides point gh at another repository or config than the
+      // checkout the hook reviews.
+      if (/^(GIT_[A-Z_]+|GH_CONFIG_DIR)=/.test(t[b])) found.wrapped = true
     }
+    // `gh` must be the command word. Anything else first (`env -C dir`, `sudo`, `xargs`,
+    // `sh -c`) may run it in another context, so it is reported as wrapped.
+    if (b >= 0 && typeof t[b] === 'string') found.wrapped = true
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null
