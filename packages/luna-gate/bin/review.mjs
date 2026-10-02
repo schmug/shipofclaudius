@@ -2,7 +2,7 @@
 // Run the luna-gate review by hand, or from a git pre-push hook so changes made by ANY
 // agent or editor get the same review (the PreToolUse hook only sees Claude Code).
 //
-//   node review.mjs [--base <branch>] [--head <branch>] [--cwd <dir>] [--json] [--no-cache]
+//   node review.mjs [--base <branch>] [--head <branch|commit>] [--cwd <dir>] [--json] [--no-cache]
 //   node review.mjs --ack      # the user acknowledges the current change's findings
 //
 // Running it is the opt-in, so LUNA_GATE does not need to be set. The rest of the
@@ -18,7 +18,7 @@ import { loadConfig } from '../src/config.mjs'
 import { prepare, review, writeAck } from '../src/run.mjs'
 import { renderFindings, summaryLine } from '../src/decide.mjs'
 
-const USAGE = 'usage: review.mjs [--base <branch>] [--head <branch>] [--cwd <dir>] [--json] [--no-cache] [--ack]'
+const USAGE = 'usage: review.mjs [--base <branch>] [--head <branch|commit>] [--cwd <dir>] [--json] [--no-cache] [--ack]'
 
 export function parseArgs(argv) {
   const a = { base: null, head: null, cwd: process.cwd(), json: false, cache: true, ack: false, help: false }

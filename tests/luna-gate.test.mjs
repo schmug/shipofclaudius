@@ -77,6 +77,10 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.equal(findPrCreates('gh pr create --head safe --dry-run; gh pr create --head risky').length, 2)
   assert.equal(findPrCreates('gh pr create --body "$(cat <<\'EOF\'\ngh pr create --base evil\nEOF\n)"').length, 1, 'a heredoc body is text, not a command')
   assert.deepEqual(findPrCreates('ls'), [])
+  assert.deepEqual(findPrCreates('gh -R o/t pr create --head f'), [{ base: null, head: 'f', repo: 'o/t' }], 'inherited -R before pr')
+  assert.deepEqual(findPrCreates('gh pr -R o/t create'), [{ base: null, head: null, repo: 'o/t' }], 'inherited -R before create')
+  assert.deepEqual(findPrCreates('gh --repo=o/t pr create'), [{ base: null, head: null, repo: 'o/t' }])
+  assert.deepEqual(findPrCreates('gh -R o/t pr list'), [])
 })
 
 test('sameRepo: -R matches origin across URL forms, and nothing else', () => {
@@ -340,6 +344,25 @@ test('e2e: credential excludes ignore case and cover *.env / .envrc', async () =
   for (const f of ['up/.ENV', 'k2/Server.PEM', 'prod.env', '.envrc']) assert.ok(c.omitted.includes(f), `${f} is named as withheld`)
 })
 
+test('e2e: a rename with a credential path at either end is withheld whole', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'luna-gate-rename-'))
+  g(dir, 'init', '-q', '-b', 'main')
+  await writeFile(join(dir, 'config.txt'), 'SUPERSECRET-A\n'.repeat(20))
+  await writeFile(join(dir, '.dev.vars'), 'SUPERSECRET-B\n'.repeat(20))
+  await writeFile(join(dir, 'app.js'), 'x\n')
+  g(dir, 'add', '-f', '.'); g(dir, 'commit', '-qm', 'base')
+  g(dir, 'checkout', '-q', '-b', 'feat')
+  g(dir, 'mv', 'config.txt', '.env'); g(dir, 'mv', '.dev.vars', 'notes.txt')
+  await writeFile(join(dir, 'app.js'), 'y\n')
+  g(dir, 'add', '-f', '.'); g(dir, 'commit', '-qm', 'renames')
+  const c = collectChange(dir, { maxBytes: 600_000 })
+  const { prompt } = buildRequest(c, loadConfig({}))
+  assert.ok(!prompt.includes('SUPERSECRET-A'), 'rename INTO .env leaked the source as a deletion hunk')
+  assert.ok(!prompt.includes('SUPERSECRET-B'), 'rename OUT OF .dev.vars leaked the destination')
+  assert.deepEqual(c.files.map((f) => f.path), ['app.js'])
+  assert.deepEqual([...c.omitted].sort(), ['.dev.vars', '.env', 'config.txt', 'notes.txt'])
+})
+
 test('e2e: byte budget truncates the diff and drops full contents', async () => {
   const dir = await makeRepo()
   const c = collectChange(dir, { maxBytes: 40 })
@@ -426,8 +449,9 @@ test('e2e: --head prefers the remote branch gh will use; omitted --base follows 
   await writeFile(join(dir, 'rel.js'), 'r\n'); g(dir, 'add', 'rel.js'); g(dir, 'commit', '-qm', 'release only')
   g(dir, 'checkout', '-q', 'feat')
   g(dir, 'config', 'branch.feat.gh-merge-base', 'release')
+  g(dir, 'branch', 'other'); g(dir, 'config', 'branch.other.gh-merge-base', 'main')
   assert.equal(collectChange(dir, { maxBytes: 600_000 }).baseRef, 'release')
-  assert.equal(collectChange(dir, { head: 'feat', maxBytes: 600_000 }).baseRef, 'release')
+  assert.equal(collectChange(dir, { head: 'other', maxBytes: 600_000 }).baseRef, 'release', 'gh reads the CHECKED-OUT branch\'s setting, even with --head')
   assert.equal(collectChange(dir, { base: 'main', maxBytes: 600_000 }).baseRef, 'main', 'an explicit --base still wins')
   g(dir, 'update-ref', 'refs/remotes/origin/feat', 'main')
   assert.equal(collectChange(dir, { base: 'main', head: 'feat', maxBytes: 600_000 }).headRef, 'origin/feat')
@@ -544,6 +568,29 @@ test('cli: the model summary is printed inside the findings fence', async () => 
   assert.ok(open >= 0 && open < text.indexOf('SUMMARY-TEXT') && text.indexOf('SUMMARY-TEXT') < text.indexOf('<<<END-LUNA-FINDINGS-'))
 })
 
+test('pre-push: the README snippet reviews the pushed ref, not the checked-out branch', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  const snippet = readme.match(/```sh\n(#!\/bin\/sh\n[^`]*?review\.mjs[^`]*?)```/)[1]
+    .replace('/absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs', fileURLToPath(new URL('../packages/luna-gate/bin/review.mjs', import.meta.url)))
+  const dir = await makeRepo()
+  const remote = await mkdtemp(join(tmpdir(), 'luna-gate-remote-'))
+  g(remote, 'init', '-q', '--bare')
+  g(dir, 'remote', 'add', 'origin', remote)
+  g(dir, 'push', '-q', 'origin', 'main')
+  await writeFile(join(dir, '.git', 'hooks', 'pre-push'), snippet, { mode: 0o755 })
+  g(dir, 'checkout', '-q', 'main')
+  const push = async (b) => {
+    const fake = await fakeCodex(b)
+    const env = { ...(await codexEnv(fake.bin)), LUNA_GATE: '' }
+    try { execFileSync('git', ['push', '-q', 'origin', 'feat'], { cwd: dir, env, stdio: 'pipe' }); return { ok: true, fake } }
+    catch { return { ok: false, fake } }
+  }
+  const blocked = await push({ out: JSON.stringify({ summary: '', findings: [F()] }) })
+  assert.equal(blocked.ok, false, 'a blocking finding on the pushed branch stops the push')
+  assert.ok((await blocked.fake.record()).stdin.includes('db.query'), 'the pushed branch\'s change was reviewed, from main')
+  assert.equal((await push({ out: JSON.stringify({ summary: '', findings: [] }) })).ok, true)
+})
+
 // The real process, end to end: exit 0 with no stdout when off, and exit 0 always.
 // execFile (async) so the stub server in this process can answer the child.
 const runHook = (stdin, env) => new Promise((resolve) => {
@@ -605,7 +652,7 @@ test('packaging: opt-in only — absent from hooks/hooks.json; the README snippe
   assert.ok(!(await read('hooks/hooks.json')).includes('luna-gate'),
     'luna-gate sends code to a third party; registering it plugin-wide needs an explicit decision, not a drive-by edit')
   const readme = await read('README.md')
-  assert.match(readme, /"if": "Bash\(gh pr create\*\)"/)
+  assert.match(readme, /"if": "Bash\(gh \*\)"/, 'broad enough for `gh -R o/r pr create`')
   assert.match(readme, /"timeout": 600/)
   for (const bin of ['packages/luna-gate/bin/hook.mjs', 'packages/luna-gate/bin/review.mjs']) {
     assert.ok(readme.includes(bin), `README documents ${bin}`)

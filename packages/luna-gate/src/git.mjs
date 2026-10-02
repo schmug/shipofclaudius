@@ -24,6 +24,7 @@ export const NOISE_GLOBS = Object.freeze([
 // `.ENV` or `Server.PEM` would be sent.
 const excludes = (globs) => globs.map((g) => `:(exclude,glob,icase)${g}`)
 const PATHSPEC = ['--', '.', ...excludes(SENSITIVE_GLOBS), ...excludes(NOISE_GLOBS)]
+const SENSITIVE_ONLY = ['--', ...SENSITIVE_GLOBS.map((g) => `:(glob,icase)${g}`)]
 
 export const git = (cwd, args) =>
   execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -55,10 +56,11 @@ export function resolveHead(cwd, name) {
   return null
 }
 
-// gh's own fallback when --base is omitted: `branch.<head>.gh-merge-base`, then the
-// target repo's default branch (origin/HEAD and friends, in resolveBase).
-export function ghMergeBase(cwd, head) {
-  const branch = head || tryGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+// gh's own fallback when --base is omitted: `branch.<current>.gh-merge-base` — the
+// checked-out branch, even when --head names another — then the target repo's default
+// branch (origin/HEAD and friends, in resolveBase).
+export function ghMergeBase(cwd) {
+  const branch = tryGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
   return branch ? tryGit(cwd, ['config', '--get', `branch.${branch}.gh-merge-base`]) || null : null
 }
 
@@ -106,7 +108,7 @@ export function collectChange(cwd, { base = null, head = null, repo = null, maxB
   if (repo && !sameRepo(repo, originUrl(root))) {
     return { reject: `\`--repo ${repo}\` is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
   }
-  if (!base) base = ghMergeBase(root, head)
+  if (!base) base = ghMergeBase(root)
   const baseRef = resolveBase(root, base)
   if (!baseRef) return { error: `could not resolve a base branch${base ? ` for "${base}"` : ''}` }
   const headRef = resolveHead(root, head)
@@ -117,11 +119,19 @@ export function collectChange(cwd, { base = null, head = null, repo = null, maxB
 
   const range = [mergeBase, headSha]
   const allFiles = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range]))
-  const files = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range, ...PATHSPEC]))
-  const kept = new Set(files.map((f) => f.path))
-  const omitted = allFiles.filter((f) => !kept.has(f.path)).map((f) => f.path)
+  // A rename or copy with a credential-shaped path at EITHER end is withheld whole. The
+  // excludes alone would drop only the sensitive side, and the other side would still
+  // carry the bytes: `config.txt -> .env` as a full deletion hunk, `.env -> notes.txt`
+  // as a full addition.
+  const sensitive = new Set(git(root, ['diff', '--name-only', '-z', '--no-renames', ...range, ...SENSITIVE_ONLY]).split('\0').filter(Boolean))
+  const pairExcludes = allFiles.filter((f) => f.from && (sensitive.has(f.from) || sensitive.has(f.path)))
+    .flatMap((f) => [f.from, f.path]).map((p) => `:(exclude,literal)${p}`)
+  const pathspec = [...PATHSPEC, ...pairExcludes]
+  const files = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range, ...pathspec]))
+  const kept = new Set(files.flatMap((f) => [f.from, f.path]).filter(Boolean))
+  const omitted = [...new Set(allFiles.flatMap((f) => [f.from, f.path]).filter((p) => p && !kept.has(p)))]
 
-  let diff = git(root, ['diff', '--no-color', '--no-ext-diff', '-M', '--function-context', ...range, ...PATHSPEC])
+  let diff = git(root, ['diff', '--no-color', '--no-ext-diff', '-M', '--function-context', ...range, ...pathspec])
   let truncated = false
   if (Buffer.byteLength(diff) > maxBytes) {
     diff = Buffer.from(diff).subarray(0, maxBytes).toString('utf8') + '\n[... diff truncated by luna-gate: byte budget reached ...]\n'

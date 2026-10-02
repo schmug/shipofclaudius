@@ -366,7 +366,7 @@ There are two entry points, and they share one pipeline:
       { "matcher": "Bash",
         "hooks": [ {
           "type": "command",
-          "if": "Bash(gh pr create*)",
+          "if": "Bash(gh *)",
           "command": "node",
           "args": ["/absolute/path/to/shipofclaudius/packages/luna-gate/bin/hook.mjs"],
           "timeout": 600,
@@ -379,13 +379,18 @@ There are two entry points, and they share one pipeline:
 
 **Backends.** `codex` (the default) needs `codex login` done once with your ChatGPT account. `gpt-6-luna` needs codex-cli **0.159 or newer**: 0.153.4 gets HTTP 400 ("not supported when using Codex with a ChatGPT account"). If the `codex` on `PATH` is older, update it or point `LUNA_GATE_CODEX_BIN` at a newer one, such as the copy bundled in the ChatGPT desktop app. `codex exec` is an agent rather than a completion endpoint, so it runs locked down: an empty temp directory as its cwd, `-s read-only`, `--ignore-user-config --ignore-rules --ephemeral`, web search off, and every tool feature that can read the disk or reach out disabled (`shell_tool`, `unified_exec`, `code_mode_host`, `view_image`, `memories`, `apps`, `plugins`, browser and computer use, `multi_agent`, `hooks`). Codex rejects an unknown `--disable` name, so a feature renamed in a later release fails the review instead of quietly re-enabling a tool. Its stderr is model text derived from the diff, so it goes to `$LUNA_GATE_DIR/codex-last.log` and never into a message Claude reads.
 
-For `api`, `OPENAI_API_KEY` comes from the environment Claude Code was started in. Export it from your shell profile or keychain; don't put it in `settings.json`. The `if` filter is best-effort, so the script checks again for itself: anything that is not `gh pr create` exits immediately, and a quoted mention like `echo "gh pr create"` does not match.
+For `api`, `OPENAI_API_KEY` comes from the environment Claude Code was started in. Export it from your shell profile or keychain; don't put it in `settings.json`. The `if` filter is `gh *` rather than `gh pr create*` because gh also accepts the inherited `-R` before the subcommand (`gh -R o/r pr create`). The filter is best-effort, so the script checks again for itself: anything that is not `gh pr create` exits immediately, and a quoted mention like `echo "gh pr create"` does not match.
 
-For a git pre-push hook (for example via `git config --global core.hooksPath`):
+For a git pre-push hook (for example via `git config --global core.hooksPath`), review each ref being pushed, not the checked-out branch. Git passes one `<local ref> <local sha> <remote ref> <remote sha>` line per ref on stdin, and `git push origin other-branch` or a multi-ref push would otherwise skip the commits actually leaving:
 
 ```sh
 #!/bin/sh
-exec node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs
+status=0
+while read -r lref lsha rref rsha; do
+  case "$lsha" in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion, nothing to review
+  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" </dev/null || status=1
+done
+exit $status
 ```
 
 **What gets sent.** The diff from `merge-base(base, head)` to `head`, using `--function-context` so each changed hunk arrives inside its whole function, plus the full post-change contents of the changed files, smallest first, within a byte budget. Refs are resolved the way `gh` resolves them. The base comes from `--base`, then `branch.<head>.gh-merge-base`, then `origin/HEAD`. With `--head`, gh pushes nothing, so the remote-tracking `origin/<head>` is reviewed ahead of the local branch. **Credential-shaped files** (`.env*`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.dev.vars`, `*.tfstate`, ...) are excluded at the git pathspec level, and so are lockfiles and minified bundles. The excludes ignore case, because git pathspecs are case-sensitive even on a case-insensitive volume. The model gets the *names* of withheld files, never their bytes, and those names are fenced like the diff, since an attacker chooses them too. API requests are sent with `store: false`; codex runs are `--ephemeral`.

@@ -129,6 +129,19 @@ const isGh = (t) => typeof t === 'string' && (t === 'gh' || t.endsWith('/gh'))
 
 const FLAGS = [['base', '--base', '-B'], ['head', '--head', '-H'], ['repo', '--repo', '-R']]
 
+// `-R/--repo` is inherited, so gh also accepts it before the subcommand:
+// `gh -R o/r pr create` and `gh pr -R o/r create`. Skips those flags from t[j], recording
+// the repo, and returns the index of the next non-flag token.
+function skipRepoFlags(t, j, found) {
+  for (;;) {
+    const a = t[j]
+    if (a === '--repo' || a === '-R') { if (typeof t[j + 1] === 'string') found.repo = t[j + 1]; j += 2 }
+    else if (typeof a === 'string' && a.startsWith('--repo=')) { found.repo = a.slice(7); j++ }
+    else if (typeof a === 'string' && a.startsWith('-R') && a.length > 2) { found.repo = a.slice(2); j++ }
+    else return j
+  }
+}
+
 // Every `gh pr create` the command would run, including inside `$(...)` / backticks, as
 // { base, head, repo } (each a string or null). Empty when there is none.
 export function findPrCreates(command, depth = 0) {
@@ -137,9 +150,13 @@ export function findPrCreates(command, depth = 0) {
   const t = tokenize(command, subs)
   const all = []
   for (let i = 0; i + 2 < t.length; i++) {
-    if (!(isGh(t[i]) && t[i + 1] === 'pr' && t[i + 2] === 'create')) continue
+    if (!isGh(t[i])) continue
     const found = { base: null, head: null, repo: null }
-    for (let j = i + 3; j < t.length && typeof t[j] === 'string'; j++) {
+    let k = skipRepoFlags(t, i + 1, found)
+    if (t[k] !== 'pr') continue
+    k = skipRepoFlags(t, k + 1, found)
+    if (t[k] !== 'create') continue
+    for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null
       if (VALUE_FLAGS.has(a)) { j++; continue }
