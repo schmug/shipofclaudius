@@ -6,6 +6,9 @@
 // and does not match.
 
 const SEPS = new Set([';', '&', '|', '(', ')', '\n'])
+// How deep nested substitutions are inspected. Anything deeper is treated as unsafe
+// (ambiguous / risky / an extra command), never as "nothing here".
+const MAX_DEPTH = 8
 
 // Index just past the `)` closing the `$(` at s[i], or s.length. Quotes, nested parens
 // and heredoc bodies inside are skipped, so the usual
@@ -101,7 +104,9 @@ function ansiC(s, i) {
     else if (n === 'c' && k + 1 < s.length) { out += String.fromCharCode(s[++k].charCodeAt(0) & 31) }
     else out += '\\' + (n ?? '')
   }
-  return [out, k]
+  // Bash ends the C string at a NUL: `$'gh\0junk'` is `gh`.
+  const nul = out.indexOf('\0')
+  return [nul < 0 ? out : out.slice(0, nul), k]
 }
 
 // A small POSIX-ish tokenizer: quotes, backslashes, `$(...)` and heredocs are honoured,
@@ -187,7 +192,7 @@ export function hasRiskyExpansion(command, depth = 0) {
   const subs = []
   const meta = {}
   tokenize(String(command), subs, meta)
-  return !!meta.expansion || (depth < 8 && subs.some((sub) => hasRiskyExpansion(sub, depth + 1)))
+  return !!meta.expansion || subs.some((sub) => depth >= MAX_DEPTH || hasRiskyExpansion(sub, depth + 1))
 }
 
 // Substitutions that only produce text: the `--body "$(cat <<'EOF' ...)"` idiom.
@@ -214,7 +219,7 @@ export function commandCount(command, depth = 0) {
     const toks = tokenize(sub, nested, meta)
     // The text-only word must come FIRST: `PATH=/tmp/bin cat` could run any `cat`.
     const free = inner === 1 && TEXT_ONLY.has(toks[0]) && !meta.redirect && !nested.length
-    if (depth > 8 || (inner > 0 && !free)) n += Math.max(inner, 1)
+    if (depth > MAX_DEPTH || (inner > 0 && !free)) n += Math.max(inner, 1)
   }
   return n
 }
@@ -267,7 +272,7 @@ const DYNAMIC = /[$`*?[\]~{}]/
 export function findPrCreates(command, depth = 0) {
   // No raw-text prefilter: `gh pr cre\\ate` and `gh pr cre''ate` only read as `create`
   // after tokenizing.
-  if (typeof command !== 'string' || depth > 8) return []
+  if (typeof command !== 'string' || depth > MAX_DEPTH) return []
   const subs = []
   const meta = {}
   const t = tokenize(command, subs, meta)
@@ -337,8 +342,10 @@ export function findPrCreates(command, depth = 0) {
 // the shell, so findPrCreates cannot see it: `gh pr ${x:=create}`, `gh $sub create`,
 // `$GH pr create`. Only the command word and the `pr` / `create` slots are judged, so
 // `gh pr view $N` stays an ordinary command.
+// Past MAX_DEPTH nested substitutions nothing is inspected, so it counts as ambiguous.
 export function hasAmbiguousGh(command, depth = 0) {
-  if (typeof command !== 'string' || depth > 8) return false
+  if (typeof command !== 'string') return false
+  if (depth > MAX_DEPTH) return true
   const subs = []
   const t = tokenize(command, subs)
   const dyn = (x) => typeof x === 'string' && DYNAMIC.test(x)
