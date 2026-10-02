@@ -206,11 +206,15 @@ export const register: Register = (on, options) => {
   // the new one, so every outstanding sequence number is invalidated here.
   on('session.end', async ($, e, next) => {
     epoch += 1
+    // Only a candidate newer than every confirmed prompt could be the newest
+    // prompt; older ones are superseded. All of them end with this epoch.
+    const isCandidatePending = [...candidates].some(order => order > latest)
+    candidates.clear()
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, last, () => null)
       await update($, history, () => [])
       $.ui.status(undefined)
-    } else if (latest > finished || candidates.size > 0) {
+    } else if (latest > finished || isCandidatePending) {
       // The newest prompt's judge is cut off here and will never land: hide
       // the band so a reopened conversation doesn't show the older score as
       // if it were this prompt's. A finished score still comes back.

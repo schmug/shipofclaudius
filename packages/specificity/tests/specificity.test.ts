@@ -344,6 +344,18 @@ describe('prompt.submit', () => {
     expect(w.statuses.at(-1)).toBeUndefined()
   })
 
+  test('a superseded /name prompt still in lookup does not hide the newest score at exit', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    w.commandsHeld = new Promise(() => {})
+    await submit($, '/tmp is full')
+    await scored($, w, 'clean out /tmp/cache older than a day')
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBe('spec 72')
+  })
+
   test('a command after the newest score does not hide it at exit', async ($, on) => {
     const w = world(on, GOOD)
     on('session.end', ($, e) => ({ sessionId: e.sessionId }))
