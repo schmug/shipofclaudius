@@ -381,14 +381,14 @@ There are two entry points, and they share one pipeline:
 
 For `api`, `OPENAI_API_KEY` comes from the environment Claude Code was started in. Export it from your shell profile or keychain; don't put it in `settings.json`. The `if` filter is `gh *` rather than `gh pr create*` because gh also accepts the inherited `-R` before the subcommand (`gh -R o/r pr create`). The filter is best-effort, so the script checks again for itself: anything that is not `gh pr create` exits immediately, and a quoted mention like `echo "gh pr create"` does not match.
 
-For a git pre-push hook (for example via `git config --global core.hooksPath`), review each ref being pushed, not the checked-out branch. Git passes one `<local ref> <local sha> <remote ref> <remote sha>` line per ref on stdin, and `git push origin other-branch` or a multi-ref push would otherwise skip the commits actually leaving:
+For a git pre-push hook (for example via `git config --global core.hooksPath`), review each ref being pushed, not the checked-out branch. Git passes the remote's name and URL as arguments and one `<local ref> <local sha> <remote ref> <remote sha>` line per ref on stdin; `git push origin other-branch` or a multi-ref push would otherwise skip the commits actually leaving. `--remote-url` makes `LUNA_GATE_SKIP_REMOTE` match the remote being pushed to, not only `origin`:
 
 ```sh
 #!/bin/sh
 status=0
 while read -r lref lsha rref rsha; do
   case "$lsha" in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion, nothing to review
-  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" </dev/null || status=1
+  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" </dev/null || status=1
 done
 exit $status
 ```
@@ -397,8 +397,9 @@ exit $status
 
 **Commands it will not review.** Some commands carry a change the gate cannot see faithfully, so reviewing local refs would mean reviewing a substitute:
 - a fork head (`--head owner:branch`);
-- `-R` naming a repository other than `origin`;
-- more than one `gh pr create` in one Bash call, including any inside `$(...)` or backticks.
+- a target repository other than `origin`, whether from `-R` (in any position gh accepts), `GH_REPO`, `gh repo set-default`, or another remote gh might pick when none is pinned;
+- more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
+- `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
 
@@ -413,7 +414,7 @@ In `block` mode these are denied with a reason. In `advisory` mode they get a "n
 | `LUNA_GATE_EFFORT` | `max` | `none` `low` `medium` `high` `xhigh` `max` |
 | `LUNA_GATE_THRESHOLD` | `high` | Lowest severity that blocks. Findings the model marks `confidence: low` never block. |
 | `LUNA_GATE_ON_ERROR` | `open` | `closed` blocks the PR when the review itself fails (no key or codex login, timeout, HTTP or codex error). |
-| `LUNA_GATE_SKIP_REMOTE` | (none) | Case-insensitive regex on `origin`'s URL. Matching repos are never sent, e.g. `github\.com[:/](ncdpi\|my-employer)/`. An invalid regex also skips. |
+| `LUNA_GATE_SKIP_REMOTE` | (none) | Case-insensitive regex on `origin`'s URL (and on the pushed remote's URL, via `--remote-url`). Checked before anything else. Matching repos are never sent, e.g. `github\.com[:/](ncdpi\|my-employer)/`. An invalid regex also skips. |
 | `LUNA_GATE_MAX_BYTES` | `600000` | Request byte budget (~150K tokens), kept under Luna's 272K-token long-context price step. |
 | `LUNA_GATE_TIMEOUT_MS` | `540000` | Kept under the 600 s hook timeout so a slow review fails open with a message instead of being killed silently. |
 | `LUNA_GATE_DIR` | `~/.claude/luna-gate` | Review cache, user acknowledgements, and the last failed codex log. |

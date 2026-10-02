@@ -11,7 +11,7 @@
 import { readSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfig } from '../src/config.mjs'
-import { findPrCreates } from '../src/command.mjs'
+import { findPrCreates, commandCount } from '../src/command.mjs'
 import { review } from '../src/run.mjs'
 import { hookOutput } from '../src/decide.mjs'
 
@@ -46,10 +46,12 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   if (prs.length > 1) {
     // One review covers one range; approving the first would let the rest through unreviewed.
     outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
+  } else if (commandCount(event.tool_input.command) > 1) {
+    outcome = { kind: 'reject', message: '`gh pr create` shares this Bash call with other commands, which could change the checkout or refs after the review ran' }
   } else {
     const [pr] = prs
     try {
-      outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, repo: pr.repo, cfg, fetchImpl })
+      outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, repo: pr.repo || env.GH_REPO || null, cfg, fetchImpl })
     } catch (e) {
       outcome = { kind: 'error', message: e?.message || String(e) }
     }

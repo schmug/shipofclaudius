@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadConfig, DEFAULTS } from '../packages/luna-gate/src/config.mjs'
-import { tokenize, parsePrCreate, findPrCreates } from '../packages/luna-gate/src/command.mjs'
+import { tokenize, parsePrCreate, findPrCreates, commandCount } from '../packages/luna-gate/src/command.mjs'
 import { parseNameStatus, collectChange, sameRepo } from '../packages/luna-gate/src/git.mjs'
 import { buildRequest, SCHEMA } from '../packages/luna-gate/src/prompt.mjs'
 import { parseResponse, validateReview, estimateCost, MAX_FINDINGS } from '../packages/luna-gate/src/openai.mjs'
@@ -81,6 +81,18 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr -R o/t create'), [{ base: null, head: null, repo: 'o/t' }], 'inherited -R before create')
   assert.deepEqual(findPrCreates('gh --repo=o/t pr create'), [{ base: null, head: null, repo: 'o/t' }])
   assert.deepEqual(findPrCreates('gh -R o/t pr list'), [])
+  assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
+  assert.deepEqual(findPrCreates('GH_REPO=up/x FOO=1 gh pr create'), [{ base: null, head: null, repo: 'up/x' }], 'inline GH_REPO')
+})
+
+test('commandCount: redirections and heredoc bodies are one command; separators split', () => {
+  assert.equal(commandCount('gh pr create --fill 2>&1'), 1)
+  assert.equal(commandCount('gh pr create --fill &>/dev/null'), 1)
+  assert.equal(commandCount('gh pr create --body "$(cat <<\'EOF\'\na; b && c\nEOF\n)"\n'), 1)
+  assert.equal(commandCount('gh pr create -F - <<EOF\nx; y\nEOF\n'), 1)
+  assert.equal(commandCount('cd ../other && gh pr create'), 2)
+  assert.equal(commandCount('git checkout risky; gh pr create'), 2)
+  assert.equal(commandCount('(cd x && gh pr create)'), 2)
 })
 
 test('sameRepo: -R matches origin across URL forms, and nothing else', () => {
@@ -468,7 +480,10 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
     for (const [cmd, why] of [['gh pr create --head monalisa:feat', /another user's repository/],
       ['gh pr create -R upstream/proj --head feat', /not this checkout's origin/],
       ['gh pr create --head feat --dry-run; gh pr create --head main', /2 times/],
-      ['echo $(gh pr create --head feat) && gh pr create', /2 times/]]) {
+      ['echo $(gh pr create --head feat) && gh pr create', /2 times/],
+      ['cd ../other && gh pr create', /shares this Bash call/],
+      ['git checkout feat && gh pr create --base main', /shares this Bash call/],
+      ['GH_REPO=upstream/proj gh pr create', /GH_REPO/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)
@@ -477,8 +492,26 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       assert.match(adv.systemMessage, /not reviewed/)
     }
     assert.equal(srv.seen.length, 0, 'nothing was sent for a rejected command')
+    assert.match((await run('gh pr create', { ...env, GH_REPO: 'upstream/proj' })).hookSpecificOutput.permissionDecisionReason, /GH_REPO/, 'GH_REPO from the environment')
+    assert.equal(srv.seen.length, 0, 'nothing was sent for a rejected command')
     assert.equal((await run('gh pr create -R schmug/proj --base main')).hookSpecificOutput, undefined, '-R naming origin is reviewed normally')
+    const viaNew = await run('gh pr new --base main 2>&1')
+    assert.equal(viaNew.hookSpecificOutput, undefined)
+    assert.match(viaNew.systemMessage, /reviewed 1 file.*cached/, 'gh pr new with a redirection is reviewed (same change, so from cache)')
     assert.equal(srv.seen.length, 1)
+
+    // A second remote gh might target: rejected until `gh repo set-default` pins origin.
+    g(dir, 'remote', 'add', 'upstream', 'https://github.com/someone/proj.git')
+    assert.match((await run('gh pr create --base main')).hookSpecificOutput.permissionDecisionReason, /remote "upstream" is a different repository/)
+    g(dir, 'config', 'remote.upstream.gh-resolved', 'base')
+    assert.match((await run('gh pr create --base main')).hookSpecificOutput.permissionDecisionReason, /set-default` points gh at remote "upstream"/)
+    g(dir, 'config', '--unset', 'remote.upstream.gh-resolved'); g(dir, 'config', 'remote.origin.gh-resolved', 'base')
+    const pinned = await run('gh pr create --base main')
+    assert.equal(pinned.hookSpecificOutput, undefined)
+    assert.match(pinned.systemMessage, /reviewed 1 file/, 'origin pinned: reviewed')
+    g(dir, 'config', '--unset', 'remote.origin.gh-resolved')
+    assert.equal(await hookMain(JSON.stringify({ tool_name: 'Bash', cwd: dir, tool_input: { command: 'gh pr create' } }),
+      { env: { ...env, LUNA_GATE_SKIP_REMOTE: 'schmug/proj' } }), null, 'a skip-listed repo is left alone before any rejection')
   } finally { await srv.close() }
 })
 
@@ -589,6 +622,14 @@ test('pre-push: the README snippet reviews the pushed ref, not the checked-out b
   assert.equal(blocked.ok, false, 'a blocking finding on the pushed branch stops the push')
   assert.ok((await blocked.fake.record()).stdin.includes('db.query'), 'the pushed branch\'s change was reviewed, from main')
   assert.equal((await push({ out: JSON.stringify({ summary: '', findings: [] }) })).ok, true)
+  // LUNA_GATE_SKIP_REMOTE matches the remote being pushed to (passed as --remote-url), not only origin.
+  g(dir, 'remote', 'rename', 'origin', 'employer')
+  g(dir, 'remote', 'add', 'origin', 'git@github.com:schmug/personal.git')
+  g(dir, 'checkout', '-q', 'feat'); await writeFile(join(dir, 'app.js'), 'changed again\n'); g(dir, 'commit', '-qam', 'again'); g(dir, 'checkout', '-q', 'main')
+  const fake = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [F()] }) })
+  const env = { ...(await codexEnv(fake.bin)), LUNA_GATE: '', LUNA_GATE_SKIP_REMOTE: remote.split('/').pop() }
+  execFileSync('git', ['push', '-q', 'employer', 'feat'], { cwd: dir, env, stdio: 'pipe' })
+  await assert.rejects(fake.record(), 'nothing was sent for a skip-listed push remote')
 })
 
 // The real process, end to end: exit 0 with no stdout when off, and exit 0 always.

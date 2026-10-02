@@ -48,7 +48,7 @@ export function hookOutput(cfg, o, { ackCommand = 'node <plugin>/packages/luna-g
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
         permissionDecisionReason: `luna-gate did not let this through: ${o.message}. ` +
-          'Run a single `gh pr create` per command, from this checkout\'s own branches, so the reviewed change is the one the PR carries. ' +
+          'Run `gh pr create` as its own Bash call (commit, push and cd first, separately), from this checkout\'s own branches against origin, so the reviewed change is the one the PR carries. ' +
           'If that is not possible, tell the user; they can open the PR themselves. Do not try to route around the gate.',
       },
     }

@@ -111,12 +111,26 @@ export function tokenize(s, subs = []) {
     if (c === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; continue }
     if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { flush(); i = readHeredocDelim(s, i, pending) - 1; continue }
     if (c === '\n' && pending.length) { flush(); out.push({ sep: c }); i = skipHeredocBodies(s, i, pending) - 1; continue }
+    // `2>&1`, `&>file`, `>&2` are redirections, not a background `&`.
+    if (c === '&' && (s[i - 1] === '>' || s[i - 1] === '<' || s[i + 1] === '>')) { cur += c; continue }
     if (SEPS.has(c)) { flush(); out.push({ sep: c }); continue }
     if (/\s/.test(c)) { flush(); continue }
     cur += c
   }
   flush()
   return out
+}
+
+// How many commands the line runs at top level (separator-delimited, non-empty).
+// The hook reviews refs as they are BEFORE the Bash call, so anything running alongside
+// `gh pr create` (a `cd`, `git checkout`, `git commit`) can change what the PR carries.
+export function commandCount(command) {
+  let n = 0
+  let inCmd = false
+  for (const t of tokenize(String(command))) {
+    if (typeof t === 'string') { if (!inCmd) { n++; inCmd = true } } else inCmd = false
+  }
+  return n
 }
 
 // gh pr create flags that take a separate value. Their value is skipped, so a title like
@@ -142,10 +156,13 @@ function skipRepoFlags(t, j, found) {
   }
 }
 
-// Every `gh pr create` the command would run, including inside `$(...)` / backticks, as
-// { base, head, repo } (each a string or null). Empty when there is none.
+const CREATE = new Set(['create', 'new'])  // `gh pr new` is gh's documented alias
+
+// Every `gh pr create` / `gh pr new` the command would run, including inside `$(...)` /
+// backticks, as { base, head, repo } (each a string or null). `repo` also takes an inline
+// `GH_REPO=...` prefix. Empty when there is none.
 export function findPrCreates(command, depth = 0) {
-  if (typeof command !== 'string' || !command.includes('create') || depth > 8) return []
+  if (typeof command !== 'string' || !/create|new/.test(command) || depth > 8) return []
   const subs = []
   const t = tokenize(command, subs)
   const all = []
@@ -155,7 +172,12 @@ export function findPrCreates(command, depth = 0) {
     let k = skipRepoFlags(t, i + 1, found)
     if (t[k] !== 'pr') continue
     k = skipRepoFlags(t, k + 1, found)
-    if (t[k] !== 'create') continue
+    if (!CREATE.has(t[k])) continue
+    if (!found.repo) {
+      for (let b = i - 1; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
+        if (t[b].startsWith('GH_REPO=')) found.repo = t[b].slice(8) || null
+      }
+    }
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null

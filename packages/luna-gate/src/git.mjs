@@ -64,14 +64,35 @@ export function ghMergeBase(cwd) {
   return branch ? tryGit(cwd, ['config', '--get', `branch.${branch}.gh-merge-base`]) || null : null
 }
 
-// Does `-R [HOST/]OWNER/REPO` name the repository `origin` points at?
+// A remote URL as "host/owner/repo", or null.
+export function remoteId(url) {
+  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(url).toLowerCase())
+  return m ? `${m[1]}/${m[2]}/${m[3]}` : null
+}
+
+// Does `-R [HOST/]OWNER/REPO` (or GH_REPO) name the repository `remoteUrl` points at?
 export function sameRepo(repoFlag, remoteUrl) {
   const parts = String(repoFlag).toLowerCase().replace(/\.git$/, '').split('/')
   if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p)) return false
-  const [owner, repo] = parts.slice(-2)
-  const host = parts.length === 3 ? parts[0] : 'github.com'
-  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(remoteUrl).toLowerCase())
-  return !!m && m[1] === host && m[2] === owner && m[3] === repo
+  const id = remoteId(remoteUrl)
+  return !!id && id === [parts.length === 3 ? parts[0] : 'github.com', ...parts.slice(-2)].join('/')
+}
+
+// Without -R/GH_REPO, gh targets the remote pinned by `gh repo set-default`
+// (`remote.<name>.gh-resolved = base`), and otherwise picks among the remotes itself.
+// Returns a reason string when that target is, or may be, a repo other than origin.
+export function ghTargetMismatch(root) {
+  const origin = remoteId(originUrl(root))
+  const remotes = (tryGit(root, ['remote']) || '').split('\n').filter(Boolean)
+  const urlOf = (r) => remoteId(tryGit(root, ['remote', 'get-url', r]) || '')
+  const pins = remotes.map((r) => [r, tryGit(root, ['config', '--get', `remote.${r}.gh-resolved`])]).filter(([, v]) => v)
+  if (pins.length) {
+    const [name, v] = pins[0]
+    const ok = v === 'base' ? urlOf(name) === origin : sameRepo(v, originUrl(root))
+    return ok ? null : `\`gh repo set-default\` points gh at remote "${name}", not origin`
+  }
+  const other = remotes.find((r) => r !== 'origin' && urlOf(r) !== origin)
+  return other ? `remote "${other}" is a different repository and no \`gh repo set-default\` pins origin, so gh may target it` : null
 }
 
 export const repoRoot = (cwd) => tryGit(cwd, ['rev-parse', '--show-toplevel'])
@@ -106,7 +127,11 @@ export function collectChange(cwd, { base = null, head = null, repo = null, maxB
     return { reject: `\`--head ${head}\` names a branch in another user's repository, which luna-gate cannot review locally` }
   }
   if (repo && !sameRepo(repo, originUrl(root))) {
-    return { reject: `\`--repo ${repo}\` is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
+    return { reject: `\`--repo ${repo}\` (or GH_REPO) is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
+  }
+  if (!repo) {
+    const why = ghTargetMismatch(root)
+    if (why) return { reject: `${why}; luna-gate only reviews PRs against origin` }
   }
   if (!base) base = ghMergeBase(root)
   const baseRef = resolveBase(root, base)

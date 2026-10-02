@@ -4,7 +4,7 @@
 // Returns an outcome object; never throws for an expected condition.
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { collectChange, optedOut, sha256 } from './git.mjs'
+import { collectChange, optedOut, sha256, repoRoot, originUrl } from './git.mjs'
 import { buildRequest } from './prompt.mjs'
 import { callResponses, estimateCost, validateReview } from './openai.mjs'
 import { callCodex } from './codex.mjs'
@@ -20,21 +20,25 @@ async function writeQuiet(path, data) {
   } catch { /* the cache and acks are conveniences; never fail a review over them */ }
 }
 
-export function remoteSkipped(cfg, remote) {
+// `remotes`: one URL or several (origin, plus the remote a pre-push hook is pushing to).
+export function remoteSkipped(cfg, remotes) {
   if (!cfg.skipRemote) return { skip: false }
   let re
   // An unparseable pattern skips the review: the pattern exists to keep code from being
   // sent, so a typo in it must err toward not sending.
   try { re = new RegExp(cfg.skipRemote, 'i') } catch { return { skip: true, note: 'LUNA_GATE_SKIP_REMOTE is not a valid regex; not sending this change.' } }
-  return re.test(remote) ? { skip: true, note: null } : { skip: false }
+  return [remotes].flat().some((r) => r && re.test(r)) ? { skip: true, note: null } : { skip: false }
 }
 
-export async function prepare({ cwd, base, head, repo = null, cfg }) {
+export async function prepare({ cwd, base, head, repo = null, remoteUrl = null, cfg }) {
+  // Skip-listed repos are checked first, so they are left alone silently rather than
+  // rejected or errored on.
+  const root = repoRoot(cwd)
+  const rs = remoteSkipped(cfg, [root ? originUrl(root) : '', remoteUrl])
+  if (rs.skip) return { outcome: { kind: 'skip', note: rs.note } }
   const change = collectChange(cwd, { base, head, repo, maxBytes: cfg.maxBytes })
   if (change.reject) return { outcome: { kind: 'reject', message: change.reject } }
   if (change.error) return { outcome: { kind: 'error', message: change.error } }
-  const rs = remoteSkipped(cfg, change.remote)
-  if (rs.skip) return { outcome: { kind: 'skip', note: rs.note } }
   if (change.empty) {
     return { outcome: { kind: 'skip', note: change.omitted.length ? `only withheld files changed (${change.omitted.length}); nothing sent.` : null } }
   }
@@ -53,8 +57,8 @@ export async function writeAck(cfg, change) {
   await writeFile(ackPath(cfg, change.ackKey), `${change.mergeBase}..${change.headSha}\n${new Date().toISOString()}\n`)
 }
 
-export async function review({ cwd, base = null, head = null, repo = null, cfg, fetchImpl, useCache = true }) {
-  const prep = await prepare({ cwd, base, head, repo, cfg })
+export async function review({ cwd, base = null, head = null, repo = null, remoteUrl = null, cfg, fetchImpl, useCache = true }) {
+  const prep = await prepare({ cwd, base, head, repo, remoteUrl, cfg })
   if (prep.outcome) return prep.outcome
   const { change } = prep
 
