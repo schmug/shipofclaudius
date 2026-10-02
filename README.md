@@ -312,7 +312,7 @@ Installing `shipofclaudius` does not install it, and it does not install `shipof
 
 - A band above the prompt reading `Last prompt's specificity: 72/100 · missing: which file?`, then `recent ▃▅▆` (a sparkline of the last 10 scores, oldest first, taller is more specific) and a Hide button. The missing part is the judge's guess at the one detail that would most sharpen the prompt. It yields to surveys, drops the sparkline below 40 columns and truncates rather than wraps.
 - `spec 72` in the status line.
-- `/spec` prints the last result in full: the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), the gap and the rationale. `/spec on`, `/spec off` and `/spec hide` toggle the band, and `hide` lasts until the next score.
+- `/spec` prints the last result in full: the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), the gap and the rationale. `/spec off` removes the band and `/spec on` brings it back. Hide (or `/spec hide`) collapses it to one line, `Specificity 72/100` with a Show button, and it stays collapsed until you press Show or run `/spec on`.
 
 **What it never does.** It never blocks, delays, rewrites or drops your prompt. The `prompt.submit` hook passes the prompt on untouched and returns at once, and the judge runs afterwards from a timer. Only your own prompts are scored: typed, sent over Remote Control, or given to `claude -p`. Plugin, peer, notification, scheduled and relayed submissions are skipped, and so are bare slash commands. If the judge fails, times out or returns something that isn't the rubric's JSON, nothing is shown and one line goes to the debug log (`claude --debug`).
 

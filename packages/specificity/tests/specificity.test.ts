@@ -500,7 +500,7 @@ describe('band', () => {
     }
   })
 
-  test('drops the sparkline at narrow widths and Hide hides it', async ($, on) => {
+  test('drops the sparkline at narrow widths and Hide collapses it until Show', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
@@ -514,9 +514,16 @@ describe('band', () => {
     expect(await ui.find({ key: 'spark' })).toBeUndefined()
     await ui.press({ key: 'hide' })
     expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect((await ui.find({ key: 'label' }))?.text).toBe('Specificity 72/100')
 
+    // A later score keeps the person's choice: still one line, with the new score.
     await scored($, w, 'now the same in src/b.ts')
+    expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await ui.find({ key: 'show' })).toBeDefined()
+
+    await ui.press({ key: 'show' })
     expect(await ui.find({ key: 'spec' })).toBeDefined()
+    expect(await ui.find({ key: 'show' })).toBeUndefined()
   })
 })
 
@@ -539,5 +546,8 @@ describe('/spec', () => {
     expect(await ui.find({ key: 'spec' })).toBeDefined()
     await spec($, 'hide')
     expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await ui.find({ key: 'show' })).toBeDefined()
+    await spec($, 'on')
+    expect(await ui.find({ key: 'spec' })).toBeDefined()
   })
 })

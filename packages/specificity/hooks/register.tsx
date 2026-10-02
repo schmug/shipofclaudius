@@ -33,6 +33,7 @@ const last = atom({ plugin: 'specificity', key: 'last' } as const, null)
 const history = atom({ plugin: 'specificity', key: 'history' } as const, [])
 const isHidden = atom({ plugin: 'specificity', key: 'isHidden' } as const, false)
 const isBandOff = atom({ plugin: 'specificity', key: 'isBandOff' } as const, false)
+const isCollapsed = atom({ plugin: 'specificity', key: 'isCollapsed' } as const, false)
 
 const HAIKU_TIMEOUT_MS = 15_000
 const SPARK_MIN_COLUMNS = 40
@@ -245,6 +246,7 @@ export const register: Register = (on, options) => {
     if (arg === 'on') {
       await update($, isBandOff, () => false)
       await update($, isHidden, () => false)
+      await update($, isCollapsed, () => false)
       return { text: mode === 'off' ? 'Band on, but the scorer is off (mode: off).' : 'Specificity band on.' }
     }
     if (arg === 'off') {
@@ -252,8 +254,8 @@ export const register: Register = (on, options) => {
       return { text: 'Specificity band off. /spec on brings it back.' }
     }
     if (arg === 'hide') {
-      await update($, isHidden, () => true)
-      return { text: 'Specificity band hidden until the next score.' }
+      await update($, isCollapsed, () => true)
+      return { text: 'Specificity band collapsed to one line. Its Show button or /spec on opens it.' }
     }
     if (arg !== '') return { text: 'Usage: /spec [on|off|hide]' }
     return { text: breakdown(await read($, last), mode) }
@@ -265,6 +267,24 @@ export const register: Register = (on, options) => {
     if (current === null || (await read($, isBandOff)) || (await read($, isHidden))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
+    // Hide collapses the band to a short line with a Show button rather than
+    // removing it, so it can always be brought back from where it was hidden.
+    if (await read($, isCollapsed)) {
+      const below = await next(e)
+      return (
+        <Box key="specificity" flexDirection="column">
+          <Box key="collapsed" flexDirection="row" columnGap={1}>
+            <Box key="label" flexShrink={1}>
+              <Text dimColor wrap="truncate-end">
+                {`Specificity ${current.score}/100`}
+              </Text>
+            </Box>
+            <Button key="show" label="Show" plain dimColor onPress={() => update($, isCollapsed, () => false)} />
+          </Box>
+          {below}
+        </Box>
+      )
+    }
     const spark = e.props.bodyColumns >= SPARK_MIN_COLUMNS ? sparkline(await read($, history)) : ''
     // The band is one slot that every plugin's AbovePrompt hook shares. The
     // score is one row on top of whatever the plugins beneath draw, never a
@@ -284,7 +304,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>{`recent ${spark}`}</Text>
             </Box>
           )}
-          <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isHidden, () => true)} />
+          <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isCollapsed, () => true)} />
         </Box>
         {below}
       </Box>
