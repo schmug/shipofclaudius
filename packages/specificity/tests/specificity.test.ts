@@ -160,6 +160,32 @@ describe('prompt.submit', () => {
     expect(await spec($)).toContain('(haiku,')
   })
 
+  test('a reply that omits gap is a non-answer', async ($, on) => {
+    const { gap: _omitted, ...rest } = JSON.parse(GOOD) as Record<string, unknown>
+    const w = world(on, JSON.stringify(rest))
+    await scored($, w, 'fix the bug')
+    expect(w.modelCalls).toBe(1)
+    expect(await spec($)).toBe(NONE)
+  })
+
+  test('an explicit null gap is accepted', async ($, on) => {
+    const w = world(on, JSON.stringify({ ...JSON.parse(GOOD), gap: null }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(await spec($)).toContain('gap: none')
+  })
+
+  test('a judge still running at /clear never lands', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await submit($, 'fix the bug in src/a.ts')
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+    await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
+    await w.clock.advance(SLOW_MS)
+    expect(await spec($)).toBe(NONE)
+    expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+  })
+
   test('api errors and aborts are quiet', async ($, on) => {
     const w = world(on, { isAnswered: false, reason: 'aborted', usage: USAGE })
     await scored($, w, 'fix the bug')

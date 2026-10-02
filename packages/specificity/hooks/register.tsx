@@ -90,6 +90,7 @@ export const register: Register = (on, options) => {
   const contextMessages = readCount(options['contextMessages'], 8, 40)
 
   on('session.start', async ($, e, next) => {
+    latest += 1
     await $.command.register({
       name: 'spec',
       description: 'Show the last prompt specificity score, or turn its band on, off or hide it',
@@ -98,6 +99,19 @@ export const register: Register = (on, options) => {
     })
     const current = await read($, last)
     $.ui.status(mode === 'off' || current === null ? undefined : `spec ${current.score}`)
+    return next(e)
+  })
+
+  // A /clear ends the conversation with no session.start after it, and a resume
+  // swaps it: a judge still running for the old conversation must not land in
+  // the new one, so every outstanding sequence number is invalidated here.
+  on('session.end', async ($, e, next) => {
+    latest += 1
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      await update($, last, () => null)
+      await update($, history, () => [])
+      $.ui.status(undefined)
+    }
     return next(e)
   })
 

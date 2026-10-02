@@ -152,13 +152,11 @@ export function parseJudgement(text: string): Omit<SpecificityResult, 'mode' | '
   if (target === null || outcome === null || constraints === null || scope === null) return null
   const dimensions: SpecificityDimensions = { target, outcome, constraints, scope }
 
+  // `gap` must be present: a string, or an explicit null for "nothing missing".
+  // An omitted field is an incomplete answer, not a claim that nothing is missing.
   const rawGap = r['gap']
-  let gap: string | null = null
-  if (typeof rawGap === 'string' && rawGap.trim() !== '') {
-    gap = rawGap.trim().split(/\s+/).slice(0, 12).join(' ')
-  } else if (rawGap !== null && rawGap !== undefined && rawGap !== '') {
-    return null
-  }
+  if (rawGap !== null && typeof rawGap !== 'string') return null
+  const gap = rawGap === null || rawGap.trim() === '' ? null : rawGap.trim().split(/\s+/).slice(0, 12).join(' ')
 
   const rationale = r['rationale']
   if (typeof rationale !== 'string' || rationale.trim() === '') return null
