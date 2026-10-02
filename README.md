@@ -306,6 +306,8 @@ State is the issue label set, so the loop is restartable, inspectable, and inter
 
 Installing `shipofclaudius` does not install it, and it does not install `shipofclaudius`. To try a checkout without installing, run `claude --plugin-dir packages/specificity`.
 
+**Upgrading from the old scorer.** The earlier version shipped as scripts you wired into your own settings by hand, and this version deletes them. If your `settings.json` (user or project) still names `packages/specificity/bin/fast.mjs` under `hooks.UserPromptSubmit` or `packages/specificity/bin/render.sh` as the `statusLine` command, remove those entries before you pull this change. Otherwise every prompt reports a failed hook and the status line goes blank. The mod needs neither: its status entry comes from the plugin itself.
+
 **What you see**
 
 - A band above the prompt reading `spec 72 · gap: which file?`, a sparkline of the last 10 scores, and a Hide button. It yields to surveys, drops the sparkline below 40 columns and truncates rather than wraps.
