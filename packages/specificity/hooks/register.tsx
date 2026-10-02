@@ -281,7 +281,7 @@ export const register: Register = (on, options) => {
           </Box>
           {spark !== '' && (
             <Box key="spark" flexShrink={0}>
-              <Text dimColor>{spark}</Text>
+              <Text dimColor>{`recent ${spark}`}</Text>
             </Box>
           )}
           <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isHidden, () => true)} />

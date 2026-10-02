@@ -472,8 +472,8 @@ describe('band', () => {
 
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'AbovePrompt', props: BAND_PROPS })
-      expect((await ui.find({ key: 'text' }))?.text).toBe('spec 72 · gap: which file?')
-      expect((await ui.find({ key: 'spark' }))?.text).toBe('▆')
+      expect((await ui.find({ key: 'text' }))?.text).toBe("Last prompt's specificity: 72/100 · missing: which file?")
+      expect((await ui.find({ key: 'spark' }))?.text).toBe('recent ▆')
       expect(await ui.find({ key: 'hide' })).toBeDefined()
       await ui.unmount()
 

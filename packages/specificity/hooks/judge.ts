@@ -192,8 +192,10 @@ export function sparkline(history: readonly number[]): string {
     .join('')
 }
 
+/** The band's line: what was rated, the score out of 100, and what the prompt left out. */
 export function bandText(last: SpecificityResult): string {
-  return last.gap === null ? `spec ${last.score}` : `spec ${last.score} · gap: ${last.gap}`
+  const rated = `Last prompt's specificity: ${last.score}/100`
+  return last.gap === null ? `${rated} · nothing important missing` : `${rated} · missing: ${last.gap}`
 }
 
 /** `/spec`'s full breakdown of the last result. */

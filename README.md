@@ -310,7 +310,7 @@ Installing `shipofclaudius` does not install it, and it does not install `shipof
 
 **What you see**
 
-- A band above the prompt reading `spec 72 · gap: which file?`, a sparkline of the last 10 scores, and a Hide button. It yields to surveys, drops the sparkline below 40 columns and truncates rather than wraps.
+- A band above the prompt reading `Last prompt's specificity: 72/100 · missing: which file?`, then `recent ▃▅▆` (a sparkline of the last 10 scores, oldest first, taller is more specific) and a Hide button. The missing part is the judge's guess at the one detail that would most sharpen the prompt. It yields to surveys, drops the sparkline below 40 columns and truncates rather than wraps.
 - `spec 72` in the status line.
 - `/spec` prints the last result in full: the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), the gap and the rationale. `/spec on`, `/spec off` and `/spec hide` toggle the band, and `hide` lasts until the next score.
 
