@@ -67,6 +67,16 @@ test('parsePrCreate: a heredoc PR body is opaque, even with a stray quote or fla
   assert.deepEqual(parsePrCreate('gh pr create -R owner/repo -F body.md --head feat'), { base: null, head: 'feat', repo: 'owner/repo' })
 })
 
+test('parsePrCreate: pflag shorthand clusters, `--`, and unknown flags', () => {
+  assert.deepEqual(parsePrCreate('gh pr create -dHrisk'), { base: null, head: 'risk', repo: null }, '-d is boolean, -H takes the rest')
+  assert.deepEqual(parsePrCreate('gh pr create -dRowner/other'), { base: null, head: null, repo: 'owner/other' })
+  assert.deepEqual(parsePrCreate('gh pr create -dt -Hx --base main'), { base: 'main', head: null, repo: null }, '-t takes the next token as its value')
+  assert.deepEqual(parsePrCreate('gh pr create --fill -- -Hx'), { base: null, head: null, repo: null }, '`--` ends the options')
+  assert.ok(parsePrCreate('gh pr create --fill --frobnicate x').unknownFlag)
+  assert.ok(parsePrCreate('gh pr create -dz').unknownFlag)
+  assert.ok(!parsePrCreate('gh pr create --draft --fill-first --no-maintainer-edit -w').unknownFlag)
+})
+
 test('parsePrCreate: flags after a separator belong to the next command', () => {
   assert.deepEqual(parsePrCreate('gh pr create --fill; git checkout --base x'), { base: null, head: null, repo: null })
 })
@@ -631,7 +641,8 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['gh pr create --base $BASE', /computed by the shell/],
       ['gh pr create --base main --title "${x@P}"', /expansion/],
       ['/tmp/gh pr create --base main', /wrapper/],
-      ['gh pr ${x:=create} --head feat', /cannot tell whether it opens a PR/]]) {
+      ['gh pr ${x:=create} --head feat', /cannot tell whether it opens a PR/],
+      ['gh pr create --base main --frobnicate x', /flag luna-gate does not know/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)

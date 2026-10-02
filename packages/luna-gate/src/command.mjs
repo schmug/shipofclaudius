@@ -203,18 +203,24 @@ export function commandCount(command, depth = 0) {
   return n
 }
 
-// gh pr create flags that take a separate value. Their value is skipped, so a title like
-// `--title "-Hotfix"` is never misread as `-H otfix`.
-const VALUE_FLAGS = new Set(['--title', '-t', '--body', '-b', '--body-file', '-F', '--assignee', '-a',
-  '--label', '-l', '--milestone', '-m', '--project', '-p', '--reviewer', '-r',
-  '--template', '-T', '--recover'])
+// `gh pr create` flags, from `gh pr create --help` (gh 2.95). pflag parsing: a long value
+// flag takes `--x=v` or the next token; shorthands cluster, booleans first (`-dHfeat` is
+// `--draft --head feat`), and a value shorthand takes the rest of its token or the next
+// one. Values are skipped, so a title like `-Hotfix` is never read as a flag. A flag not
+// listed here is `unknownFlag`: its arity is unknown, so the rest cannot be parsed safely.
+const LONG_VALUE = { '--base': 'base', '--head': 'head', '--repo': 'repo', '--title': null, '--body': null,
+  '--body-file': null, '--assignee': null, '--label': null, '--milestone': null, '--project': null,
+  '--reviewer': null, '--template': null, '--recover': null }
+const LONG_BOOL = new Set(['--draft', '--editor', '--fill', '--fill-first', '--fill-verbose', '--web', '--dry-run',
+  '--no-maintainer-edit', '--help'])
+const SHORT_VALUE = { B: 'base', H: 'head', R: 'repo', a: null, b: null, F: null, l: null, m: null, p: null, r: null, T: null, t: null }
+const SHORT_BOOL = new Set(['d', 'e', 'f', 'w', 'h'])
 
 const isGh = (t) => typeof t === 'string' && (t === 'gh' || t.endsWith('/gh'))
 // Only bare `gh` (resolved through the session's own PATH) or a standard install location
 // is trusted; any other path could be a wrapper that runs the real gh somewhere else.
 const TRUSTED_GH = new Set(['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh', '/snap/bin/gh'])
 
-const FLAGS = [['base', '--base', '-B'], ['head', '--head', '-H'], ['repo', '--repo', '-R']]
 
 // `-R/--repo` is inherited, so gh also accepts it before the subcommand:
 // `gh -R o/r pr create` and `gh pr -R o/r create`. Skips those flags from t[j], recording
@@ -252,7 +258,7 @@ export function findPrCreates(command, depth = 0) {
   for (let i = 0; i + 2 < t.length; i++) {
     if (!isGh(t[i])) continue
     const found = { base: null, head: null, repo: null }
-    for (const k of ['host', 'repoEnvSet', 'wrapped', 'dynamic']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
+    for (const k of ['host', 'repoEnvSet', 'wrapped', 'dynamic', 'unknownFlag']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
     let k = skipRepoFlags(t, i + 1, found)
     if (t[k] !== 'pr') continue
     k = skipRepoFlags(t, k + 1, found)
@@ -275,12 +281,27 @@ export function findPrCreates(command, depth = 0) {
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null
-      if (VALUE_FLAGS.has(a)) { j++; continue }
-      for (const [key, long, short] of FLAGS) {
-        if (a === long || a === short) { if (next) { found[key] = next; j++ } }
-        else if (a.startsWith(long + '=')) found[key] = a.slice(long.length + 1)
-        // pflag also takes `-H=feat`: the `=` is a separator, not part of the value.
-        else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) found[key] = a.slice(a[2] === '=' ? 3 : 2)
+      if (a === '--') break
+      if (a.startsWith('--')) {
+        const eq = a.indexOf('=')
+        const name = eq < 0 ? a : a.slice(0, eq)
+        if (name in LONG_VALUE) {
+          const v = eq < 0 ? next : a.slice(eq + 1)
+          if (eq < 0) j++
+          if (LONG_VALUE[name] && v != null) found[LONG_VALUE[name]] = v
+        } else if (!LONG_BOOL.has(name)) found.unknownFlag = true
+        continue
+      }
+      if (a.length < 2 || a[0] !== '-') continue   // a positional, or `-`
+      for (let c = 1; c < a.length; c++) {
+        if (SHORT_BOOL.has(a[c])) continue
+        if (a[c] in SHORT_VALUE) {
+          let v = a.slice(c + 1)
+          if (v.startsWith('=')) v = v.slice(1)   // pflag takes `-H=feat`
+          if (!v) { v = next; j++ }
+          if (SHORT_VALUE[a[c]] && v != null) found[SHORT_VALUE[a[c]]] = v
+        } else found.unknownFlag = true
+        break
       }
     }
     if ([found.base, found.head, found.repo, found.host].some((v) => typeof v === 'string' && DYNAMIC.test(v))) found.dynamic = true

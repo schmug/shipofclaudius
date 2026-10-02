@@ -52,6 +52,8 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   } else if (prs.length > 1) {
     // One review covers one range; approving the first would let the rest through unreviewed.
     outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
+  } else if (prs[0].unknownFlag) {
+    outcome = { kind: 'reject', message: '`gh pr create` has a flag luna-gate does not know, so it cannot tell which values select the base, head or repo' }
   } else if (prs[0].dynamic) {
     outcome = { kind: 'reject', message: 'a --head/--base/--repo (or GH_REPO/GH_HOST) value is computed by the shell, so the reviewed range cannot be known in advance; pass a literal branch name' }
   } else if (hasRiskyExpansion(event.tool_input.command)) {

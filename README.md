@@ -425,6 +425,7 @@ exit $status
 - a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
 - `${...}`, `$((...))` or `$[...]` expansion anywhere outside single quotes (`${x@P}` runs code);
 - a `gh` call whose command word or `pr`/`create` slot is computed by the shell (`gh pr ${x:=create}`), since it may be a PR creation the gate cannot see;
+- a `gh pr create` flag the gate does not know (its arity decides how the rest parses). Known flags are parsed as pflag does, including shorthand clusters such as `-dHfeat`;
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
