@@ -488,6 +488,18 @@ describe('band', () => {
     }
   })
 
+  test("stacks on top of another mod's band instead of replacing it", async ($, on) => {
+    const w = world(on, GOOD)
+    await scored($, w, 'fix the bug in src/a.ts')
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'AbovePrompt', props: BAND_PROPS })
+      expect(await ui.find({ key: 'spec' })).toBeDefined()
+      expect(await ui.find({ key: 'engine' })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
   test('drops the sparkline at narrow widths and Hide hides it', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')

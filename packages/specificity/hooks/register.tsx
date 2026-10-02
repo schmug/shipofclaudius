@@ -266,20 +266,27 @@ export const register: Register = (on, options) => {
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const spark = e.props.bodyColumns >= SPARK_MIN_COLUMNS ? sparkline(await read($, history)) : ''
+    // The band is one slot that every plugin's AbovePrompt hook shares. The
+    // score is one row on top of whatever the plugins beneath draw, never a
+    // replacement for it, so another mod's band still shows under this one.
+    const below = await next(e)
 
     return (
-      <Box key="spec" flexDirection="row" columnGap={1}>
-        <Box key="text" flexShrink={1}>
-          <Text dimColor wrap="truncate-end">
-            {bandText(current)}
-          </Text>
-        </Box>
-        {spark !== '' && (
-          <Box key="spark" flexShrink={0}>
-            <Text dimColor>{spark}</Text>
+      <Box key="specificity" flexDirection="column">
+        <Box key="spec" flexDirection="row" columnGap={1}>
+          <Box key="text" flexShrink={1}>
+            <Text dimColor wrap="truncate-end">
+              {bandText(current)}
+            </Text>
           </Box>
-        )}
-        <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isHidden, () => true)} />
+          {spark !== '' && (
+            <Box key="spark" flexShrink={0}>
+              <Text dimColor>{spark}</Text>
+            </Box>
+          )}
+          <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isHidden, () => true)} />
+        </Box>
+        {below}
       </Box>
     )
   })
