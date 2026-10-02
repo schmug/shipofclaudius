@@ -93,14 +93,22 @@ const SIMPLE_ESC = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n',
 function ansiC(s, i) {
   let out = ''
   let k = i + 1
+  let ended = false
   for (; k < s.length && s[k] !== "'"; k++) {
+    // After a NUL bash discards the rest, so stop decoding (escapes still skip a char,
+    // so an escaped quote does not end the word early).
+    if (ended || out.includes('\0')) { ended = true; if (s[k] === '\\') k++; continue }
     if (s[k] !== '\\') { out += s[k]; continue }
     const n = s[++k]
     let m
     if (n in SIMPLE_ESC) out += SIMPLE_ESC[n]
     else if ((m = /^[0-7]{1,3}/.exec(s.slice(k)))) { out += String.fromCharCode(parseInt(m[0], 8)); k += m[0].length - 1 }
     else if (n === 'x' && (m = /^[0-9a-fA-F]{1,2}/.exec(s.slice(k + 1)))) { out += String.fromCharCode(parseInt(m[0], 16)); k += m[0].length }
-    else if ((n === 'u' || n === 'U') && (m = new RegExp(`^[0-9a-fA-F]{1,${n === 'u' ? 4 : 8}}`).exec(s.slice(k + 1)))) { out += String.fromCodePoint(parseInt(m[0], 16)); k += m[0].length }
+    else if ((n === 'u' || n === 'U') && (m = new RegExp(`^[0-9a-fA-F]{1,${n === 'u' ? 4 : 8}}`).exec(s.slice(k + 1)))) {
+      const cp = parseInt(m[0], 16)
+      out += cp <= 0x10ffff ? String.fromCodePoint(cp) : '\ufffd'   // never throw on input
+      k += m[0].length
+    }
     else if (n === 'c' && k + 1 < s.length) { out += String.fromCharCode(s[++k].charCodeAt(0) & 31) }
     else out += '\\' + (n ?? '')
   }
@@ -343,16 +351,44 @@ export function findPrCreates(command, depth = 0) {
 // `$GH pr create`. Only the command word and the `pr` / `create` slots are judged, so
 // `gh pr view $N` stays an ordinary command.
 // Past MAX_DEPTH nested substitutions nothing is inspected, so it counts as ambiguous.
+//
+// Evaluators run a payload the parser would otherwise see as one opaque string:
+// `sh -c 'gh pr create'`, `eval "gh pr create"`. Their payload is analysed as a command,
+// and a computed payload counts as ambiguous. A `gh pr` with no visible subcommand
+// anywhere (`... | xargs gh pr`) is ambiguous too.
+const EVALUATORS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'eval', 'source', '.'])
 export function hasAmbiguousGh(command, depth = 0) {
   if (typeof command !== 'string') return false
   if (depth > MAX_DEPTH) return true
   const subs = []
-  const t = tokenize(command, subs)
+  const meta = {}
+  const t = tokenize(command, subs, meta)
   const dyn = (x) => typeof x === 'string' && DYNAMIC.test(x)
+  const payloadRisky = (from, to) => {
+    const words = t.slice(from, to)
+    if (words.some((_, n) => meta.uq.has(from + n) || meta.exp.has(from + n))) return true
+    const payload = words.join(' ')
+    return findPrCreates(payload).length > 0 || hasAmbiguousGh(payload, depth + 1)
+  }
   for (let i = 0; i < t.length; i++) {
     if (typeof t[i] !== 'string') continue
+    if (isGh(t[i])) {
+      const scratch = {}
+      let k = skipRepoFlags(t, i + 1, scratch)
+      if (t[k] === 'pr') { k = skipRepoFlags(t, k + 1, scratch); if (typeof t[k] !== 'string') return true }
+    }
     const atStart = i === 0 || typeof t[i - 1] !== 'string' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i - 1])
     if (!atStart || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i])) continue
+    let end = i + 1
+    while (end < t.length && typeof t[end] === 'string') end++
+    const word = t[i].split('/').pop()
+    if (EVALUATORS.has(word)) {
+      if (word === 'eval' || word === 'source' || word === '.') { if (payloadRisky(i + 1, end)) return true }
+      else {
+        const c = t.findIndex((x, n) => n > i && n < end && typeof x === 'string' && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x))
+        if (c > 0 && payloadRisky(c + 1, c + 2)) return true
+      }
+    }
     const scratch = {}
     if (dyn(t[i])) {
       const k = skipRepoFlags(t, i + 1, scratch)

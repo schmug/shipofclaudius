@@ -112,6 +112,11 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr $"create" --head r'), [{ base: null, head: 'r', repo: null }], 'locale quoting')
   assert.deepEqual(findPrCreates("$'gh\\0junk' pr create --head r"), [{ base: null, head: 'r', repo: null }], 'bash ends an ANSI-C word at NUL')
   assert.deepEqual(findPrCreates("gh pr $'create\\x00zz' -H r"), [{ base: null, head: 'r', repo: null }])
+  assert.deepEqual(findPrCreates("$'gh\\0\\UFFFFFFFF' pr create --head r"), [{ base: null, head: 'r', repo: null }], 'escapes after NUL are not decoded (and never throw)')
+  assert.doesNotThrow(() => findPrCreates("gh pr $'\\UFFFFFFFF'"))
+  for (const c of ["gh pr view \"$(sh -c 'gh pr create --head risky')\"", 'eval "gh pr create --head risky"', "bash -lc 'gh pr create'",
+    'sh -c "$CMD"', 'echo create | xargs gh pr']) assert.ok(hasAmbiguousGh(c), c)
+  assert.ok(!hasAmbiguousGh("sh -c 'ls -la'"))
   assert.ok(findPrCreates('/tmp/gh pr create')[0].wrapped, 'an untrusted gh path is a wrapper')
   assert.ok(!findPrCreates('/opt/homebrew/bin/gh pr create')[0].wrapped)
   assert.equal(commandCount('gh pr create --body "$(PATH=/tmp/bin cat body)"'), 2, 'an assignment before cat forfeits the text-only exemption')
@@ -657,6 +662,7 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['gh pr ${x:=create} --head feat', /cannot tell whether it opens a PR/],
       ['gh pr create --base main --frobnicate x', /flag luna-gate does not know/],
       ["gh pr create --base main $(printf -- '--head feat')", /computed by the shell/],
+      ["gh pr view \"$(sh -c 'gh pr create --head feat')\"", /cannot tell whether it opens a PR/],
       [Array.from({ length: 10 }).reduce((acc) => `echo $(${acc})`, 'gh pr create --head feat').replace(/^/, 'gh pr view "$(') + ')"', /cannot tell whether it opens a PR/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)

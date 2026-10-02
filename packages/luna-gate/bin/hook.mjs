@@ -42,12 +42,21 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   const cfg = loadConfig(env)
   if (cfg.mode === 'off') return null
   const command = event.tool_input?.command
-  const prs = findPrCreates(command)
-  // A gh call whose subcommand the shell computes might be `gh pr create` in disguise;
-  // check that before treating the command as unrelated.
-  if (!prs.length && !hasAmbiguousGh(command)) return null
+  // Parsing is inside a try: a parser crash on hostile input becomes a rejection (deny in
+  // block mode), never a silent exit that lets the call through.
+  let prs, ambiguous, risky, count, parseError = null
+  try {
+    prs = findPrCreates(command)
+    // A gh call whose subcommand the shell computes might be `gh pr create` in disguise;
+    // check that before treating the command as unrelated.
+    ambiguous = !prs.length && hasAmbiguousGh(command)
+    if (prs.length) { risky = hasRiskyExpansion(command); count = commandCount(command) }
+  } catch (e) { parseError = e?.message || String(e) }
+  if (!parseError && !prs.length && !ambiguous) return null
   let outcome
-  if (!prs.length) {
+  if (parseError) {
+    outcome = { kind: 'reject', message: 'luna-gate could not parse this command' }
+  } else if (!prs.length) {
     outcome = { kind: 'reject', message: 'a `gh` call\'s command word or `pr`/`create` slot is computed by the shell, so luna-gate cannot tell whether it opens a PR' }
   } else if (prs.length > 1) {
     // One review covers one range; approving the first would let the rest through unreviewed.
@@ -56,11 +65,11 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
     outcome = { kind: 'reject', message: '`gh pr create` has a flag luna-gate does not know, so it cannot tell which values select the base, head or repo' }
   } else if (prs[0].dynamic) {
     outcome = { kind: 'reject', message: 'an argument to `gh pr create` (or a GH_REPO/GH_HOST value) is computed by the shell, so it could select a different base, head or repo after the review; use literal values' }
-  } else if (hasRiskyExpansion(event.tool_input.command)) {
+  } else if (risky) {
     outcome = { kind: 'reject', message: 'the command uses `${...}`, `$((...))` or `$[...]` expansion, which can run code before gh does' }
   } else if (prs[0].wrapped) {
     outcome = { kind: 'reject', message: '`gh pr create` runs behind a wrapper (such as `env -C`) or an environment assignment (PATH, GIT_*, GH_CONFIG_DIR, ...) that can swap the binary or point it at another repository than this checkout' }
-  } else if (commandCount(event.tool_input.command) > 1) {
+  } else if (count > 1) {
     outcome = { kind: 'reject', message: '`gh pr create` shares this Bash call with other commands, which could change the checkout or refs after the review ran' }
   } else {
     const [pr] = prs
