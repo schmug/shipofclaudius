@@ -70,18 +70,20 @@ async function quiet($: EngineInterface, isStale: () => boolean, why: string): P
 
 /**
  * Judges one prompt and, if it is still the newest when the answer lands, writes
- * the result. `order` was taken at submission. A prompt that looks like a slash
- * command is checked against the session's real commands first: `/compact` is
- * dropped without superseding anything, `/tmp is full` is confirmed and judged.
+ * the result. `order` and `born` (the session epoch) were taken at submission,
+ * so a /clear between submission and the timer firing still drops it. A prompt
+ * that looks like a slash command is checked against the session's real
+ * commands first: `/compact` is dropped without superseding anything,
+ * `/tmp is full` is confirmed and judged.
  */
 async function score(
   $: EngineInterface,
   prompt: string,
   order: number,
+  born: number,
   mode: 'haiku' | 'fork',
   contextMessages: number,
 ): Promise<void> {
-  const born = epoch
   const isStale = () => order !== latest || born !== epoch
   try {
     await judgeAndWrite($, prompt, order, isStale, mode, contextMessages)
@@ -182,9 +184,10 @@ export const register: Register = (on, options) => {
       const prompt = e.text
       const judge = mode
       const order = ++submitted
+      const born = epoch
       if (slashName(prompt) === null) confirm(order)
       $.clock.after(0, () => {
-        score($, prompt, order, judge, contextMessages).catch((err: unknown) =>
+        score($, prompt, order, born, judge, contextMessages).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),
         )
       })

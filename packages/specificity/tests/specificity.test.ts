@@ -205,6 +205,17 @@ describe('prompt.submit', () => {
     expect(w.statuses.filter(s => s !== undefined)).toEqual([])
   })
 
+  test('a /clear before the queued judge starts drops it', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await submit($, 'fix the bug in src/a.ts')
+    await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(await spec($)).toBe(NONE)
+    expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+  })
+
   test('a failed judge for the newest prompt hides the previous score', async ($, on) => {
     const w = world(on, [GOOD, 'not json'])
     await scored($, w, 'fix the bug in src/a.ts')
