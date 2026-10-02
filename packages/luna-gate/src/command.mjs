@@ -194,6 +194,12 @@ function skipRepoFlags(t, j, found) {
 
 const CREATE = new Set(['create', 'new'])  // `gh pr new` is gh's documented alias
 
+const SAFE_ASSIGN = /^(GH_REPO|GH_HOST|GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|GH_PROMPT_DISABLED|GH_NO_UPDATE_NOTIFIER|GH_SPINNER_DISABLED|GH_FORCE_TTY|GH_PAGER|PAGER|NO_COLOR|CLICOLOR|CLICOLOR_FORCE|TERM|LANG|LC_[A-Z]+)=/
+
+// A value the shell computes at run time ($VAR, $(...), backticks) cannot be resolved
+// here without executing it, so a range-selecting value that contains one is `dynamic`.
+const DYNAMIC = /[$`]/
+
 // Every `gh pr create` / `gh pr new` the command would run, including inside `$(...)` /
 // backticks, as { base, head, repo } (each a string or null). `repo` also takes an inline
 // `GH_REPO=...` prefix. Empty when there is none.
@@ -205,7 +211,7 @@ export function findPrCreates(command, depth = 0) {
   for (let i = 0; i + 2 < t.length; i++) {
     if (!isGh(t[i])) continue
     const found = { base: null, head: null, repo: null }
-    for (const k of ['host', 'repoEnvSet', 'wrapped']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
+    for (const k of ['host', 'repoEnvSet', 'wrapped', 'dynamic']) Object.defineProperty(found, k, { value: undefined, writable: true, enumerable: false })
     let k = skipRepoFlags(t, i + 1, found)
     if (t[k] !== 'pr') continue
     k = skipRepoFlags(t, k + 1, found)
@@ -216,9 +222,10 @@ export function findPrCreates(command, depth = 0) {
     for (; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
       if (t[b].startsWith('GH_REPO=')) { found.repoEnvSet = true; if (!found.repo) found.repo = t[b].slice(8) || null }
       if (t[b].startsWith('GH_HOST=') && found.host === undefined) found.host = t[b].slice(8)
-      // Git/gh context overrides point gh at another repository or config than the
-      // checkout the hook reviews.
-      if (/^(GIT_[A-Z_]+|GH_CONFIG_DIR)=/.test(t[b])) found.wrapped = true
+      // Only assignments whose effect is modelled (GH_REPO/GH_HOST) or that cannot change
+      // which gh runs or what it targets are allowed. PATH, LD_PRELOAD, GIT_DIR,
+      // GH_CONFIG_DIR, XDG_* and the rest could swap the binary or its context.
+      if (!SAFE_ASSIGN.test(t[b])) found.wrapped = true
     }
     // `gh` must be the command word. Anything else first (`env -C dir`, `sudo`, `xargs`,
     // `sh -c`) may run it in another context, so it is reported as wrapped.
@@ -233,6 +240,7 @@ export function findPrCreates(command, depth = 0) {
         else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) found[key] = a.slice(2)
       }
     }
+    if ([found.base, found.head, found.repo, found.host].some((v) => typeof v === 'string' && DYNAMIC.test(v))) found.dynamic = true
     all.push(found)
   }
   for (const sub of subs) all.push(...findPrCreates(sub, depth + 1))

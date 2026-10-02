@@ -561,9 +561,12 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['git checkout feat && gh pr create --base main', /shares this Bash call/],
       ['GH_REPO=upstream/proj gh pr create', /GH_REPO/],
       ['GH_HOST=ghe.corp gh pr create -R schmug/proj', /not this checkout's origin/],
-      ['x=$(git checkout feat) gh pr create --base main', /shares this Bash call/],
+      ['x=$(git checkout feat) gh pr create --base main', /shares this Bash call|wrapper/],
       ['env -C ../other gh pr create --base main', /wrapper/],
-      ['GIT_DIR=../other/.git gh pr create --base main', /wrapper/]]) {
+      ['GIT_DIR=../other/.git gh pr create --base main', /wrapper/],
+      ['PATH=/tmp/bin gh pr create --base main', /wrapper/],
+      ['gh pr create --head "$(printf feat)" --base main', /computed by the shell/],
+      ['gh pr create --base $BASE', /computed by the shell/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)
@@ -575,6 +578,7 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
     assert.match((await run('gh pr create', { ...env, GH_REPO: 'upstream/proj' })).hookSpecificOutput.permissionDecisionReason, /GH_REPO/, 'GH_REPO from the environment')
     assert.equal(srv.seen.length, 0, 'nothing was sent for a rejected command')
     assert.equal((await run('gh pr create -R schmug/proj --base main')).hookSpecificOutput, undefined, '-R naming origin is reviewed normally')
+    assert.equal((await run('GH_TOKEN=x NO_COLOR=1 gh pr create --base main')).hookSpecificOutput, undefined, 'allowlisted assignments are fine')
     const viaNew = await run('gh pr new --base main 2>&1')
     assert.equal(viaNew.hookSpecificOutput, undefined)
     assert.match(viaNew.systemMessage, /reviewed 1 file.*cached/, 'gh pr new with a redirection is reviewed (same change, so from cache)')
