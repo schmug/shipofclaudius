@@ -42,11 +42,14 @@ const SPARK_MIN_COLUMNS = 40
 // `latest` is the newest submission known to be a prompt (a `/name` candidate
 // joins only once it is known not to be a real command, so a command never
 // supersedes anything); `epoch` moves at session start and end, dropping every
-// judge in flight. Module-local on purpose; a reload starting the counts over
-// can only drop a stale score, never misfile one.
+// judge in flight; `finished` is the newest submission whose judge reached an
+// outcome (a score, a non-answer, or "it was a command"). Module-local on
+// purpose; a reload starting the counts over can only drop a stale score, never
+// misfile one.
 let submitted = 0
 let latest = 0
 let epoch = 0
+let finished = 0
 
 /** `order` is a prompt, not a command: it supersedes every older one, never a newer one. */
 function confirm(order: number): void {
@@ -85,11 +88,15 @@ async function score(
   mode: 'haiku' | 'fork',
   contextMessages: number,
 ): Promise<void> {
-  const isStale = () => order !== latest || born !== epoch
+  // Superseded by a newer prompt, or by a /clear, resume or exit. A `/name`
+  // candidate not yet confirmed is not stale on that account alone.
+  const isStale = () => latest > order || born !== epoch
   try {
     await judgeAndWrite($, prompt, order, isStale, mode, contextMessages)
   } catch (err: unknown) {
     await quiet($, isStale, err instanceof Error ? err.name : 'error')
+  } finally {
+    finished = Math.max(finished, order)
   }
 }
 
@@ -119,7 +126,7 @@ async function judgeAndWrite(
   // forking and again once the fork answers: if the answer may be in it, the
   // fork's score is dropped and the haiku judge, whose context is cut at the
   // prompt, rates it instead.
-  if (mode === 'fork' && !isAnswerUnderway(await $.session.messages(), prompt)) {
+  if (mode === 'fork' && !isAnswerUnderway(await $.session.messages(), prompt) && !isStale()) {
     reply = await $.model.fork({ prompt: forkPrompt(prompt) })
     if (reply.isAnswered && isAnswerUnderway(await $.session.messages(), prompt)) {
       $.ui.log('specificity: fork dropped, the answer may be in it; judging with haiku', { to: 'debug' })
@@ -131,6 +138,10 @@ async function judgeAndWrite(
   if (reply === null || (!reply.isAnswered && reply.reason === 'nothing-to-fork')) {
     judge = 'haiku'
     const messages = await $.session.messages()
+    // Checked before each model call, not only after: a judge already
+    // superseded (a newer prompt, a /clear) would pay for an answer certain
+    // to be dropped.
+    if (isStale()) return
     reply = await $.model.complete({
       model: 'haiku',
       system: RUBRIC,
@@ -195,6 +206,11 @@ export const register: Register = (on, options) => {
       await update($, last, () => null)
       await update($, history, () => [])
       $.ui.status(undefined)
+    } else if (submitted > finished) {
+      // The newest prompt's judge is cut off here and will never land: hide
+      // the band so a reopened conversation doesn't show the older score as
+      // if it were this prompt's. A finished score still comes back.
+      await update($, isHidden, () => true)
     }
     return next(e)
   })

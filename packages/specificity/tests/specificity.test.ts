@@ -274,8 +274,57 @@ describe('prompt.submit', () => {
     await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
     await w.clock.settle()
     await w.clock.advance(SLOW_MS)
+    expect(w.modelCalls).toBe(0)
     expect(await spec($)).toBe(NONE)
     expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+  })
+
+  test('a /clear before the queued judge starts takes no fork', { options: { mode: 'fork' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    await submit($, 'fix the bug in src/a.ts')
+    await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(w.forks).toBe(0)
+    expect(w.modelCalls).toBe(0)
+  })
+
+  test('a /clear during the command lookup stops the judge before any model call', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    let release = () => {}
+    w.commandsHeld = new Promise(resolve => (release = resolve))
+    await submit($, '/tmp is full')
+    await w.clock.settle()
+    await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
+    release()
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(w.modelCalls).toBe(0)
+  })
+
+  test('exiting while the newest judge runs keeps the older score hidden on restart', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await submit($, 'and the other one')
+    await w.clock.settle()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await w.clock.advance(SLOW_MS)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
+
+  test('exiting after the newest score landed still republishes it on restart', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBe('spec 72')
   })
 
   test('a failed judge for the newest prompt hides the previous score', async ($, on) => {
@@ -297,7 +346,8 @@ describe('prompt.submit', () => {
     await submit($, 'clean out /tmp/cache older than a day')
     await w.clock.settle()
     await w.clock.advance(SLOW_MS)
-    expect(w.modelCalls).toBe(2)
+    // The older prompt was superseded before its judge started, so it never pays for a call.
+    expect(w.modelCalls).toBe(1)
     expect(await spec($)).toContain('for "clean out /tmp/cache')
   })
 
