@@ -19,6 +19,7 @@ function skipSubst(s, i) {
     const c = s[k]
     if (c === '\\') { k++; continue }
     if (c === '\n' && pending.length) { k = skipHeredocBodies(s, k, pending) - 1; continue }
+    if (c === '#' && /[\s;&|(]/.test(s[k - 1])) { const e = s.indexOf('\n', k); if (e < 0) return s.length; k = e - 1; continue }
     if (c === "'") { const e = s.indexOf("'", k + 1); if (e < 0) return s.length; k = e; continue }
     if (c === '"') { k = skipDouble(s, k) - 1; continue }
     if (c === '`') { const e = s.indexOf('`', k + 1); if (e < 0) return s.length; k = e; continue }
@@ -121,6 +122,9 @@ export function tokenize(s, subs = [], meta = {}) {
       else cur += c
       continue
     }
+    // An unquoted `#` starting a word comments out the rest of the line: `gh pr create
+    // --head risky # --head safe` opens risky, so the comment must not supply flags.
+    if (c === '#' && !cur && !has) { const e = s.indexOf('\n', i); i = (e < 0 ? s.length : e) - 1; continue }
     if (c === "'" || c === '"') { q = c; has = true; continue }
     if (c === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; continue }
     if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { flush(); i = readHeredocDelim(s, i, pending) - 1; continue }

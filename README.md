@@ -389,9 +389,16 @@ status=0
 while read -r lref lsha rref rsha; do
   case "$lsha" in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion, nothing to review
   # An existing remote ref is diffed DIRECTLY against what replaces it (--from), so a
-  # rewind or force-push shows the commits it removes too. A new ref (or a remote SHA
-  # this clone has not fetched) falls back to the default base.
-  from=; git cat-file -e "$rsha^{commit}" 2>/dev/null && from=$rsha
+  # rewind or force-push shows the commits it removes too. Only a new ref (all zeros)
+  # uses the default base; a remote tip this clone has not fetched is refused.
+  from=
+  case "$rsha" in *[!0]*)
+    if ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+      echo "luna-gate: $rref is at $rsha on the remote, which this clone lacks; fetch, then push again" >&2
+      status=1; continue
+    fi
+    from=$rsha ;;
+  esac
   node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" ${from:+--from "$from"} </dev/null || status=1
 done
 exit $status

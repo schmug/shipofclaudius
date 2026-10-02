@@ -192,6 +192,9 @@ export function collectChange(cwd, { base = null, head = null, repo = null, ghHo
     .filter((p) => p && !kept.has(p)))]
 
   let diff = git(root, ['diff', '--no-color', '--no-ext-diff', '-M', '--function-context', ...range, ...pathspec])
+  // The cache key covers the WHOLE diff: two changes that share a truncated prefix must
+  // not share a verdict.
+  const fullDiffHash = sha256(diff)
   let truncated = false
   if (Buffer.byteLength(diff) > maxBytes) {
     diff = Buffer.from(diff).subarray(0, maxBytes).toString('utf8') + '\n[... diff truncated by luna-gate: byte budget reached ...]\n'
@@ -216,7 +219,7 @@ export function collectChange(cwd, { base = null, head = null, repo = null, ghHo
     budget -= buf.length
   }
 
-  const bundleHash = sha256(JSON.stringify({ diff, contents, omitted }))
+  const bundleHash = sha256(JSON.stringify({ fullDiffHash, diff, contents, skippedContents, omitted }))
   return {
     root, baseRef, headRef, headSha, mergeBase,
     files, omitted, diff, truncated, contents, skippedContents, bundleHash,

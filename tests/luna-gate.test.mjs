@@ -84,6 +84,9 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
   assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
   assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
+  assert.deepEqual(findPrCreates('gh pr create --head risky # --head safe'), [{ base: null, head: 'risky', repo: null }], 'a comment supplies no flags')
+  assert.deepEqual(findPrCreates('gh pr create --title a#b --head x'), [{ base: null, head: 'x', repo: null }], '# inside a word is not a comment')
+  assert.equal(commandCount('gh pr create --fill # c\ngit checkout x'), 2, 'a comment ends at the newline')
   assert.deepEqual(findPrCreates('GH_REPO=up/x FOO=1 gh pr create'), [{ base: null, head: null, repo: 'up/x' }], 'inline GH_REPO')
 })
 
@@ -428,6 +431,17 @@ test('e2e: byte budget truncates the diff and drops full contents', async () => 
   assert.match(c.diff, /truncated by luna-gate/)
 })
 
+test('e2e: two changes sharing a truncated prefix do not share a cache key', async () => {
+  const dir = await makeRepo()
+  await writeFile(join(dir, 'zz.js'), 'tail one\n'); g(dir, 'add', '.'); g(dir, 'commit', '-qm', 'tail')
+  const one = collectChange(dir, { maxBytes: 200 })
+  await writeFile(join(dir, 'zz.js'), 'tail two\n'); g(dir, 'commit', '-qam', 'tail 2')
+  const two = collectChange(dir, { maxBytes: 200 })
+  assert.equal(one.truncated && two.truncated, true)
+  assert.equal(one.diff, two.diff, 'what the model would see is identical')
+  assert.notEqual(one.bundleHash, two.bundleHash)
+})
+
 test('e2e: real fetch -> deny on a blocking finding; identical diff is served from cache', async () => {
   const dir = await makeRepo()
   const srv = await stubServer(() => [200, responseWith({ summary: 'one bug', findings: [F({ file: 'app.js', line: 1 })] })])
@@ -724,6 +738,16 @@ test('pre-push: an existing remote ref is the base, so a push the default base a
     'the rewind was reviewed and blocked')
   const r = await rewind.record()
   assert.ok(r.stdin.split('\n').some((l) => l.startsWith('-') && l.includes('db.query')), 'the removed lines were sent')
+  // A nonzero remote tip this clone does not have is refused, not reviewed against a guess.
+  const other = await mkdtemp(join(tmpdir(), 'luna-gate-other-'))
+  g(other, 'clone', '-q', remote, '.'); g(other, 'checkout', '-q', 'ctl')
+  await writeFile(join(other, 'theirs.js'), 'x\n'); g(other, 'add', '.'); g(other, 'commit', '-qm', 'theirs'); g(other, 'push', '-q', 'origin', 'ctl')
+  const unseen = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
+  let msg = ''
+  try { execFileSync('git', ['push', '-q', '-f', 'origin', 'feat:ctl'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: unseen.bin }, stdio: 'pipe' }) }
+  catch (e) { msg = String(e.stderr) }
+  assert.match(msg, /which this clone lacks; fetch/)
+  await assert.rejects(unseen.record(), 'nothing was reviewed against a substitute base')
   // A brand-new remote ref still works (default base, no empty --from argument).
   const clean = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
   execFileSync('git', ['push', '-q', 'origin', 'feat:brand-new'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: clean.bin }, stdio: 'pipe' })
