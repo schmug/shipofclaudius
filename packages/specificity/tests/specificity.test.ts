@@ -29,7 +29,11 @@ const fork = (reply: string | ModelForkResult): { value: ModelForkResult } => ({
 })
 
 /** The engine beneath the plugin: a slow model answering `reply` (the fork `forkReply`), an empty transcript, and recorders. */
-function world(on: On, reply: string | ModelCompleteResult, forkReply: string | ModelForkResult = reply): World {
+type Reply = string | ModelCompleteResult
+
+/** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
+function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
+  const replies = Array.isArray(reply) ? [...reply] : null
   const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [] }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
@@ -39,7 +43,7 @@ function world(on: On, reply: string | ModelCompleteResult, forkReply: string | 
   on('model.complete', async () => {
     w.modelCalls += 1
     await w.clock.sleep(SLOW_MS)
-    return complete(reply)
+    return complete(replies === null ? (reply as Reply) : (replies.shift() ?? GOOD))
   })
   on('model.fork', async () => {
     w.modelCalls += 1
@@ -194,6 +198,40 @@ describe('prompt.submit', () => {
     await w.clock.advance(SLOW_MS)
     expect(await spec($)).toBe(NONE)
     expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+  })
+
+  test('a failed judge for the newest prompt hides the previous score', async ($, on) => {
+    const w = world(on, [GOOD, 'not json'])
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(w.statuses.at(-1)).toBe('spec 72')
+    await scored($, w, 'and the other one')
+    expect(w.modelCalls).toBe(2)
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.toasts).toEqual([])
+    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await spec($)).toContain('for "fix the bug in src/a.ts"')
+  })
+
+  test('a path-led prompt keeps its submission order', async ($, on) => {
+    const w = world(on, GOOD)
+    await submit($, '/tmp is full')
+    await submit($, 'clean out /tmp/cache older than a day')
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(w.modelCalls).toBe(2)
+    expect(await spec($)).toContain('for "clean out /tmp/cache')
+  })
+
+  test('a real slash command does not cancel the previous score', async ($, on) => {
+    const w = world(on, GOOD)
+    await submit($, 'fix the bug in src/a.ts')
+    await w.clock.settle()
+    await submit($, '/compact')
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(w.modelCalls).toBe(1)
+    expect(await spec($)).toContain('spec 72/100')
   })
 
   test('api errors and aborts are quiet', async ($, on) => {

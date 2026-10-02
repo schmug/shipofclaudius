@@ -46,25 +46,54 @@ function debug($: EngineInterface, line: string): void {
 }
 
 /**
+ * The newest prompt got no score: hide the band and clear the status line so
+ * neither shows the previous prompt's score as if it were this one's. `last`
+ * and `history` keep the previous result, which `/spec` names by its excerpt.
+ */
+async function quiet($: EngineInterface, isStale: () => boolean, why: string): Promise<void> {
+  $.ui.log(`specificity: no score (${why})`, { to: 'debug' })
+  if (isStale()) return
+  await update($, isHidden, hidden => (isStale() ? hidden : true))
+  if (!isStale()) $.ui.status(undefined)
+}
+
+/**
  * Judges one prompt and, if it is still the newest when the answer lands, writes
- * the result. `seq` is null for a prompt that looks like a slash command: it is
- * checked against the session's real commands first (`/tmp is full` is a
- * prompt, `/compact` is not) and only then takes its place in the sequence.
+ * the result. `seq` was reserved at submission, so order follows submission;
+ * `prev` is what `latest` was before, handed back when a prompt that looks like
+ * a slash command turns out to be one of the session's real commands
+ * (`/compact`), so running a command never cancels the last prompt's score.
  */
 async function score(
   $: EngineInterface,
   prompt: string,
-  seq: number | null,
+  seq: number,
+  prev: number,
   mode: 'haiku' | 'fork',
   contextMessages: number,
 ): Promise<void> {
-  if (seq === null) {
-    const name = slashName(prompt)
-    if (name !== null && (await $.command.list()).some(c => c.name === name)) return
-    seq = ++latest
+  const isStale = () => seq !== latest
+  try {
+    await judgeAndWrite($, prompt, seq, prev, isStale, mode, contextMessages)
+  } catch (err: unknown) {
+    await quiet($, isStale, err instanceof Error ? err.name : 'error')
   }
-  const mine = seq
-  const isStale = () => mine !== latest
+}
+
+async function judgeAndWrite(
+  $: EngineInterface,
+  prompt: string,
+  seq: number,
+  prev: number,
+  isStale: () => boolean,
+  mode: 'haiku' | 'fork',
+  contextMessages: number,
+): Promise<void> {
+  const name = slashName(prompt)
+  if (name !== null && (await $.command.list()).some(c => c.name === name)) {
+    if (latest === seq) latest = prev
+    return
+  }
 
   const startedAt = await $.clock.now()
   let judge = mode
@@ -85,12 +114,12 @@ async function score(
   }
 
   if (!reply.isAnswered) {
-    $.ui.log(`specificity: no score (${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? '-'} ${reply.error}` : ''})`, { to: 'debug' })
+    await quiet($, isStale, `${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? '-'} ${reply.error}` : ''}`)
     return
   }
   const judged = parseJudgement(reply.text)
   if (judged === null) {
-    $.ui.log(`specificity: no score (unparseable reply, ${reply.text.length} chars)`, { to: 'debug' })
+    await quiet($, isStale, `unparseable reply, ${reply.text.length} chars`)
     return
   }
 
@@ -143,9 +172,10 @@ export const register: Register = (on, options) => {
     if (mode !== 'off' && isUserPrompt(e.origin, e.text)) {
       const prompt = e.text
       const judge = mode
-      const seq = slashName(prompt) === null ? ++latest : null
+      const prev = latest
+      const seq = ++latest
       $.clock.after(0, () => {
-        score($, prompt, seq, judge, contextMessages).catch((err: unknown) =>
+        score($, prompt, seq, prev, judge, contextMessages).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),
         )
       })
