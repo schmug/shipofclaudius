@@ -239,6 +239,23 @@ describe('prompt.submit', () => {
     expect(await spec($)).toContain('for "clean out /tmp/cache')
   })
 
+  test('a restart after a failed newest judge does not republish the older score', async ($, on) => {
+    const w = world(on, [GOOD, 'not json'])
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await scored($, w, 'and the other one')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
+
+  test('a restart republishes a visible score', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBe('spec 72')
+  })
+
   test('a real command sent while the previous judge finishes does not drop it', async ($, on) => {
     const w = world(on, GOOD)
     let release: () => void = () => {}

@@ -161,8 +161,11 @@ export const register: Register = (on, options) => {
       argumentHint: '[on|off|hide]',
       immediate: true,
     })
+    // A hidden band means the newest prompt has no visible score (Hide, /spec
+    // hide, or its judge failed): don't republish the older one on restart.
     const current = await read($, last)
-    $.ui.status(mode === 'off' || current === null ? undefined : `spec ${current.score}`)
+    const isShown = mode !== 'off' && current !== null && !(await read($, isHidden))
+    $.ui.status(isShown ? `spec ${current.score}` : undefined)
     return next(e)
   })
 
