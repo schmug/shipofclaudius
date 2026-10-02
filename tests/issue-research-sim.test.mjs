@@ -221,6 +221,14 @@ test('a web-stalled research agent times out -> that issue drops to missing, the
   assert.ok(stallLog, 'logs that #13 stalled / timed out')
 })
 
+test('default webTimeoutMs is 20 min, not 5 (#280: progressing research was killed at 5 min)', async () => {
+  const { calls } = await runScript({ args: { numbers: [12] } })
+  const line = calls.logs.find((l) => /web-stall timeout/.test(l))
+  assert.ok(line, 'the timeout is announced in the run log')
+  assert.match(line, /web-stall timeout 1200000ms/, 'default is 20 min')
+  assert.doesNotMatch(line, /timeout 300000ms/, 'no longer the 5 min default')
+})
+
 test('the fetch relay is NOT subject to the web timeout sentinel leaking into results', async () => {
   // A normal (fast) run must be unaffected by the timeout wrapper: every issue researched.
   const { result } = await runScript({ args: { numbers: [12, 14], webTimeoutMs: 5000 } })

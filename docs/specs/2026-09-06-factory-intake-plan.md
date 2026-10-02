@@ -29,7 +29,7 @@
 
 1. **Scaffold path** is `skills/factory-intake/scaffold/`, not `references/scaffold/` (spec §7, §15): the integrity test's `references/([\w.-]+)` matcher would capture `scaffold` and `readFile` a directory.
 2. **`factory-build` has two phases**, `Preflight` and `Build` (spec §6 named three: Preflight, Implement, Deploy). Implement and Deploy are one agent; a third `phase()` with no agent behind it would be decorative.
-3. **Domains are configuration, not constants** (spec §8 names `cortech.online`): the workflow takes `args.previewDomain`; the skill reads `FACTORY_PREVIEW_DOMAIN` and `FACTORY_PROD_DOMAIN` from the environment. Cory's values for those variables are the spec's hostnames.
+3. **Domains are configuration, not constants** (spec §8 names `cortech.online`): the workflow takes `args.previewDomain`; the skill reads `FACTORY_PREVIEW_DOMAIN` and `FACTORY_PROD_DOMAIN` from the environment. Schmug's values for those variables are the spec's hostnames.
 4. **The build result carries `followups[]`** (`{ title, pointer, why }`, capped) for parity with every other write actor since #188.
 5. **The preflight schema has no `key`** (spec §6 named one): the branch is the join key and is normalized in script code before it is matched, so a second field would only be a second thing to disagree.
 6. **The build agent declares no `agentType`** (spec §6 named `general-purpose`): the runtime default is write-capable, and the sim asserts only that it is not overridden to a read-only type and declares no `isolation`.

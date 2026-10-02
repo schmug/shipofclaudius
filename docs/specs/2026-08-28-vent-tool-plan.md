@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give agents a one-call, zero-gate way to report friction with Cory's own agent tooling, so that friction becomes fixable instead of evaporating at the end of a session.
+**Goal:** Give agents a one-call, zero-gate way to report friction with Schmug's own agent tooling, so that friction becomes fixable instead of evaporating at the end of a session.
 
 **Architecture:** A dual-era MCP stdio server bundled in this plugin via a root `.mcp.json` exposes one tool, `vent`, taking only `{text}`. The server auto-captures context and appends a JSON line to `~/.claude/vents.jsonl`. A weekly scheduled task clusters vents and files one issue per cluster. Protocol dispatch is a pure function (`server.mjs`) with all I/O injected, so nearly every case is unit-testable without spawning a process.
 
@@ -21,8 +21,8 @@ Every task's requirements implicitly include this section.
 - **The modern path cannot be verified against a real client** — none exists yet. Its tests prove *our* responses match the written spec, nothing more. Never describe it as verified end-to-end.
 - **All four `vent` outcomes return `isError: false`.** `isError: true` is reserved for errors a model should self-correct from; a dropped vent is not one.
 - Tool name `vent`; input is `{text}` and nothing else. Rate limit 1 per 90s and 10 per session. Sink is `~/.claude/vents.jsonl`.
-- Work on branch `feat/vent-tool` (already exists, carries the two spec commits). Commit test and implementation **together**. Conventional prefixes. End commits with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. **Never** add a `Signed-off-by` or set Cory as author.
-- **Anything under `~/.claude` is a guardrail edit and needs Cory's explicit approval before it is written.** That applies to Task 7 and to nothing else in this plan.
+- Work on branch `feat/vent-tool` (already exists, carries the two spec commits). Commit test and implementation **together**. Conventional prefixes. End commits with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. **Never** add a `Signed-off-by` or set Schmug as author.
+- **Anything under `~/.claude` is a guardrail edit and needs Schmug's explicit approval before it is written.** That applies to Task 7 and to nothing else in this plan.
 - Full gate is `npm test` from the repo root. Report counts, not "tests pass".
 
 ## File Structure
@@ -171,7 +171,7 @@ const META_VERSION = 'io.modelcontextprotocol/protocolVersion'
 export const TOOL = {
   name: 'vent',
   description:
-    "Record friction with Cory's agent tooling: a hook that blocked legitimate work, " +
+    "Record friction with Schmug's agent tooling: a hook that blocked legitimate work, " +
     'a skill that misfired, a permission denial that cost you a retry, a guardrail whose ' +
     'rule was ambiguous, a command that failed confusingly. Free text — say what happened ' +
     'and what you wanted to happen. There is no bar to clear and no format to follow; if ' +
@@ -917,7 +917,7 @@ Open a PR against `main` whose body contains the actual `npm test` output with c
 
 ### Task 7: Weekly triage task
 
-**Requires Cory's explicit approval before writing anything** — this creates persistent configuration under `~/.claude`. Present the task prompt and wait for a yes. Do not create it as part of an unattended run.
+**Requires Schmug's explicit approval before writing anything** — this creates persistent configuration under `~/.claude`. Present the task prompt and wait for a yes. Do not create it as part of an unattended run.
 
 **Files:**
 - Create: `~/.claude/scheduled-tasks/vent-triage/SKILL.md` (via the `create_scheduled_task` tool, not by hand)
@@ -936,7 +936,7 @@ If the file does not exist or is empty, **stop and say so**. A weekly task that 
 
 - [ ] **Step 2: Get approval for the scheduled task**
 
-Show Cory the exact `cronExpression`, the full prompt text from Step 3, and where the watermark lives. Wait for an explicit yes.
+Show Schmug the exact `cronExpression`, the full prompt text from Step 3, and where the watermark lives. Wait for an explicit yes.
 
 - [ ] **Step 3: Create the task**
 
@@ -945,7 +945,7 @@ Use `create_scheduled_task` with `taskId: "vent-triage"`, `cronExpression: "17 9
 - Read `~/.claude/vents.jsonl`; process only records whose `ts` is newer than the value in `~/.claude/vents.triaged`.
 - Cluster by underlying cause, not by wording. Expect roughly a 50% false-positive rate — that is the accepted cost of a zero-gate write path, so discard freely.
 - For clusters about **this plugin** (skills, workflows, its hooks): file **one** issue per cluster in `schmug/shipofclaudius`, bodied as a Claude Code prompt per the `/issue` skill.
-- For clusters about **`~/.claude`** (global `CLAUDE.md`, `settings.json` hooks, `hooks/git-push-guard.py`): file **one** issue per cluster in `schmug/dotclaude`, which has versioned `~/.claude` in place since 2026-08-30. Filing is a proposal, not an edit — guardrail changes still need Cory's approval before they land. (Revised 2026-09-02; this line previously said do-not-file, on the since-falsified grounds that `~/.claude` is not a git repo.)
+- For clusters about **`~/.claude`** (global `CLAUDE.md`, `settings.json` hooks, `hooks/git-push-guard.py`): file **one** issue per cluster in `schmug/dotclaude`, which has versioned `~/.claude` in place since 2026-08-30. Filing is a proposal, not an edit — guardrail changes still need Schmug's approval before they land. (Revised 2026-09-02; this line previously said do-not-file, on the since-falsified grounds that `~/.claude` is not a git repo.)
 - One issue per cluster, never per vent.
 - Write the newest processed `ts` to `~/.claude/vents.triaged` only after filing completes.
 - Report counts: vents read, clusters found, issues filed in `schmug/shipofclaudius`, issues filed in `schmug/dotclaude`.

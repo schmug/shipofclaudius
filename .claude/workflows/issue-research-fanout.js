@@ -108,8 +108,8 @@ const BATCH = (Number.isInteger(A.batchSize) && A.batchSize > 0) ? A.batchSize :
 // WebFetch, which can HANG during a provider stall — the documented impl-fan-out failure
 // mode. Bound each research agent so a hung web call fails ONE issue (→ missing, re-runnable)
 // instead of stalling the whole run and tripping the no-progress watchdog. 0 disables.
-// Tunable via args.webTimeoutMs (default 5 min).
-const WEB_TIMEOUT_MS = (Number.isInteger(A.webTimeoutMs) && A.webTimeoutMs >= 0) ? A.webTimeoutMs : 300000
+// Tunable via args.webTimeoutMs (default 20 min — real research made progress past 5 min, #280; the runtime exposes no per-tool-call progress signal, so this stays a wall-clock bound).
+const WEB_TIMEOUT_MS = (Number.isInteger(A.webTimeoutMs) && A.webTimeoutMs >= 0) ? A.webTimeoutMs : 1200000
 const TIMED_OUT = { __spineTimedOut: true }
 
 // withTimeout: resolve to the sentinel TIMED_OUT if `promise` does not settle within `ms`.
