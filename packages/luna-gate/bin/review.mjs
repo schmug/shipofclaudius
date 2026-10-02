@@ -57,6 +57,7 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
   }
   if (o.kind === 'skip') { if (!a.json) out(`luna-gate: skipped${o.note ? ` — ${o.note}` : ''}`); return 0 }
   if (o.kind === 'acked') { if (!a.json) out('luna-gate: change acknowledged by the user; not re-reviewed.'); return 0 }
+  if (o.kind === 'reject') { err(`luna-gate: not reviewed: ${o.message}`); return 1 }
   if (o.kind === 'error') {
     err(`luna-gate: review failed: ${o.message}`)
     return cfg.onError === 'closed' ? 2 : 0

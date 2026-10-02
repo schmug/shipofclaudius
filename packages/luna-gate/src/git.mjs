@@ -46,12 +46,30 @@ export function resolveBase(cwd, name) {
   return null
 }
 
+// With --head, gh skips pushing and opens the PR from the branch as it is on the remote,
+// so the remote-tracking ref comes first. (A stale tracking ref is the residual risk.)
+// `owner:branch` is rejected by collectChange before this is reached.
 export function resolveHead(cwd, name) {
   if (!name) return 'HEAD'
-  // `--head owner:branch` (fork syntax) — only the branch part is meaningful locally.
-  const branch = name.includes(':') ? name.slice(name.indexOf(':') + 1) : name
-  for (const c of [branch, `origin/${branch}`]) if (isCommit(cwd, c)) return c
+  for (const c of [`origin/${name}`, name]) if (isCommit(cwd, c)) return c
   return null
+}
+
+// gh's own fallback when --base is omitted: `branch.<head>.gh-merge-base`, then the
+// target repo's default branch (origin/HEAD and friends, in resolveBase).
+export function ghMergeBase(cwd, head) {
+  const branch = head || tryGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  return branch ? tryGit(cwd, ['config', '--get', `branch.${branch}.gh-merge-base`]) || null : null
+}
+
+// Does `-R [HOST/]OWNER/REPO` name the repository `origin` points at?
+export function sameRepo(repoFlag, remoteUrl) {
+  const parts = String(repoFlag).toLowerCase().replace(/\.git$/, '').split('/')
+  if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p)) return false
+  const [owner, repo] = parts.slice(-2)
+  const host = parts.length === 3 ? parts[0] : 'github.com'
+  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(String(remoteUrl).toLowerCase())
+  return !!m && m[1] === host && m[2] === owner && m[3] === repo
 }
 
 export const repoRoot = (cwd) => tryGit(cwd, ['rev-parse', '--show-toplevel'])
@@ -77,9 +95,18 @@ export function optedOut(cwd, ref) {
   try { return JSON.parse(raw)?.enabled === false } catch { return false }
 }
 
-export function collectChange(cwd, { base = null, head = null, maxBytes }) {
+// `reject`: gh would open the PR from refs this machine cannot see, so reviewing local
+// refs would review a substitute. Not an error to fail open on; block mode denies it.
+export function collectChange(cwd, { base = null, head = null, repo = null, maxBytes }) {
   const root = repoRoot(cwd)
   if (!root) return { error: 'not inside a git repository' }
+  if (head && head.includes(':')) {
+    return { reject: `\`--head ${head}\` names a branch in another user's repository, which luna-gate cannot review locally` }
+  }
+  if (repo && !sameRepo(repo, originUrl(root))) {
+    return { reject: `\`--repo ${repo}\` is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
+  }
+  if (!base) base = ghMergeBase(root, head)
   const baseRef = resolveBase(root, base)
   if (!baseRef) return { error: `could not resolve a base branch${base ? ` for "${base}"` : ''}` }
   const headRef = resolveHead(root, head)

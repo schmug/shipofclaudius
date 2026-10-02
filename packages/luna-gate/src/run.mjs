@@ -29,8 +29,9 @@ export function remoteSkipped(cfg, remote) {
   return re.test(remote) ? { skip: true, note: null } : { skip: false }
 }
 
-export async function prepare({ cwd, base, head, cfg }) {
-  const change = collectChange(cwd, { base, head, maxBytes: cfg.maxBytes })
+export async function prepare({ cwd, base, head, repo = null, cfg }) {
+  const change = collectChange(cwd, { base, head, repo, maxBytes: cfg.maxBytes })
+  if (change.reject) return { outcome: { kind: 'reject', message: change.reject } }
   if (change.error) return { outcome: { kind: 'error', message: change.error } }
   const rs = remoteSkipped(cfg, change.remote)
   if (rs.skip) return { outcome: { kind: 'skip', note: rs.note } }
@@ -52,8 +53,8 @@ export async function writeAck(cfg, change) {
   await writeFile(ackPath(cfg, change.ackKey), `${change.mergeBase}..${change.headSha}\n${new Date().toISOString()}\n`)
 }
 
-export async function review({ cwd, base = null, head = null, cfg, fetchImpl, useCache = true }) {
-  const prep = await prepare({ cwd, base, head, cfg })
+export async function review({ cwd, base = null, head = null, repo = null, cfg, fetchImpl, useCache = true }) {
+  const prep = await prepare({ cwd, base, head, repo, cfg })
   if (prep.outcome) return prep.outcome
   const { change } = prep
 

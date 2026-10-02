@@ -11,7 +11,7 @@
 import { readSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfig } from '../src/config.mjs'
-import { parsePrCreate } from '../src/command.mjs'
+import { findPrCreates } from '../src/command.mjs'
 import { review } from '../src/run.mjs'
 import { hookOutput } from '../src/decide.mjs'
 
@@ -40,13 +40,19 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   if (!event || event.tool_name !== 'Bash') return null
   const cfg = loadConfig(env)
   if (cfg.mode === 'off') return null
-  const pr = parsePrCreate(event.tool_input?.command)
-  if (!pr) return null
+  const prs = findPrCreates(event.tool_input?.command)
+  if (!prs.length) return null
   let outcome
-  try {
-    outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, cfg, fetchImpl })
-  } catch (e) {
-    outcome = { kind: 'error', message: e?.message || String(e) }
+  if (prs.length > 1) {
+    // One review covers one range; approving the first would let the rest through unreviewed.
+    outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
+  } else {
+    const [pr] = prs
+    try {
+      outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, repo: pr.repo, cfg, fetchImpl })
+    } catch (e) {
+      outcome = { kind: 'error', message: e?.message || String(e) }
+    }
   }
   const out = hookOutput(cfg, outcome, { ackCommand: `node ${JSON.stringify(REVIEW_BIN)} --ack` })
   return out ? JSON.stringify(out) : null

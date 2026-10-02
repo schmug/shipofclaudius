@@ -76,7 +76,10 @@ function skipHeredocBodies(s, nl, pending) {
 // A small POSIX-ish tokenizer: quotes, backslashes, `$(...)` and heredocs are honoured,
 // and unquoted separators become `{ sep }` objects so they can never be confused with an
 // argument that happens to be the string ";".
-export function tokenize(s) {
+//
+// `subs` collects the inner text of every `$(...)` and backtick substitution, so the caller
+// can look inside them too: opaque for flag parsing, not for finding a hidden `gh pr create`.
+export function tokenize(s, subs = []) {
   const out = []
   let cur = ''
   let has = false
@@ -87,6 +90,14 @@ export function tokenize(s) {
     const c = s[i]
     if (c === '$' && s[i + 1] === '(' && q !== "'") {
       const j = skipSubst(s, i)
+      subs.push(s.slice(i + 2, j - 1))
+      cur += s.slice(i, j); has = true; i = j - 1
+      continue
+    }
+    if (c === '`' && q !== "'") {
+      const e = s.indexOf('`', i + 1)
+      const j = e < 0 ? s.length : e + 1
+      subs.push(s.slice(i + 1, e < 0 ? s.length : e))
       cur += s.slice(i, j); has = true; i = j - 1
       continue
     }
@@ -111,30 +122,40 @@ export function tokenize(s) {
 // gh pr create flags that take a separate value. Their value is skipped, so a title like
 // `--title "-Hotfix"` is never misread as `-H otfix`.
 const VALUE_FLAGS = new Set(['--title', '-t', '--body', '-b', '--body-file', '-F', '--assignee', '-a',
-  '--label', '-l', '--milestone', '-m', '--project', '-p', '--reviewer', '-r', '--repo', '-R',
+  '--label', '-l', '--milestone', '-m', '--project', '-p', '--reviewer', '-r',
   '--template', '-T', '--recover'])
 
 const isGh = (t) => typeof t === 'string' && (t === 'gh' || t.endsWith('/gh'))
 
-// Returns null when the command does not run `gh pr create`; otherwise { base, head },
-// each a string or null.
-export function parsePrCreate(command) {
-  if (typeof command !== 'string' || !command.includes('create')) return null
-  const t = tokenize(command)
+const FLAGS = [['base', '--base', '-B'], ['head', '--head', '-H'], ['repo', '--repo', '-R']]
+
+// Every `gh pr create` the command would run, including inside `$(...)` / backticks, as
+// { base, head, repo } (each a string or null). Empty when there is none.
+export function findPrCreates(command, depth = 0) {
+  if (typeof command !== 'string' || !command.includes('create') || depth > 8) return []
+  const subs = []
+  const t = tokenize(command, subs)
+  const all = []
   for (let i = 0; i + 2 < t.length; i++) {
     if (!(isGh(t[i]) && t[i + 1] === 'pr' && t[i + 2] === 'create')) continue
-    const found = { base: null, head: null }
+    const found = { base: null, head: null, repo: null }
     for (let j = i + 3; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null
       if (VALUE_FLAGS.has(a)) { j++; continue }
-      for (const [key, long, short] of [['base', '--base', '-B'], ['head', '--head', '-H']]) {
+      for (const [key, long, short] of FLAGS) {
         if (a === long || a === short) { if (next) { found[key] = next; j++ } }
         else if (a.startsWith(long + '=')) found[key] = a.slice(long.length + 1)
         else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) found[key] = a.slice(2)
       }
     }
-    return found
+    all.push(found)
   }
-  return null
+  for (const sub of subs) all.push(...findPrCreates(sub, depth + 1))
+  return all
+}
+
+// The first `gh pr create`, or null.
+export function parsePrCreate(command) {
+  return findPrCreates(command)[0] ?? null
 }

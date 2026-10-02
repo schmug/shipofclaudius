@@ -3,6 +3,9 @@ import { SEVERITIES, CONFIDENCES } from './config.mjs'
 
 export const MAX_FINDINGS = 25
 const clip = (v, n) => (typeof v === 'string' ? (v.length > n ? v.slice(0, n) + '…' : v) : '')
+// Error text from the endpoint (or a proxy at OPENAI_BASE_URL) and refusal text from the
+// model both end up in messages Claude reads unfenced, so only a code-shaped token is kept.
+const code = (v) => (typeof v === 'string' && /^[a-z0-9_.-]{1,64}$/i.test(v) ? ` (${v})` : '')
 
 // The model's JSON is validated, clamped and re-built field by field: it is derived from
 // untrusted input, so nothing in it is passed through by reference or trusted for shape.
@@ -29,16 +32,15 @@ export function validateReview(obj) {
 
 export function parseResponse(json) {
   if (!json || typeof json !== 'object') throw new Error('empty response body')
-  if (json.error) throw new Error(`OpenAI error: ${clip(json.error.message || JSON.stringify(json.error), 300)}`)
+  if (json.error) throw new Error(`OpenAI error${code(json.error.code) || code(json.error.type)}`)
   if (json.status && json.status !== 'completed') {
-    const why = json.incomplete_details?.reason
-    throw new Error(`response ${json.status}${why ? ` (${why})` : ''}`)
+    throw new Error(`response ${code(json.status) ? json.status : 'not completed'}${code(json.incomplete_details?.reason)}`)
   }
   let text = ''
   for (const item of json.output || []) {
     if (item?.type !== 'message') continue
     for (const c of item.content || []) {
-      if (c?.type === 'refusal') throw new Error(`model refused: ${clip(c.refusal, 200)}`)
+      if (c?.type === 'refusal') throw new Error('model refused to review this change')
       if (c?.type === 'output_text' && typeof c.text === 'string') text += c.text
     }
   }
@@ -64,7 +66,7 @@ export async function callResponses(body, cfg, fetchImpl = globalThis.fetch) {
   const raw = await res.text()
   let json = null
   try { json = JSON.parse(raw) } catch { /* fall through */ }
-  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}: ${clip(json?.error?.message || raw, 300)}`)
+  if (!res.ok) throw new Error(`OpenAI HTTP ${res.status}${code(json?.error?.code) || code(json?.error?.type)}`)
   return parseResponse(json)
 }
 

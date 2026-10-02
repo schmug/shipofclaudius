@@ -388,7 +388,14 @@ For a git pre-push hook (for example via `git config --global core.hooksPath`):
 exec node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs
 ```
 
-**What gets sent.** The diff from `merge-base(base, head)` to `head`, using `--function-context` so each changed hunk arrives inside its whole function, plus the full post-change contents of the changed files, smallest first, within a byte budget. The base comes from `gh pr create --base`, falling back to `origin/HEAD`. **Credential-shaped files** (`.env*`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.dev.vars`, `*.tfstate`, ...) are excluded at the git pathspec level, and so are lockfiles and minified bundles. The excludes ignore case, because git pathspecs are case-sensitive even on a case-insensitive volume. The model gets the *names* of withheld files, never their bytes, and those names are fenced like the diff, since an attacker chooses them too. API requests are sent with `store: false`; codex runs are `--ephemeral`.
+**What gets sent.** The diff from `merge-base(base, head)` to `head`, using `--function-context` so each changed hunk arrives inside its whole function, plus the full post-change contents of the changed files, smallest first, within a byte budget. Refs are resolved the way `gh` resolves them. The base comes from `--base`, then `branch.<head>.gh-merge-base`, then `origin/HEAD`. With `--head`, gh pushes nothing, so the remote-tracking `origin/<head>` is reviewed ahead of the local branch. **Credential-shaped files** (`.env*`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.dev.vars`, `*.tfstate`, ...) are excluded at the git pathspec level, and so are lockfiles and minified bundles. The excludes ignore case, because git pathspecs are case-sensitive even on a case-insensitive volume. The model gets the *names* of withheld files, never their bytes, and those names are fenced like the diff, since an attacker chooses them too. API requests are sent with `store: false`; codex runs are `--ephemeral`.
+
+**Commands it will not review.** Some commands carry a change the gate cannot see faithfully, so reviewing local refs would mean reviewing a substitute:
+- a fork head (`--head owner:branch`);
+- `-R` naming a repository other than `origin`;
+- more than one `gh pr create` in one Bash call, including any inside `$(...)` or backticks.
+
+In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
 
 **Configuration** is environment-only:
 

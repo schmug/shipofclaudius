@@ -35,9 +35,24 @@ export function summaryLine(cfg, o) {
     (extra.length ? ` [${extra.join(', ')}]` : '')
 }
 
-// outcome.kind: skip | error | acked | reviewed
+// outcome.kind: skip | error | reject | acked | reviewed
+// `reject` is a command the gate cannot review faithfully (two PR creations in one call,
+// a fork head, another repo). Retrying will not help, so block mode denies it outright.
 export function hookOutput(cfg, o, { ackCommand = 'node <plugin>/packages/luna-gate/bin/review.mjs --ack' } = {}) {
   if (o.kind === 'skip') return o.note ? { systemMessage: `luna-gate: ${o.note}` } : null
+  if (o.kind === 'reject') {
+    if (cfg.mode !== 'block') return { systemMessage: `luna-gate: not reviewed: ${o.message}.` }
+    return {
+      systemMessage: `luna-gate: not reviewed: ${o.message}; blocked.`,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: `luna-gate did not let this through: ${o.message}. ` +
+          'Run a single `gh pr create` per command, from this checkout\'s own branches, so the reviewed change is the one the PR carries. ' +
+          'If that is not possible, tell the user; they can open the PR themselves. Do not try to route around the gate.',
+      },
+    }
+  }
   if (o.kind === 'acked') return { systemMessage: 'luna-gate: this exact change was acknowledged by the user; not re-reviewed.' }
   if (o.kind === 'error') {
     if (cfg.mode === 'block' && cfg.onError === 'closed') {
