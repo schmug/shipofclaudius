@@ -349,7 +349,7 @@ jobs:
             base="$(gh pr view "$pr" --repo "$TARGET_REPO" --json baseRefName --jq .baseRefName)"
             head_sha="$(gh pr view "$pr" --repo "$TARGET_REPO" --json headRefOid --jq .headRefOid)"
 
-            rm -f factory-evidence.json
+            rm -f factory-evidence.json gate-input.json verdict.json comment.md head-mismatch-comment.md
             run_id="$(gh run list --repo "$TARGET_REPO" --commit "$head_sha" --event pull_request --json databaseId --limit 1 --jq '.[0].databaseId')"
             if [ -n "${run_id:-}" ] && [ "$run_id" != "null" ]; then
               gh run download "$run_id" --repo "$TARGET_REPO" --name factory-evidence --dir . || true
@@ -359,6 +359,20 @@ jobs:
               --pr "$pr" --repo "$TARGET_REPO" --base "$base" --out gate-input.json \
               $( [ -f factory-evidence.json ] && echo "--evidence factory-evidence.json" ) || {
                 echo "::warning::build-input failed for #$pr — skipped."; echo "::endgroup::"; continue; }
+
+            # Bind to the head build-input ITSELF recorded (pr.headSha), not to the separate read
+            # above: between two independent reads a push-then-revert (H1 -> H2 -> H1) lets the gate
+            # judge H2 while --match-head-commit still holds H1 and succeeds. Requiring the two
+            # reads to agree also keeps the fixture evidence fetched for $head_sha tied to the head
+            # the gate judges. Absent or different -> skip this PR this sweep; never guess a SHA.
+            judged_sha="$(node -e '
+              const d = JSON.parse(require("node:fs").readFileSync("gate-input.json", "utf8"))
+              process.stdout.write((d.pr && typeof d.pr.headSha === "string") ? d.pr.headSha : "")
+            ' 2>/dev/null || true)"
+            if [ -z "${judged_sha:-}" ] || [ "$judged_sha" != "$head_sha" ]; then
+              echo "::warning::#$pr head moved during the sweep (read $head_sha, gate input ${judged_sha:-missing}) — skipped; the next sweep gates the current head."
+              echo "::endgroup::"; continue
+            fi
 
             code=0
             node .factory-plugin/packages/factory-gate/bin/gate.mjs \
@@ -371,14 +385,14 @@ jobs:
 
             if [ "$code" = "0" ]; then
               # Never --admin, never --delete-branch: identical to the labelled path.
-              # --match-head-commit binds this merge to $head_sha — the exact head build-input read
-              # a few lines up, and the same head the gate above judged. A push landing between that
+              # --match-head-commit binds this merge to $judged_sha — the head build-input recorded in
+              # gate-input.json, which is the head the gate above judged. A push landing between that
               # read and this call moves the PR's real head, and the merge is refused rather than
               # squash-merging a commit the gate never saw.
-              if ! gh pr merge "$pr" --repo "$TARGET_REPO" --squash --match-head-commit "$head_sha"; then
-                echo "::error::Merge refused for #$pr — the PR head changed after the gate judged $head_sha."
+              if ! gh pr merge "$pr" --repo "$TARGET_REPO" --squash --match-head-commit "$judged_sha"; then
+                echo "::error::Merge refused for #$pr — the PR head changed after the gate judged $judged_sha."
                 printf '### Factory gate — ⛔ escalate\n\nThe gate approved head `%s`, but the merge was refused because the PR head changed before the merge ran (`--match-head-commit` mismatch). Escalating rather than merging the new head unreviewed — re-run the sweep to gate the current head.\n' \
-                  "$head_sha" > head-mismatch-comment.md
+                  "$judged_sha" > head-mismatch-comment.md
                 gh pr comment "$pr" --repo "$TARGET_REPO" --body-file head-mismatch-comment.md || true
                 gh pr edit "$pr" --repo "$TARGET_REPO" --add-label needs-you || true
               fi
@@ -487,12 +501,15 @@ jobs:
           # Record the exact head build-input just read the PR at — never the (possibly already
           # stale, per the step above) event SHA. The merge below is bound to THIS value, not to
           # `github.event.pull_request.head.sha`.
+          #
+          # A missing headSha must NOT fail this step: under `-e` that would skip the gate and,
+          # with it, the audit comment and both escalation steps, leaving the PR red with no
+          # explanation. Record it empty instead; the merge step refuses an empty SHA and the
+          # head-mismatch escalation below explains why.
           head_sha="$(node -e '
-            const fs = require("node:fs")
-            const d = JSON.parse(fs.readFileSync("gate-input.json", "utf8"))
-            if (!d.pr || !d.pr.headSha) process.exit(1)
-            process.stdout.write(d.pr.headSha)
-          ')"
+            const d = JSON.parse(require("node:fs").readFileSync("gate-input.json", "utf8"))
+            process.stdout.write((d.pr && typeof d.pr.headSha === "string") ? d.pr.headSha : "")
+          ' || true)"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
       # Exit 0 = merge, 2 = escalate, 1 = the gate itself broke. Three DISTINCT codes on purpose:
@@ -536,6 +553,7 @@ jobs:
         if: steps.gate.outputs.code == '0'
         env:
           GH_TOKEN: ${{ secrets.FACTORY_GH_TOKEN }}
+          JUDGED_SHA: ${{ steps.build-input.outputs.head_sha }}
         run: |
           set -uo pipefail
           # No --admin (it would bypass the very protections the gate mirrors) and no
@@ -544,9 +562,14 @@ jobs:
           # a push landing between that read and this call moves the PR's real head, and the merge
           # is refused rather than squash-merging a commit the gate never judged.
           rc=0
-          gh pr merge "${{ github.event.pull_request.number }}" \
-            --repo "${{ github.repository }}" --squash \
-            --match-head-commit "${{ steps.build-input.outputs.head_sha }}" || rc=$?
+          if [ -z "$JUDGED_SHA" ]; then
+            echo "::error::build-input recorded no head SHA — refusing to merge an unbound head."
+            rc=1
+          else
+            gh pr merge "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" --squash \
+              --match-head-commit "$JUDGED_SHA" || rc=$?
+          fi
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Escalate a head-mismatch refusal
@@ -558,11 +581,11 @@ jobs:
           WAS_DRAFT: ${{ github.event.pull_request.draft }}
           JUDGED_SHA: ${{ steps.build-input.outputs.head_sha }}
         run: |
-          set -euo pipefail
-          echo "::error::Merge refused — the PR head changed after the gate judged $JUDGED_SHA."
-          printf '### Factory gate — ⛔ escalate\n\nThe gate approved head `%s`, but the merge was refused because the PR head changed before the merge ran (`--match-head-commit` mismatch). Escalating rather than merging the new head unreviewed — this run will not retry against the new head; re-apply `fix-verified` (or wait for the next sweep) to gate it.\n' \
-            "$JUDGED_SHA" > head-mismatch-comment.md
-          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body-file head-mismatch-comment.md
+          set -uo pipefail
+          echo "::error::Merge refused — the PR head changed after the gate judged ${JUDGED_SHA:-an unrecorded head}."
+          printf '### Factory gate — ⛔ escalate\n\nThe gate approved head `%s`, but the merge was refused because the PR head changed before the merge ran (`--match-head-commit` mismatch), or the head the gate judged was never recorded. Escalating rather than merging the new head unreviewed — this run will not retry against the new head; re-apply `fix-verified` (or wait for the next sweep) to gate it.\n' \
+            "${JUDGED_SHA:-unrecorded}" > head-mismatch-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body-file head-mismatch-comment.md || true
           gh pr edit "$PR_NUMBER" --repo "$TARGET_REPO" --add-label needs-you || true
           # Put it back in draft so the write ladder still ends at a draft when the merge is refused.
           if [ "$WAS_DRAFT" = "true" ]; then

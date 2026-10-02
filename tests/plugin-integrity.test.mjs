@@ -371,6 +371,25 @@ test('factory.yml: both merge calls bind to the exact head the gate judged (#267
     'both jobs label a refused/escalated PR needs-you')
 })
 
+test('factory.yml: the bound SHA is the one build-input recorded, and a missing one never aborts silently (#267)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  // land-sweep: a second, independent headRefOid read is an ABA window (H1 -> H2 -> H1 lets the
+  // gate judge H2 while --match-head-commit H1 still succeeds). Bind to gate-input.json's headSha,
+  // and require it to agree with the read the fixture evidence was fetched for.
+  const sweep = jobs['land-sweep']
+  assert.match(sweep, /--match-head-commit "\$judged_sha"/, 'land-sweep binds to the SHA build-input recorded')
+  assert.ok(!/--match-head-commit "\$head_sha"/.test(sweep), 'land-sweep never binds to its own separate headRefOid read')
+  assert.match(sweep, /"\$judged_sha" != "\$head_sha"/, 'land-sweep skips a PR whose two head reads disagree')
+  assert.match(sweep, /rm -f [^\n]*comment\.md/, "land-sweep clears the previous PR's comment.md before gating the next")
+  // land: under bash -e, a process.exit(1) on a null headSha kills the build-input step, which
+  // skips the gate and every always()-guarded audit/escalation step after it.
+  const land = jobs.land
+  assert.ok(!/process\.exit\(1\)/.test(land), 'a missing headSha must not fail the build-input step')
+  assert.match(land, /if \[ -z "\$JUDGED_SHA" \]/, 'the merge step refuses an empty judged SHA')
+  assert.ok(!/--match-head-commit "\$\{\{/.test(land), 'the judged SHA reaches run: via env, not ${{ }} interpolation')
+})
+
 test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
   const y = await factoryYml()
   // Previously a flat "never appears" ban. #64 needs the PR body to pick the fixture test, and the
