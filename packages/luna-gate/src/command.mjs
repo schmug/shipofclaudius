@@ -40,35 +40,45 @@ function skipDouble(s, i) {
 }
 
 // At `<<` (or `<<-`): records the delimiter in `pending`, returns the index after it.
+// `quoted`: any quoting in the delimiter makes the body literal; otherwise the shell
+// expands `$(...)` and backticks in it before the command runs.
 function readHeredocDelim(s, i, pending) {
   let k = i + 2
   const strip = s[k] === '-'
   if (strip) k++
   while (s[k] === ' ' || s[k] === '\t') k++
   let word = ''
+  let quoted = false
   while (k < s.length && !/[\s;&|()<>]/.test(s[k])) {
     const c = s[k]
-    if (c === "'" || c === '"') { const e = s.indexOf(c, k + 1); const end = e < 0 ? s.length : e; word += s.slice(k + 1, end); k = end + 1; continue }
-    if (c === '\\') { word += s[k + 1] ?? ''; k += 2; continue }
+    if (c === "'" || c === '"') { quoted = true; const e = s.indexOf(c, k + 1); const end = e < 0 ? s.length : e; word += s.slice(k + 1, end); k = end + 1; continue }
+    if (c === '\\') { quoted = true; word += s[k + 1] ?? ''; k += 2; continue }
     word += c; k++
   }
-  if (word) pending.push({ word, strip })
+  if (word) pending.push({ word, strip, quoted })
   return k
 }
 
 // At the newline that ends a line with pending heredocs: returns the index of the
 // newline after the last body's delimiter line (or s.length), emptying `pending`.
-function skipHeredocBodies(s, nl, pending) {
+// An UNQUOTED body that contains `$(` or a backtick is pushed onto `expand`: the shell
+// runs those substitutions, so the caller must count them as commands.
+function skipHeredocBodies(s, nl, pending, expand = null) {
   let k = nl
   while (pending.length) {
-    const { word, strip } = pending.shift()
+    const { word, strip, quoted } = pending.shift()
+    const start = k + 1
+    let bodyEnd = s.length
     for (;;) {
-      if (k >= s.length) { pending.length = 0; return s.length }
+      if (k >= s.length) { pending.length = 0; break }
       const end = s.indexOf('\n', k + 1)
       const line = s.slice(k + 1, end < 0 ? s.length : end)
+      if ((strip ? line.replace(/^\t+/, '') : line) === word) { bodyEnd = k; k = end < 0 ? s.length : end; break }
       k = end < 0 ? s.length : end
-      if ((strip ? line.replace(/^\t+/, '') : line) === word) break
     }
+    const body = s.slice(start, bodyEnd)
+    if (expand && !quoted && /\$\(|`/.test(body)) expand.push(body)
+    if (k >= s.length) return s.length
   }
   return k
 }
@@ -77,9 +87,11 @@ function skipHeredocBodies(s, nl, pending) {
 // and unquoted separators become `{ sep }` objects so they can never be confused with an
 // argument that happens to be the string ";".
 //
-// `subs` collects the inner text of every `$(...)` and backtick substitution, so the caller
-// can look inside them too: opaque for flag parsing, not for finding a hidden `gh pr create`.
-export function tokenize(s, subs = []) {
+// `subs` collects the inner text of every `$(...)` and backtick substitution (and every
+// unquoted heredoc body that contains one), so the caller can look inside them too: opaque
+// for flag parsing, not for finding a hidden `gh pr create` or a command.
+// `meta.redirect` is set when an unquoted `>` or `<` (other than a heredoc) appears.
+export function tokenize(s, subs = [], meta = {}) {
   const out = []
   let cur = ''
   let has = false
@@ -112,11 +124,12 @@ export function tokenize(s, subs = []) {
     if (c === "'" || c === '"') { q = c; has = true; continue }
     if (c === '\\' && i + 1 < s.length) { cur += s[++i]; has = true; continue }
     if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') { flush(); i = readHeredocDelim(s, i, pending) - 1; continue }
-    if (c === '\n' && pending.length) { flush(); out.push({ sep: c }); i = skipHeredocBodies(s, i, pending) - 1; continue }
+    if (c === '\n' && pending.length) { flush(); out.push({ sep: c }); i = skipHeredocBodies(s, i, pending, subs) - 1; continue }
     // `2>&1`, `&>file`, `>&2` are redirections, not a background `&`.
     if (c === '&' && (s[i - 1] === '>' || s[i - 1] === '<' || s[i + 1] === '>')) { cur += c; continue }
     if (SEPS.has(c)) { flush(); out.push({ sep: c }); continue }
     if (/\s/.test(c)) { flush(); continue }
+    if (c === '>' || c === '<') meta.redirect = true
     cur += c
   }
   flush()
@@ -130,8 +143,9 @@ const firstWord = (toks) => toks.find((x) => typeof x === 'string' && !/^[A-Za-z
 // How many commands the line runs (separator-delimited, non-empty). The hook reviews refs
 // as they are BEFORE the Bash call, so anything running alongside `gh pr create` (a `cd`,
 // `git checkout`, `git commit`) can change what the PR carries. That includes commands in
-// `$(...)` / backticks, which run during expansion, before gh; only a single text-only
-// command (cat/echo/printf) inside one is free.
+// `$(...)` / backticks (and unquoted heredoc bodies), which run during expansion, before
+// gh. Only a single cat/echo/printf with no redirection and no nested substitution is
+// free: the `--body "$(cat <<'EOF' ...)"` idiom.
 export function commandCount(command, depth = 0) {
   const subs = []
   const toks = tokenize(String(command), subs)
@@ -142,8 +156,11 @@ export function commandCount(command, depth = 0) {
   }
   for (const sub of subs) {
     const inner = commandCount(sub, depth + 1)
-    const word = firstWord(tokenize(sub))
-    if (depth > 8 || inner > 1 || (inner === 1 && !TEXT_ONLY.has(word))) n += Math.max(inner, 1)
+    const meta = {}
+    const nested = []
+    const word = firstWord(tokenize(sub, nested, meta))
+    const free = inner === 1 && TEXT_ONLY.has(word) && !meta.redirect && !nested.length
+    if (depth > 8 || (inner > 0 && !free)) n += Math.max(inner, 1)
   }
   return n
 }

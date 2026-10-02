@@ -99,6 +99,12 @@ test('commandCount: redirections and heredoc bodies are one command; separators 
   assert.equal(commandCount('gh pr create -t "`git switch risky`"'), 2)
   assert.equal(commandCount('gh pr create -t "$(echo hi)" --body "$(cat <<\'EOF\'\nx\nEOF\n)"'), 1, 'text-only substitutions are free')
   assert.equal(commandCount('gh pr \\\ncreate --fill'), 1)
+  assert.ok(commandCount('gh pr create -F - <<EOF\n$(git checkout risky)\nEOF') > 1, 'an unquoted heredoc body is expanded')
+  assert.equal(commandCount('gh pr create -F - <<EOF\nplain, $HOME is fine\nEOF'), 1)
+  assert.equal(commandCount('gh pr create -F - <<\'EOF\'\n$(git checkout risky)\nEOF'), 1, 'a quoted delimiter makes the body literal')
+  assert.ok(commandCount('gh pr create -t "$(printf abc > .git/refs/heads/feature)"') > 1, 'a redirect is a side effect')
+  assert.ok(commandCount('gh pr create --body "$(cat <<EOF\nhi $(git checkout x)\nEOF\n)"') > 1)
+  assert.ok(commandCount('gh pr create -t "$(echo $(git switch x))"') > 1)
 })
 
 test('sameRepo: -R matches origin across URL forms, and nothing else', () => {
@@ -671,6 +677,29 @@ test('pre-push: the README snippet reviews the pushed ref, not the checked-out b
   const env = { ...(await codexEnv(fake.bin)), LUNA_GATE: '', LUNA_GATE_SKIP_REMOTE: remote.split('/').pop() }
   execFileSync('git', ['push', '-q', 'employer', 'feat'], { cwd: dir, env, stdio: 'pipe' })
   await assert.rejects(fake.record(), 'nothing was sent for a skip-listed push remote')
+})
+
+test('pre-push: an existing remote ref is the base, so a push the default base already contains is still reviewed', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  const snippet = readme.match(/```sh\n(#!\/bin\/sh\n[^`]*?review\.mjs[^`]*?)```/)[1]
+    .replace('/absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs', fileURLToPath(new URL('../packages/luna-gate/bin/review.mjs', import.meta.url)))
+  const dir = await makeRepo()   // main = base commit B, feat = risky commit F
+  const remote = await mkdtemp(join(tmpdir(), 'luna-gate-remote-'))
+  g(remote, 'init', '-q', '--bare')
+  g(dir, 'remote', 'add', 'origin', remote)
+  g(dir, 'push', '-q', 'origin', 'main', 'main:rel')        // remote rel = B
+  g(dir, 'checkout', '-q', 'main'); g(dir, 'merge', '-q', '--ff-only', 'feat')
+  g(dir, 'push', '-q', 'origin', 'main'); g(dir, 'fetch', '-q', 'origin')   // origin/main = F, unreviewed (no hook yet)
+  await writeFile(join(dir, '.git', 'hooks', 'pre-push'), snippet, { mode: 0o755 })
+  const fake = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [F()] }) })
+  const env = { ...(await codexEnv(fake.bin)), LUNA_GATE: '' }
+  // Default base (origin/main = F) already contains F, which would read as an empty change.
+  assert.throws(() => execFileSync('git', ['push', '-q', 'origin', 'feat:rel'], { cwd: dir, env, stdio: 'pipe' }),
+    'B..F was reviewed against the remote rel, and the finding blocked the push')
+  assert.ok((await fake.record()).stdin.includes('db.query'))
+  // A brand-new remote ref still works (default base, no empty --base argument).
+  const clean = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
+  execFileSync('git', ['push', '-q', 'origin', 'feat:brand-new'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: clean.bin }, stdio: 'pipe' })
 })
 
 // The real process, end to end: exit 0 with no stdout when off, and exit 0 always.
