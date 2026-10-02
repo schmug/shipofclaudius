@@ -1,0 +1,27 @@
+{
+  "name": "specificity",
+  "description": "Scores each prompt you submit for specificity given the session so far, and shows it above the prompt, in the status line and under /spec.",
+  "author": {
+    "name": "schmug"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Judge",
+      "description": "haiku: a cheap Haiku call over the last few messages. fork: a tool-less fork of this session's own transcript (most accurate; bills the cached prefix against your usage). off: no model calls, no band.",
+      "options": [
+        "haiku",
+        "fork",
+        "off"
+      ],
+      "default": "haiku"
+    },
+    "contextMessages": {
+      "type": "number",
+      "title": "Context messages",
+      "description": "How many recent messages the haiku judge reads (fork mode reads the whole transcript).",
+      "default": 8
+    }
+  }
+}
