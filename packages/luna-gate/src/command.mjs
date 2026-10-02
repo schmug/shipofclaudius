@@ -290,6 +290,32 @@ export function findPrCreates(command, depth = 0) {
   return all
 }
 
+// True when some simple command MIGHT be `gh pr create` but its spelling is computed by
+// the shell, so findPrCreates cannot see it: `gh pr ${x:=create}`, `gh $sub create`,
+// `$GH pr create`. Only the command word and the `pr` / `create` slots are judged, so
+// `gh pr view $N` stays an ordinary command.
+export function hasAmbiguousGh(command, depth = 0) {
+  if (typeof command !== 'string' || depth > 8) return false
+  const subs = []
+  const t = tokenize(command, subs)
+  const dyn = (x) => typeof x === 'string' && DYNAMIC.test(x)
+  for (let i = 0; i < t.length; i++) {
+    if (typeof t[i] !== 'string') continue
+    const atStart = i === 0 || typeof t[i - 1] !== 'string' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i - 1])
+    if (!atStart || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[i])) continue
+    const scratch = {}
+    if (dyn(t[i])) {
+      const k = skipRepoFlags(t, i + 1, scratch)
+      if (t[k] === 'pr' || dyn(t[k])) return true
+    } else if (isGh(t[i])) {
+      let k = skipRepoFlags(t, i + 1, scratch)
+      if (dyn(t[k])) return true
+      if (t[k] === 'pr') { k = skipRepoFlags(t, k + 1, scratch); if (dyn(t[k])) return true }
+    }
+  }
+  return subs.some((sub) => hasAmbiguousGh(sub, depth + 1))
+}
+
 // The first `gh pr create`, or null.
 export function parsePrCreate(command) {
   return findPrCreates(command)[0] ?? null

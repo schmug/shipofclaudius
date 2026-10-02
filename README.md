@@ -424,6 +424,7 @@ exit $status
 - `gh` run from a path other than bare `gh` or a standard install location, or behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
 - a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
 - `${...}`, `$((...))` or `$[...]` expansion anywhere outside single quotes (`${x@P}` runs code);
+- a `gh` call whose command word or `pr`/`create` slot is computed by the shell (`gh pr ${x:=create}`), since it may be a PR creation the gate cannot see;
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.

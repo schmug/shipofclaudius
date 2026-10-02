@@ -11,7 +11,7 @@
 import { readSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfig } from '../src/config.mjs'
-import { findPrCreates, commandCount, hasRiskyExpansion } from '../src/command.mjs'
+import { findPrCreates, commandCount, hasRiskyExpansion, hasAmbiguousGh } from '../src/command.mjs'
 import { review } from '../src/run.mjs'
 import { hookOutput } from '../src/decide.mjs'
 
@@ -41,10 +41,15 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   if (!event || event.tool_name !== 'Bash') return null
   const cfg = loadConfig(env)
   if (cfg.mode === 'off') return null
-  const prs = findPrCreates(event.tool_input?.command)
-  if (!prs.length) return null
+  const command = event.tool_input?.command
+  const prs = findPrCreates(command)
+  // A gh call whose subcommand the shell computes might be `gh pr create` in disguise;
+  // check that before treating the command as unrelated.
+  if (!prs.length && !hasAmbiguousGh(command)) return null
   let outcome
-  if (prs.length > 1) {
+  if (!prs.length) {
+    outcome = { kind: 'reject', message: 'a `gh` call\'s command word or `pr`/`create` slot is computed by the shell, so luna-gate cannot tell whether it opens a PR' }
+  } else if (prs.length > 1) {
     // One review covers one range; approving the first would let the rest through unreviewed.
     outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
   } else if (prs[0].dynamic) {

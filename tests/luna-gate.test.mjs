@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadConfig, DEFAULTS } from '../packages/luna-gate/src/config.mjs'
-import { tokenize, parsePrCreate, findPrCreates, commandCount, hasRiskyExpansion } from '../packages/luna-gate/src/command.mjs'
+import { tokenize, parsePrCreate, findPrCreates, commandCount, hasRiskyExpansion, hasAmbiguousGh } from '../packages/luna-gate/src/command.mjs'
 import { parseNameStatus, collectChange, sameRepo } from '../packages/luna-gate/src/git.mjs'
 import { buildRequest, SCHEMA } from '../packages/luna-gate/src/prompt.mjs'
 import { parseResponse, validateReview, estimateCost, MAX_FINDINGS } from '../packages/luna-gate/src/openai.mjs'
@@ -84,6 +84,8 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
   assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
   assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
+  for (const c of ['gh pr ${x:=create} --head risky', 'gh $sub create', '$GH pr create', 'x=$(gh pr `echo create`)']) assert.ok(hasAmbiguousGh(c), c)
+  for (const c of ['gh pr view $N', 'gh api repos/$R/pulls', 'ls $dir', 'gh -R $repo pr list']) assert.ok(!hasAmbiguousGh(c), c)
   assert.deepEqual(findPrCreates("$'gh' pr create --head risky"), [{ base: null, head: 'risky', repo: null }], 'ANSI-C quoted command word')
   assert.deepEqual(findPrCreates("gh pr $'cr\\x65ate' --head r"), [{ base: null, head: 'r', repo: null }], 'ANSI-C escapes are decoded')
   assert.deepEqual(findPrCreates('gh pr $"create" --head r'), [{ base: null, head: 'r', repo: null }], 'locale quoting')
@@ -628,7 +630,8 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['gh pr create --head "$(printf feat)" --base main', /computed by the shell/],
       ['gh pr create --base $BASE', /computed by the shell/],
       ['gh pr create --base main --title "${x@P}"', /expansion/],
-      ['/tmp/gh pr create --base main', /wrapper/]]) {
+      ['/tmp/gh pr create --base main', /wrapper/],
+      ['gh pr ${x:=create} --head feat', /cannot tell whether it opens a PR/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)
