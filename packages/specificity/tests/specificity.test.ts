@@ -317,6 +317,45 @@ describe('prompt.submit', () => {
     expect(w.statuses.at(-1)).toBeUndefined()
   })
 
+  test('a command after a prompt still being judged does not mask it at exit', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await submit($, 'and the other one')
+    await submit($, '/compact')
+    await w.clock.settle()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await w.clock.advance(SLOW_MS)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
+
+  test('exiting while a /name prompt is unclassified keeps the older score hidden', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    w.commandsHeld = new Promise(() => {})
+    await submit($, '/tmp is full')
+    await w.clock.settle()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
+
+  test('a command after the newest score does not hide it at exit', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await submit($, '/compact')
+    await w.clock.settle()
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.statuses.at(-1)).toBe('spec 72')
+  })
+
   test('exiting after the newest score landed still republishes it on restart', async ($, on) => {
     const w = world(on, GOOD)
     on('session.end', ($, e) => ({ sessionId: e.sessionId }))

@@ -42,14 +42,17 @@ const SPARK_MIN_COLUMNS = 40
 // `latest` is the newest submission known to be a prompt (a `/name` candidate
 // joins only once it is known not to be a real command, so a command never
 // supersedes anything); `epoch` moves at session start and end, dropping every
-// judge in flight; `finished` is the newest submission whose judge reached an
-// outcome (a score, a non-answer, or "it was a command"). Module-local on
+// judge in flight; `finished` is the newest confirmed prompt whose judge reached
+// an outcome (a score or a non-answer; a command is never counted, so it can't
+// mask a prompt still being judged); `candidates` are `/name` prompts not yet
+// classified. Module-local on
 // purpose; a reload starting the counts over can only drop a stale score, never
 // misfile one.
 let submitted = 0
 let latest = 0
 let epoch = 0
 let finished = 0
+const candidates = new Set<number>()
 
 /** `order` is a prompt, not a command: it supersedes every older one, never a newer one. */
 function confirm(order: number): void {
@@ -96,7 +99,8 @@ async function score(
   } catch (err: unknown) {
     await quiet($, isStale, err instanceof Error ? err.name : 'error')
   } finally {
-    finished = Math.max(finished, order)
+    candidates.delete(order)
+    if (order <= latest) finished = Math.max(finished, order)
   }
 }
 
@@ -206,7 +210,7 @@ export const register: Register = (on, options) => {
       await update($, last, () => null)
       await update($, history, () => [])
       $.ui.status(undefined)
-    } else if (submitted > finished) {
+    } else if (latest > finished || candidates.size > 0) {
       // The newest prompt's judge is cut off here and will never land: hide
       // the band so a reopened conversation doesn't show the older score as
       // if it were this prompt's. A finished score still comes back.
@@ -222,6 +226,7 @@ export const register: Register = (on, options) => {
       const order = ++submitted
       const born = epoch
       if (slashName(prompt) === null) confirm(order)
+      else candidates.add(order)
       $.clock.after(0, () => {
         score($, prompt, order, born, judge, contextMessages).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),
