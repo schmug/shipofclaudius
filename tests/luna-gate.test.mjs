@@ -77,6 +77,17 @@ test('parsePrCreate: pflag shorthand clusters, `--`, and unknown flags', () => {
   assert.ok(!parsePrCreate('gh pr create --draft --fill-first --no-maintainer-edit -w').unknownFlag)
 })
 
+test('parsePrCreate: a computed argument could inject flags; a quoted computed VALUE cannot', () => {
+  for (const c of ["gh pr create $(printf -- '--head risky')", 'gh pr create $FLAGS', 'gh pr create --fill *',
+    'gh pr create "$(printf -- --head=risky)"', 'gh pr create --title $(printf "x --head r")', 'gh pr create -t$x']) {
+    assert.ok(parsePrCreate(c).dynamic, c)
+  }
+  for (const c of ['gh pr create --title "$(echo hi)" --base main', 'gh pr create --title "fix * and ?" --base main',
+    'gh pr create --title "price $5"', 'gh pr create --body "$(cat <<\'EOF\'\nx\nEOF\n)"']) {
+    assert.ok(!parsePrCreate(c).dynamic, c)
+  }
+})
+
 test('parsePrCreate: flags after a separator belong to the next command', () => {
   assert.deepEqual(parsePrCreate('gh pr create --fill; git checkout --base x'), { base: null, head: null, repo: null })
 })
@@ -642,7 +653,8 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['gh pr create --base main --title "${x@P}"', /expansion/],
       ['/tmp/gh pr create --base main', /wrapper/],
       ['gh pr ${x:=create} --head feat', /cannot tell whether it opens a PR/],
-      ['gh pr create --base main --frobnicate x', /flag luna-gate does not know/]]) {
+      ['gh pr create --base main --frobnicate x', /flag luna-gate does not know/],
+      ["gh pr create --base main $(printf -- '--head feat')", /computed by the shell/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)

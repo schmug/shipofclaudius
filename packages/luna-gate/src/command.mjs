@@ -112,13 +112,25 @@ function ansiC(s, i) {
 // unquoted heredoc body that contains one), so the caller can look inside them too: opaque
 // for flag parsing, not for finding a hidden `gh pr create` or a command.
 // `meta.redirect` is set when an unquoted `>` or `<` (other than a heredoc) appears.
+//
+// Quote provenance, per output index: `meta.uq` holds tokens with an UNQUOTED expansion
+// or glob (`$x`, `$(...)`, backticks, `* ? [ {`), which the shell may split into several
+// words, flags included; `meta.exp` holds tokens with any expansion, quoted or not, whose
+// value is unknown until run time.
 export function tokenize(s, subs = [], meta = {}) {
   const out = []
   let cur = ''
   let has = false
   let q = null
+  let uq = false
+  let exp = false
+  meta.uq ??= new Set()
+  meta.exp ??= new Set()
   const pending = []
-  const flush = () => { if (has || cur) out.push(cur); cur = ''; has = false }
+  const flush = () => {
+    if (has || cur) { if (uq) meta.uq.add(out.length); if (exp) meta.exp.add(out.length); out.push(cur) }
+    cur = ''; has = false; uq = false; exp = false
+  }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
     // `${...}` (e.g. `${x@P}` runs the command substitutions in x), `$((...))` and `$[...]`
@@ -127,12 +139,14 @@ export function tokenize(s, subs = [], meta = {}) {
     if (c === '$' && !q && s[i + 1] === "'") { const [dec, e] = ansiC(s, i + 1); cur += dec; has = true; i = e; continue }
     if (c === '$' && !q && s[i + 1] === '"') { q = '"'; has = true; i++; continue }   // $"..." (locale) is "..."
     if (c === '$' && s[i + 1] === '(' && q !== "'") {
+      exp = true; if (!q) uq = true
       const j = skipSubst(s, i)
       subs.push(s.slice(i + 2, j - 1))
       cur += s.slice(i, j); has = true; i = j - 1
       continue
     }
     if (c === '`' && q !== "'") {
+      exp = true; if (!q) uq = true
       const e = s.indexOf('`', i + 1)
       const j = e < 0 ? s.length : e + 1
       subs.push(s.slice(i + 1, e < 0 ? s.length : e))
@@ -144,7 +158,7 @@ export function tokenize(s, subs = [], meta = {}) {
     if (q) {
       if (c === q) q = null
       else if (c === '\\' && q === '"' && i + 1 < s.length) cur += s[++i]
-      else cur += c
+      else { if (c === '$' && q === '"') exp = true; cur += c }
       continue
     }
     // An unquoted `#` starting a word comments out the rest of the line: `gh pr create
@@ -159,6 +173,8 @@ export function tokenize(s, subs = [], meta = {}) {
     if (SEPS.has(c)) { flush(); out.push({ sep: c }); continue }
     if (/\s/.test(c)) { flush(); continue }
     if (c === '>' || c === '<') meta.redirect = true
+    if (c === '$') { exp = true; uq = true }
+    if ('*?[{'.includes(c)) uq = true
     cur += c
   }
   flush()
@@ -253,7 +269,8 @@ export function findPrCreates(command, depth = 0) {
   // after tokenizing.
   if (typeof command !== 'string' || depth > 8) return []
   const subs = []
-  const t = tokenize(command, subs)
+  const meta = {}
+  const t = tokenize(command, subs, meta)
   const all = []
   for (let i = 0; i + 2 < t.length; i++) {
     if (!isGh(t[i])) continue
@@ -281,13 +298,18 @@ export function findPrCreates(command, depth = 0) {
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null
+      // An argument the shell computes could become any flags (`$(printf -- '--head x')`,
+      // `$FLAGS`, a glob matching a file named `--head=x`). A value consumed by a flag is
+      // only at risk when unquoted (word splitting); checked where it is consumed.
+      if (meta.uq.has(j) || meta.exp.has(j)) found.dynamic = true
+      const valueAt = (idx) => { if (meta.uq.has(idx)) found.dynamic = true }
       if (a === '--') break
       if (a.startsWith('--')) {
         const eq = a.indexOf('=')
         const name = eq < 0 ? a : a.slice(0, eq)
         if (name in LONG_VALUE) {
           const v = eq < 0 ? next : a.slice(eq + 1)
-          if (eq < 0) j++
+          if (eq < 0) { j++; valueAt(j) }
           if (LONG_VALUE[name] && v != null) found[LONG_VALUE[name]] = v
         } else if (!LONG_BOOL.has(name)) found.unknownFlag = true
         continue
@@ -298,7 +320,7 @@ export function findPrCreates(command, depth = 0) {
         if (a[c] in SHORT_VALUE) {
           let v = a.slice(c + 1)
           if (v.startsWith('=')) v = v.slice(1)   // pflag takes `-H=feat`
-          if (!v) { v = next; j++ }
+          if (!v) { v = next; j++; valueAt(j) }
           if (SHORT_VALUE[a[c]] && v != null) found[SHORT_VALUE[a[c]]] = v
         } else found.unknownFlag = true
         break

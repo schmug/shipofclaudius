@@ -422,7 +422,7 @@ exit $status
 - a target repository other than `origin`, whether from `-R` (in any position gh accepts), `GH_REPO`, `gh repo set-default`, or another remote gh might pick when none is pinned;
 - more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
 - `gh` run from a path other than bare `gh` or a standard install location, or behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
-- a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
+- a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, and any other argument the shell computes (an unquoted expansion or glob anywhere, or any expansion outside a flag's value), since it is resolved after the review and could add or change flags. A quoted `--title "$(...)"` or `--body "$(cat <<'EOF' ...)"` value is fine;
 - `${...}`, `$((...))` or `$[...]` expansion anywhere outside single quotes (`${x@P}` runs code);
 - a `gh` call whose command word or `pr`/`create` slot is computed by the shell (`gh pr ${x:=create}`), since it may be a PR creation the gate cannot see;
 - a `gh pr create` flag the gate does not know (its arity decides how the rest parses). Known flags are parsed as pflag does, including shorthand clusters such as `-dHfeat`;

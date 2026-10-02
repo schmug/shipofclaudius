@@ -55,7 +55,7 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   } else if (prs[0].unknownFlag) {
     outcome = { kind: 'reject', message: '`gh pr create` has a flag luna-gate does not know, so it cannot tell which values select the base, head or repo' }
   } else if (prs[0].dynamic) {
-    outcome = { kind: 'reject', message: 'a --head/--base/--repo (or GH_REPO/GH_HOST) value is computed by the shell, so the reviewed range cannot be known in advance; pass a literal branch name' }
+    outcome = { kind: 'reject', message: 'an argument to `gh pr create` (or a GH_REPO/GH_HOST value) is computed by the shell, so it could select a different base, head or repo after the review; use literal values' }
   } else if (hasRiskyExpansion(event.tool_input.command)) {
     outcome = { kind: 'reject', message: 'the command uses `${...}`, `$((...))` or `$[...]` expansion, which can run code before gh does' }
   } else if (prs[0].wrapped) {
