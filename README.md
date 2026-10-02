@@ -347,6 +347,74 @@ Two things worth knowing before enabling it:
 
 Configuration is `~/.claude/specificity/config.toml` (override the whole directory with `SPECIFICITY_DIR`); the keys and defaults are in §7 of the spec.
 
+## Pre-PR review gate (GPT-6 Luna)
+
+`packages/luna-gate/` sends the change behind a `gh pr create` to a second model for a security review **before** the PR opens. The default reviewer is OpenAI's `gpt-6-luna` at `max` reasoning effort: as of September 2026 it scores 53 on the [Artificial Analysis Cyber Index](https://artificialanalysis.ai/evaluations/artificial-analysis-cyber-index), 3 points behind the two leaders, at $0.10 / $0.50 per million input / output tokens. A typical review costs cents. Using a different model family from the one that wrote the code is deliberate; it is the same reasoning behind `factory-issue-fix`'s cross-family Verify phase.
+
+There are two entry points, and they share one pipeline:
+
+- **`bin/hook.mjs`**: a Claude Code `PreToolUse` hook. In `block` mode, a finding at or above the threshold denies the `gh pr create` call, and the findings go back to Claude as the deny reason so it can fix them and try again. In `advisory` mode the findings reach Claude as context and nothing is blocked.
+- **`bin/review.mjs`**: the same review from the command line. It exits `1` on blocking findings, so it also works as a git `pre-push` hook. That covers changes pushed by any agent or editor, not only Claude Code.
+
+**Installing the plugin does not turn this on.** It is left out of `hooks/hooks.json` for the same reason as the specificity scorer: an entry there would fire in every session of every project the plugin is enabled in. This hook also **sends source code to a third party**, so it takes two explicit choices: register the hook, then set `LUNA_GATE`. Add this to `~/.claude/settings.json`, changing the path to wherever your checkout lives:
+
+```json
+{
+  "env": { "LUNA_GATE": "block" },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [ {
+          "type": "command",
+          "if": "Bash(gh pr create*)",
+          "command": "node",
+          "args": ["/absolute/path/to/shipofclaudius/packages/luna-gate/bin/hook.mjs"],
+          "timeout": 600,
+          "statusMessage": "luna-gate: GPT-6 Luna security review"
+        } ] }
+    ]
+  }
+}
+```
+
+`OPENAI_API_KEY` comes from the environment Claude Code was started in. Export it from your shell profile or keychain; don't put it in `settings.json`. The `if` filter is best-effort, so the script checks again for itself: anything that is not `gh pr create` exits immediately, and a quoted mention like `echo "gh pr create"` does not match.
+
+For a git pre-push hook (for example via `git config --global core.hooksPath`):
+
+```sh
+#!/bin/sh
+exec node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs
+```
+
+**What gets sent.** The diff from `merge-base(base, head)` to `head`, using `--function-context` so each changed hunk arrives inside its whole function, plus the full post-change contents of the changed files, smallest first, within a byte budget. The base comes from `gh pr create --base`, falling back to `origin/HEAD`. **Credential-shaped files** (`.env*`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.dev.vars`, `*.tfstate`, ...) are excluded at the git pathspec level, and so are lockfiles and minified bundles. The model gets the *names* of withheld files, never their bytes. Requests are sent with `store: false`.
+
+**Configuration** is environment-only:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LUNA_GATE` | `off` | `off` / `advisory` / `block`. The hook does nothing until this is set; `review.mjs` runs regardless, because invoking it is the opt-in. |
+| `LUNA_GATE_MODEL` | `gpt-6-luna` | Any Responses-API model id. The cost estimate only knows Luna's prices. |
+| `LUNA_GATE_EFFORT` | `max` | `none` `low` `medium` `high` `xhigh` `max` |
+| `LUNA_GATE_THRESHOLD` | `high` | Lowest severity that blocks. Findings the model marks `confidence: low` never block. |
+| `LUNA_GATE_ON_ERROR` | `open` | `closed` blocks the PR when the review itself fails (no key, timeout, HTTP error). |
+| `LUNA_GATE_SKIP_REMOTE` | (none) | Case-insensitive regex on `origin`'s URL. Matching repos are never sent, e.g. `github\.com[:/](ncdpi\|my-employer)/`. An invalid regex also skips. |
+| `LUNA_GATE_MAX_BYTES` | `600000` | Request byte budget (~150K tokens), kept under Luna's 272K-token long-context price step. |
+| `LUNA_GATE_TIMEOUT_MS` | `540000` | Kept under the 600 s hook timeout so a slow review fails open with a message instead of being killed silently. |
+| `LUNA_GATE_DIR` | `~/.claude/luna-gate` | Review cache and user acknowledgements. |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | For a proxy or gateway. |
+
+A repo can opt out by committing `.luna-gate.json` containing `{"enabled": false}`. The opt-out is honored when it is present at **either** the base or the head, because the point is to keep code from leaving the machine. When only the head has it (this change is the one adding it), the hook says so to the user rather than skipping silently, so a diff can't quietly exempt itself.
+
+**Acknowledging a false positive.** In block mode the deny reason tells Claude to fix real findings and to report false positives to you, not to work around them. To let one exact change through, run `node packages/luna-gate/bin/review.mjs --ack` in the repo. The ack is keyed to `merge-base..head`, so the next commit is reviewed again. An identical diff is served from the cache, which means retrying `gh pr create` costs nothing and gives the same verdict.
+
+Invariants (`tests/luna-gate.test.mjs`):
+
+- **The hook never breaks a session.** Every path exits 0. A failure is a `systemMessage`, never an exit code.
+- **It can only take permission away.** It emits `permissionDecision: "deny"` or nothing, and never `"allow"`, which would skip your normal permission prompt for `gh pr create`.
+- **Untrusted in, untrusted out.** The diff is attacker-writable, so it is nonce-fenced behind an anti-injection preamble, as in the workflows. The model's findings are derived from that diff, so they are validated field by field, length-clamped, and fenced again before Claude reads them, framed as claims to verify.
+
+This is a quality gate, not a security boundary against the agent. Claude can still open a PR through `gh api`, and a hook that times out lets the call through (see the hooks docs). For real enforcement, put the same `review.mjs` call in CI or a pre-push hook.
+
 ## Process skills
 
 Alongside the 1:1 workflow wrappers, the plugin ships **process skills** — session-long playbooks declared with `workflow: none` in their frontmatter, carrying reference templates instead of a Workflow script.
@@ -400,12 +468,16 @@ shipofclaudius/
 │   │   ├── bin/gate.mjs           #   CLI — exit 0 merge / 2 escalate / 1 the gate broke
 │   │   ├── bin/build-input.mjs    #   CLI — fetches a PR's gate facts with `gh`
 │   │   └── src/                   #   glob, extract, config, build-input, gate-core
-│   └── specificity/               # prompt-specificity scorer, M1 (no dependencies, no model calls)
-│       ├── bin/fast.mjs           #   UserPromptSubmit hook — scores the turn, writes the cache
-│       ├── bin/render.sh          #   status line — reads the cache, computes nothing
-│       ├── bin/render.jq          #   the one-line render itself
-│       └── src/                   #   config, transcript, files, context-index, referents,
-│                                  #   constraints, record, cache
+│   ├── specificity/               # prompt-specificity scorer, M1 (no dependencies, no model calls)
+│   │   ├── bin/fast.mjs           #   UserPromptSubmit hook — scores the turn, writes the cache
+│   │   ├── bin/render.sh          #   status line — reads the cache, computes nothing
+│   │   ├── bin/render.jq          #   the one-line render itself
+│   │   └── src/                   #   config, transcript, files, context-index, referents,
+│   │                              #   constraints, record, cache
+│   └── luna-gate/                 # pre-PR GPT-6 Luna security review (opt-in; sends code to OpenAI)
+│       ├── bin/hook.mjs           #   PreToolUse hook on `gh pr create` — deny in block mode, never "allow"
+│       ├── bin/review.mjs         #   CLI / git pre-push — exit 1 on blocking findings; --ack
+│       └── src/                   #   config, command, git, prompt, openai, decide, run
 └── tests/
     ├── ci-abuse-lens.test.mjs     # pins security-diff-scan.js's gated CI/CD pipeline-abuse lens
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
@@ -426,6 +498,7 @@ shipofclaudius/
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
     ├── specificity-fast.test.mjs   # UNIT-tests the specificity fast path (pure code + end-to-end)
     ├── specificity-render.test.mjs # runs the REAL render.sh + render.jq over a temp cache
+    ├── luna-gate.test.mjs          # UNIT + end-to-end: real git, real hook process, stub OpenAI server
     ├── stacked-impl-sim.test.mjs   # simulates stacked-impl-lanes.js
     ├── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
     ├── triage-finding-sim.test.mjs # simulates triage-finding.js

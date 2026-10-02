@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+// PreToolUse hook: before Claude runs `gh pr create`, send the branch's change to
+// GPT-6 Luna (by default at max reasoning effort) for a security review.
+//
+// Not registered by the plugin. Wire it into your own settings.json (see README,
+// "Pre-PR review gate"); nothing happens until LUNA_GATE is set to advisory or block.
+//
+// THE INVARIANT: this hook never breaks a session. Every path exits 0 and a failure is a
+// message, never an exit code. The only way it stops a PR is an explicit
+// permissionDecision "deny" in block mode. It never emits "allow".
+import { readSync, realpathSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { loadConfig } from '../src/config.mjs'
+import { parsePrCreate } from '../src/command.mjs'
+import { review } from '../src/run.mjs'
+import { hookOutput } from '../src/decide.mjs'
+
+const REVIEW_BIN = fileURLToPath(new URL('./review.mjs', import.meta.url))
+
+function readStdin() {
+  const chunks = []
+  const buf = Buffer.allocUnsafe(65536)
+  for (;;) {
+    let n
+    try { n = readSync(0, buf, 0, buf.length, null) } catch (e) {
+      if (e.code === 'EAGAIN') continue
+      if (e.code === 'EOF') break
+      throw e
+    }
+    if (n === 0) break
+    chunks.push(Buffer.from(buf.subarray(0, n)))
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+// Returns the stdout payload (string) or null for "say nothing".
+export async function main(raw, { env = process.env, fetchImpl } = {}) {
+  let event
+  try { event = JSON.parse(raw) } catch { return null }
+  if (!event || event.tool_name !== 'Bash') return null
+  const cfg = loadConfig(env)
+  if (cfg.mode === 'off') return null
+  const pr = parsePrCreate(event.tool_input?.command)
+  if (!pr) return null
+  let outcome
+  try {
+    outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, cfg, fetchImpl })
+  } catch (e) {
+    outcome = { kind: 'error', message: e?.message || String(e) }
+  }
+  const out = hookOutput(cfg, outcome, { ackCommand: `node ${JSON.stringify(REVIEW_BIN)} --ack` })
+  return out ? JSON.stringify(out) : null
+}
+
+// Compared via realpath: Node resolves the entry module's symlinks for import.meta.url but
+// not for argv[1], so a symlinked install path would otherwise make the hook a silent no-op.
+const isEntry = () => { try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { return false } }
+if (isEntry()) {
+  let raw = ''
+  try { raw = readStdin() } catch { process.exit(0) }
+  main(raw).then(
+    (s) => { if (s) process.stdout.write(s + '\n'); process.exit(0) },
+    () => process.exit(0),
+  )
+}
