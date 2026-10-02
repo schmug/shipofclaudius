@@ -122,6 +122,9 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
     'gh pr view "$(. ./open-pr.sh)"', 'gh pr view "$(bash ./open-pr.sh)"', "gh pr view \"$(python3 -c 'import os')\"",
     'gh pr view "$(env -C x sh -c ls)"']) assert.ok(hasAmbiguousGh(c), c)
   assert.ok(!hasAmbiguousGh('gh pr view $(git branch --show-current)'), 'an ordinary substitution in a read command is fine')
+  assert.equal(findPrCreates("gh pr view <<$'END'\nEND\ngh pr create --head r").length, 1, 'ANSI-C quoted heredoc delimiter')
+  assert.equal(findPrCreates('gh pr view <<true\ntru\\\ne\ngh pr create --head r\ntrue').length, 1, 'continuation folded before delimiter match')
+  assert.ok(hasAmbiguousGh("gh pr view \"$(s=sh; \"$s\" -c 'gh pr create --head r')\""), 'a computed command word')
   assert.ok(findPrCreates('/tmp/gh pr create')[0].wrapped, 'an untrusted gh path is a wrapper')
   assert.ok(!findPrCreates('/opt/homebrew/bin/gh pr create')[0].wrapped)
   assert.equal(commandCount('gh pr create --body "$(PATH=/tmp/bin cat body)"'), 2, 'an assignment before cat forfeits the text-only exemption')
@@ -670,6 +673,9 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ["gh pr view \"$(sh -c 'gh pr create --head feat')\"", /cannot tell whether it opens a PR/],
       ['gh pr view "`echo \\`gh pr create --head feat\\``"', /shares this Bash call/],
       ['gh pr view "$(source ./open-pr.sh)"', /cannot tell whether it opens a PR/],
+      ["gh pr view <<$'END'\nEND\ngh pr create --head feat", /shares this Bash call/],
+      ['gh pr view <<true\ntru\\\ne\ngh pr create --head feat\ntrue', /shares this Bash call/],
+      ["gh pr view \"$(s=sh; \"$s\" -c 'gh pr create --head feat')\"", /cannot tell whether it opens a PR/],
       [Array.from({ length: 10 }).reduce((acc) => `echo $(${acc})`, 'gh pr create --head feat').replace(/^/, 'gh pr view "$(') + ')"', /cannot tell whether it opens a PR/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)

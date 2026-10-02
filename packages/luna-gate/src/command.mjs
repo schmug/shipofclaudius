@@ -68,6 +68,9 @@ function readHeredocDelim(s, i, pending) {
   let quoted = false
   while (k < s.length && !/[\s;&|()<>]/.test(s[k])) {
     const c = s[k]
+    // `<<$'END'` / `<<$"END"`: bash removes these quotes from the delimiter too.
+    if (c === '$' && s[k + 1] === "'") { quoted = true; const [dec, e] = ansiC(s, k + 1); word += dec; k = e + 1; continue }
+    if (c === '$' && s[k + 1] === '"') { k++; continue }
     if (c === "'" || c === '"') { quoted = true; const e = s.indexOf(c, k + 1); const end = e < 0 ? s.length : e; word += s.slice(k + 1, end); k = end + 1; continue }
     if (c === '\\') { quoted = true; word += s[k + 1] ?? ''; k += 2; continue }
     word += c; k++
@@ -88,8 +91,15 @@ function skipHeredocBodies(s, nl, pending, expand = null) {
     let bodyEnd = s.length
     for (;;) {
       if (k >= s.length) { pending.length = 0; break }
-      const end = s.indexOf('\n', k + 1)
-      const line = s.slice(k + 1, end < 0 ? s.length : end)
+      let end = s.indexOf('\n', k + 1)
+      let line = s.slice(k + 1, end < 0 ? s.length : end)
+      // In an UNQUOTED body bash folds backslash-newline before matching the delimiter,
+      // so `tru\` + `e` ends a `<<true` heredoc.
+      while (!quoted && end >= 0 && /(^|[^\\])(\\\\)*\\$/.test(line)) {
+        const next = s.indexOf('\n', end + 1)
+        line = line.slice(0, -1) + s.slice(end + 1, next < 0 ? s.length : next)
+        end = next
+      }
       if ((strip ? line.replace(/^\t+/, '') : line) === word) { bodyEnd = k; k = end < 0 ? s.length : end; break }
       k = end < 0 ? s.length : end
     }
@@ -405,7 +415,9 @@ export function hasAmbiguousGh(command, depth = 0) {
     const word = base(t[i])
     // A wrapper's own options can take values (`env -C dir`, `sudo -u x`), so the wrapped
     // command word cannot be located reliably: any runner or gh after it is ambiguous.
-    if (WRAPPERS.has(word) && t.slice(i + 1, end).some((x) => RUNNERS.has(base(x)) || isGh(x))) return true
+    // A computed command word could be gh, a shell or anything else (`"$s" -c '...'`).
+    if (dyn(t[i]) || meta.uq.has(i) || meta.exp.has(i)) return true
+    if (WRAPPERS.has(word) && t.slice(i + 1, end).some((x, n) => RUNNERS.has(base(x)) || isGh(x) || dyn(x) || meta.exp.has(i + 1 + n))) return true
     if (word === 'eval' && payloadRisky(i + 1, end)) return true
     // `source` / `.` run a FILE the parser cannot see; interpreters run non-shell code.
     if (word === 'source' || word === '.' || INTERPRETERS.has(word)) return true
