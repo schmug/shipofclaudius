@@ -37,9 +37,20 @@ const HAIKU_TIMEOUT_MS = 15_000
 const SPARK_MIN_COLUMNS = 40
 
 // Only the newest prompt's score may land: a slow judge for an older prompt is
-// dropped rather than overwrite a newer result. Module-local on purpose; a
-// reload starting the count over can only drop a stale score, never misfile one.
+// dropped rather than overwrite a newer result. `submitted` orders submissions;
+// `latest` is the newest submission known to be a prompt (a `/name` candidate
+// joins only once it is known not to be a real command, so a command never
+// supersedes anything); `epoch` moves at session start and end, dropping every
+// judge in flight. Module-local on purpose; a reload starting the counts over
+// can only drop a stale score, never misfile one.
+let submitted = 0
 let latest = 0
+let epoch = 0
+
+/** `order` is a prompt, not a command: it supersedes every older one, never a newer one. */
+function confirm(order: number): void {
+  latest = Math.max(latest, order)
+}
 
 function debug($: EngineInterface, line: string): void {
   $.ui.log(`specificity: ${line}`, { to: 'debug' })
@@ -59,22 +70,21 @@ async function quiet($: EngineInterface, isStale: () => boolean, why: string): P
 
 /**
  * Judges one prompt and, if it is still the newest when the answer lands, writes
- * the result. `seq` was reserved at submission, so order follows submission;
- * `prev` is what `latest` was before, handed back when a prompt that looks like
- * a slash command turns out to be one of the session's real commands
- * (`/compact`), so running a command never cancels the last prompt's score.
+ * the result. `order` was taken at submission. A prompt that looks like a slash
+ * command is checked against the session's real commands first: `/compact` is
+ * dropped without superseding anything, `/tmp is full` is confirmed and judged.
  */
 async function score(
   $: EngineInterface,
   prompt: string,
-  seq: number,
-  prev: number,
+  order: number,
   mode: 'haiku' | 'fork',
   contextMessages: number,
 ): Promise<void> {
-  const isStale = () => seq !== latest
+  const born = epoch
+  const isStale = () => order !== latest || born !== epoch
   try {
-    await judgeAndWrite($, prompt, seq, prev, isStale, mode, contextMessages)
+    await judgeAndWrite($, prompt, order, isStale, mode, contextMessages)
   } catch (err: unknown) {
     await quiet($, isStale, err instanceof Error ? err.name : 'error')
   }
@@ -83,16 +93,15 @@ async function score(
 async function judgeAndWrite(
   $: EngineInterface,
   prompt: string,
-  seq: number,
-  prev: number,
+  order: number,
   isStale: () => boolean,
   mode: 'haiku' | 'fork',
   contextMessages: number,
 ): Promise<void> {
   const name = slashName(prompt)
-  if (name !== null && (await $.command.list()).some(c => c.name === name)) {
-    if (latest === seq) latest = prev
-    return
+  if (name !== null) {
+    if ((await $.command.list()).some(c => c.name === name)) return
+    confirm(order)
   }
 
   const startedAt = await $.clock.now()
@@ -143,7 +152,7 @@ export const register: Register = (on, options) => {
   const contextMessages = readCount(options['contextMessages'], 8, 40)
 
   on('session.start', async ($, e, next) => {
-    latest += 1
+    epoch += 1
     await $.command.register({
       name: 'spec',
       description: 'Show the last prompt specificity score, or turn its band on, off or hide it',
@@ -159,7 +168,7 @@ export const register: Register = (on, options) => {
   // swaps it: a judge still running for the old conversation must not land in
   // the new one, so every outstanding sequence number is invalidated here.
   on('session.end', async ($, e, next) => {
-    latest += 1
+    epoch += 1
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, last, () => null)
       await update($, history, () => [])
@@ -172,10 +181,10 @@ export const register: Register = (on, options) => {
     if (mode !== 'off' && isUserPrompt(e.origin, e.text)) {
       const prompt = e.text
       const judge = mode
-      const prev = latest
-      const seq = ++latest
+      const order = ++submitted
+      if (slashName(prompt) === null) confirm(order)
       $.clock.after(0, () => {
-        score($, prompt, seq, prev, judge, contextMessages).catch((err: unknown) =>
+        score($, prompt, order, judge, contextMessages).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),
         )
       })

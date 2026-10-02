@@ -18,6 +18,8 @@ type World = {
   modelCalls: number
   toasts: string[]
   statuses: (string | undefined)[]
+  /** While set, `$.command.list()` waits on it. */
+  commandsHeld: Promise<void> | null
 }
 
 const answered = (text: string) => ({ isAnswered: true as const, text, usage: USAGE })
@@ -34,7 +36,7 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [] }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], commandsHeld: null }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
@@ -61,7 +63,10 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
   })
   on('ui.log', () => ({ value: undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('command.list', () => ({ value: [{ name: 'compact', description: 'Compact', source: 'builtin' as const }] }))
+  on('command.list', async () => {
+    await w.commandsHeld
+    return { value: [{ name: 'compact', description: 'Compact', source: 'builtin' as const }] }
+  })
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: { key: 'engine' }, children: [] }))
   return w
 }
@@ -221,6 +226,23 @@ describe('prompt.submit', () => {
     await w.clock.advance(SLOW_MS)
     expect(w.modelCalls).toBe(2)
     expect(await spec($)).toContain('for "clean out /tmp/cache')
+  })
+
+  test('a real command sent while the previous judge finishes does not drop it', async ($, on) => {
+    const w = world(on, GOOD)
+    let release: () => void = () => {}
+    w.commandsHeld = new Promise<void>(resolve => {
+      release = resolve
+    })
+    await submit($, 'fix the bug in src/a.ts')
+    await w.clock.settle()
+    await submit($, '/compact')
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    expect(await spec($)).toContain('spec 72/100')
+    release()
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
   })
 
   test('a real slash command does not cancel the previous score', async ($, on) => {
