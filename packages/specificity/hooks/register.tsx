@@ -20,6 +20,7 @@ import {
   forkPrompt,
   HISTORY_CAP,
   isUserPrompt,
+  slashName,
   parseJudgement,
   readCount,
   readMode,
@@ -44,7 +45,27 @@ function debug($: EngineInterface, line: string): void {
   $.ui.log(`specificity: ${line}`, { to: 'debug' })
 }
 
-async function score($: EngineInterface, prompt: string, seq: number, mode: 'haiku' | 'fork', contextMessages: number): Promise<void> {
+/**
+ * Judges one prompt and, if it is still the newest when the answer lands, writes
+ * the result. `seq` is null for a prompt that looks like a slash command: it is
+ * checked against the session's real commands first (`/tmp is full` is a
+ * prompt, `/compact` is not) and only then takes its place in the sequence.
+ */
+async function score(
+  $: EngineInterface,
+  prompt: string,
+  seq: number | null,
+  mode: 'haiku' | 'fork',
+  contextMessages: number,
+): Promise<void> {
+  if (seq === null) {
+    const name = slashName(prompt)
+    if (name !== null && (await $.command.list()).some(c => c.name === name)) return
+    seq = ++latest
+  }
+  const mine = seq
+  const isStale = () => mine !== latest
+
   const startedAt = await $.clock.now()
   let judge = mode
   let reply = mode === 'fork' ? await $.model.fork({ prompt: forkPrompt(prompt) }) : null
@@ -72,17 +93,20 @@ async function score($: EngineInterface, prompt: string, seq: number, mode: 'hai
     $.ui.log(`specificity: no score (unparseable reply, ${reply.text.length} chars)`, { to: 'debug' })
     return
   }
-  if (seq !== latest) {
-    $.ui.log('specificity: score dropped, a newer prompt is being scored', { to: 'debug' })
-    return
-  }
 
   const now = await $.clock.now()
   const result: SpecificityResult = { ...judged, mode: judge, excerpt: excerpt(prompt), at: now, ms: now - startedAt }
-  await update($, last, () => result)
-  await update($, history, list => [...list, result.score].slice(-HISTORY_CAP))
-  await update($, isHidden, () => false)
-  $.ui.status(`spec ${result.score}`)
+  // The staleness check runs inside each write's updater: `update` re-runs it
+  // after any concurrent write (a /clear's reset, a newer score), so a newer
+  // prompt or a /clear that lands mid-way stops every remaining write.
+  if (isStale()) {
+    $.ui.log('specificity: score dropped, a newer prompt or /clear superseded it', { to: 'debug' })
+    return
+  }
+  await update($, last, current => (isStale() ? current : result))
+  await update($, history, list => (isStale() ? list : [...list, result.score].slice(-HISTORY_CAP)))
+  await update($, isHidden, hidden => (isStale() ? hidden : false))
+  if (!isStale()) $.ui.status(`spec ${result.score}`)
 }
 
 export const register: Register = (on, options) => {
@@ -119,7 +143,7 @@ export const register: Register = (on, options) => {
     if (mode !== 'off' && isUserPrompt(e.origin, e.text)) {
       const prompt = e.text
       const judge = mode
-      const seq = ++latest
+      const seq = slashName(prompt) === null ? ++latest : null
       $.clock.after(0, () => {
         score($, prompt, seq, judge, contextMessages).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),

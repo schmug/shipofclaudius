@@ -19,13 +19,17 @@ export const SPARK_WIDTH = 10
  */
 const USER_ORIGINS: ReadonlySet<PromptOrigin['kind']> = new Set(['composer', 'bridge', 'sdk'])
 
-/** `/name` or `/name args`: a slash command, not a prompt. A path like `/etc/x is broken` is a prompt. */
-const SLASH_COMMAND = /^\/[A-Za-z0-9_:.-]+(\s|$)/
+/**
+ * The name a prompt would run as a slash command (`/compact` -> `compact`), or
+ * null. Only a candidate: `/tmp is full` looks the same, so the caller checks
+ * the name against the session's real command list before skipping it.
+ */
+export function slashName(text: string): string | null {
+  return /^\/([A-Za-z0-9_:.-]+)(\s|$)/.exec(text.trim())?.[1] ?? null
+}
 
 export function isUserPrompt(origin: PromptOrigin, text: string): boolean {
-  if (!USER_ORIGINS.has(origin.kind)) return false
-  const trimmed = text.trim()
-  return trimmed !== '' && !SLASH_COMMAND.test(trimmed)
+  return USER_ORIGINS.has(origin.kind) && text.trim() !== ''
 }
 
 export function readMode(value: unknown): Mode {

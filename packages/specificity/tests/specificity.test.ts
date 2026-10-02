@@ -57,6 +57,7 @@ function world(on: On, reply: string | ModelCompleteResult, forkReply: string | 
   })
   on('ui.log', () => ({ value: undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('command.list', () => ({ value: [{ name: 'compact', description: 'Compact', source: 'builtin' as const }] }))
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: { key: 'engine' }, children: [] }))
   return w
 }
@@ -120,6 +121,15 @@ describe('prompt.submit', () => {
     expect(w.submitted).toHaveLength(others.length + 1)
     expect(w.modelCalls).toBe(0)
     expect(await spec($)).toBe(NONE)
+  })
+
+  test('a prompt that starts with a path or route is still scored', async ($, on) => {
+    const w = world(on, GOOD)
+    await scored($, w, '/tmp is full')
+    expect(w.modelCalls).toBe(1)
+    await scored($, w, '/login should redirect after authentication')
+    expect(w.modelCalls).toBe(2)
+    expect(await spec($)).toContain('for "/login should redirect')
   })
 
   test('a malformed reply produces no band and no toast', async ($, on) => {
