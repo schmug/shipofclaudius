@@ -9,7 +9,7 @@
 
 ## 0. Why this exists / how to read it
 
-Build a low-bar channel through which an agent can report friction with Cory's *own agent
+Build a low-bar channel through which an agent can report friction with Schmug's *own agent
 tooling*, so that friction becomes fixable instead of evaporating at the end of a session.
 
 Read §1 before touching anything — this design is a deliberate inversion of an existing
@@ -55,12 +55,12 @@ separate channel with a different bar and a different sink. Do not merge them.
 
 | Fork | Decision | Rejected, and why |
 |---|---|---|
-| What a vent is about | Friction with **Cory's agent tooling** (`~/.claude` + this plugin) | The working repo (fix target varies per repo, no single triage owner); both unfiltered (needs stronger triage than we're building) |
+| What a vent is about | Friction with **Schmug's agent tooling** (`~/.claude` + this plugin) | The working repo (fix target varies per repo, no single triage owner); both unfiltered (needs stronger triage than we're building) |
 | How it fires | **MCP tool** bundled in this plugin | A skill or a documented bash script — both reproduce the board's exact failure mode: a procedure the agent must remember and choose. A Stop-hook harvest was rejected because it captures what a phrase filter detects (measured 10–18% precision), not what the agent actually found frustrating. |
 | Sink + triage | **Local JSONL → scheduled weekly triage → clustered issues** | Slack (network call in the hot path, external persistence of tooling complaints); GitHub-issue-per-vent (relocates the noise into a tracker that is actually read) |
 
 The structural analogy: Lovable's agent vents about the platform it runs on, and a debug agent
-fixes that platform. Cory's platform is `~/.claude` + `shipofclaudius`.
+fixes that platform. Schmug's platform is `~/.claude` + `shipofclaudius`.
 
 ---
 
@@ -83,7 +83,7 @@ agent hits friction
         ONE issue per cluster in            ONE issue per cluster in
         schmug/shipofclaudius               schmug/dotclaude
                                             (guardrail edits still need
-                                             Cory's approval to land)
+                                             Schmug's approval to land)
 ```
 
 Three units, each independently testable: the server (pure I/O contract), the sink (a file
@@ -150,7 +150,7 @@ Newline-delimited JSON-RPC 2.0 over stdio, both eras.
 
 ### 4.2 Tool description (verbatim — this text IS the bar)
 
-> Record friction with Cory's agent tooling: a hook that blocked legitimate work, a skill that
+> Record friction with Schmug's agent tooling: a hook that blocked legitimate work, a skill that
 > misfired, a permission denial that cost you a retry, a guardrail whose rule was ambiguous, a
 > command that failed confusingly. Free text — say what happened and what you wanted to happen.
 > There is no bar to clear and no format to follow; if something about this environment made
@@ -279,7 +279,7 @@ A scheduled task (`~/.claude/scheduled-tasks/`), weekly. The pattern is proven �
      `hooks/git-push-guard.py`) → **one** GitHub issue per cluster in `schmug/dotclaude`,
      same prompt-shaped body. Filing an issue is a *proposal*, not an edit: a guardrail
      change — `settings.json` permissions/hooks, rulesets, global `CLAUDE.md` — still needs
-     Cory's explicit approval before it lands, and `main` there carries a ruleset requiring a
+     Schmug's explicit approval before it lands, and `main` there carries a ruleset requiring a
      PR plus the `checks` status check.
 4. Advance the watermark only after step 3 completes.
 

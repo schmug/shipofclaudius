@@ -20,7 +20,7 @@ const META_VERSION = 'io.modelcontextprotocol/protocolVersion'
 export const TOOL = {
   name: 'vent',
   description:
-    "Record friction with Cory's agent tooling: a hook that blocked legitimate work, " +
+    "Record friction with Schmug's agent tooling: a hook that blocked legitimate work, " +
     'a skill that misfired, a permission denial that cost you a retry, a guardrail whose ' +
     'rule was ambiguous, a command that failed confusingly. Free text — say what happened ' +
     'and what you wanted to happen. There is no bar to clear and no format to follow; if ' +

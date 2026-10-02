@@ -121,7 +121,7 @@ mutate the same dispatcher.
 ## Descoped
 
 - **Triage scheduled task** (impl-plan Task 7). Outside the repo (`~/.claude/scheduled-tasks/`), so
-  no lane can build it; it is a guardrail edit needing Cory's explicit approval, and it is gated on
+  no lane can build it; it is a guardrail edit needing Schmug's explicit approval, and it is gated on
   spec §9 — fewer than five vents in three weeks means delete the tool rather than build triage for
   it. File a follow-up issue only once the tool has shipped and cleared that bar.
 
@@ -299,4 +299,4 @@ no stylesheets.
 2. **Verify all five defect-class keys came back.** A lens that vanished silently looks exactly like a
    lens that found nothing.
 3. **Phase 4** is `stacked-merge-walk`, base-first in dependency order. It stages by default and
-   merges nothing until `execute: true`, which is Cory's call, not an agent's.
+   merges nothing until `execute: true`, which is Schmug's call, not an agent's.

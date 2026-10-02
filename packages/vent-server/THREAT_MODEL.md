@@ -277,5 +277,5 @@ stdout at all. That is still shape conformance, not client verification.
 
 ## Not in scope here
 
-The weekly triage task and its watermark (spec §6, gated on Cory's approval since it
+The weekly triage task and its watermark (spec §6, gated on Schmug's approval since it
 lives under `~/.claude/`).
