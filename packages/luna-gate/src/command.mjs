@@ -101,6 +101,8 @@ export function tokenize(s, subs = []) {
       cur += s.slice(i, j); has = true; i = j - 1
       continue
     }
+    // Backslash-newline is a line continuation, outside single quotes: both characters go.
+    if (c === '\\' && s[i + 1] === '\n' && q !== "'") { i++; continue }
     if (q) {
       if (c === q) q = null
       else if (c === '\\' && q === '"' && i + 1 < s.length) cur += s[++i]
@@ -121,14 +123,27 @@ export function tokenize(s, subs = []) {
   return out
 }
 
-// How many commands the line runs at top level (separator-delimited, non-empty).
-// The hook reviews refs as they are BEFORE the Bash call, so anything running alongside
-// `gh pr create` (a `cd`, `git checkout`, `git commit`) can change what the PR carries.
-export function commandCount(command) {
+// Substitutions that only produce text: the `--body "$(cat <<'EOF' ...)"` idiom.
+const TEXT_ONLY = new Set(['cat', 'echo', 'printf'])
+const firstWord = (toks) => toks.find((x) => typeof x === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x))
+
+// How many commands the line runs (separator-delimited, non-empty). The hook reviews refs
+// as they are BEFORE the Bash call, so anything running alongside `gh pr create` (a `cd`,
+// `git checkout`, `git commit`) can change what the PR carries. That includes commands in
+// `$(...)` / backticks, which run during expansion, before gh; only a single text-only
+// command (cat/echo/printf) inside one is free.
+export function commandCount(command, depth = 0) {
+  const subs = []
+  const toks = tokenize(String(command), subs)
   let n = 0
   let inCmd = false
-  for (const t of tokenize(String(command))) {
+  for (const t of toks) {
     if (typeof t === 'string') { if (!inCmd) { n++; inCmd = true } } else inCmd = false
+  }
+  for (const sub of subs) {
+    const inner = commandCount(sub, depth + 1)
+    const word = firstWord(tokenize(sub))
+    if (depth > 8 || inner > 1 || (inner === 1 && !TEXT_ONLY.has(word))) n += Math.max(inner, 1)
   }
   return n
 }
@@ -169,14 +184,14 @@ export function findPrCreates(command, depth = 0) {
   for (let i = 0; i + 2 < t.length; i++) {
     if (!isGh(t[i])) continue
     const found = { base: null, head: null, repo: null }
+    Object.defineProperty(found, 'host', { value: null, writable: true, enumerable: false })
     let k = skipRepoFlags(t, i + 1, found)
     if (t[k] !== 'pr') continue
     k = skipRepoFlags(t, k + 1, found)
     if (!CREATE.has(t[k])) continue
-    if (!found.repo) {
-      for (let b = i - 1; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
-        if (t[b].startsWith('GH_REPO=')) found.repo = t[b].slice(8) || null
-      }
+    for (let b = i - 1; b >= 0 && typeof t[b] === 'string' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[b]); b--) {
+      if (t[b].startsWith('GH_REPO=') && !found.repo) found.repo = t[b].slice(8) || null
+      if (t[b].startsWith('GH_HOST=')) found.host = t[b].slice(8) || null
     }
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]

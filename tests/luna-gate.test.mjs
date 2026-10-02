@@ -82,6 +82,8 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh --repo=o/t pr create'), [{ base: null, head: null, repo: 'o/t' }])
   assert.deepEqual(findPrCreates('gh -R o/t pr list'), [])
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
+  assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
+  assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
   assert.deepEqual(findPrCreates('GH_REPO=up/x FOO=1 gh pr create'), [{ base: null, head: null, repo: 'up/x' }], 'inline GH_REPO')
 })
 
@@ -93,6 +95,10 @@ test('commandCount: redirections and heredoc bodies are one command; separators 
   assert.equal(commandCount('cd ../other && gh pr create'), 2)
   assert.equal(commandCount('git checkout risky; gh pr create'), 2)
   assert.equal(commandCount('(cd x && gh pr create)'), 2)
+  assert.equal(commandCount('x=$(git checkout risky 2>/dev/null) gh pr create --fill'), 2, 'a substitution runs before gh')
+  assert.equal(commandCount('gh pr create -t "`git switch risky`"'), 2)
+  assert.equal(commandCount('gh pr create -t "$(echo hi)" --body "$(cat <<\'EOF\'\nx\nEOF\n)"'), 1, 'text-only substitutions are free')
+  assert.equal(commandCount('gh pr \\\ncreate --fill'), 1)
 })
 
 test('sameRepo: -R matches origin across URL forms, and nothing else', () => {
@@ -103,6 +109,8 @@ test('sameRepo: -R matches origin across URL forms, and nothing else', () => {
   assert.ok(!sameRepo('ghe.corp/schmug/x', 'git@github.com:schmug/x.git'))
   assert.ok(!sameRepo('x', 'git@github.com:schmug/x.git'))
   assert.ok(!sameRepo('schmug/x', ''))
+  assert.ok(!sameRepo('schmug/x', 'git@github.com:schmug/x.git', 'ghe.corp'), 'a hostless selector means GH_HOST')
+  assert.ok(sameRepo('schmug/x', 'git@ghe.corp:schmug/x.git', 'GHE.corp'))
 })
 
 test('tokenize: quotes, escapes and separators', () => {
@@ -375,6 +383,37 @@ test('e2e: a rename with a credential path at either end is withheld whole', asy
   assert.deepEqual([...c.omitted].sort(), ['.dev.vars', '.env', 'config.txt', 'notes.txt'])
 })
 
+test('e2e: a copy of a credential file is withheld, unchanged or edited', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'luna-gate-copy-'))
+  g(dir, 'init', '-q', '-b', 'main')
+  const secret = Array.from({ length: 30 }, (_, i) => `KEY_${i}=COPYSECRET-${i}`).join('\n') + '\n'
+  await writeFile(join(dir, '.env'), secret)
+  await writeFile(join(dir, 'app.js'), 'x\n')
+  g(dir, 'add', '-f', '.'); g(dir, 'commit', '-qm', 'base')
+  g(dir, 'checkout', '-q', '-b', 'feat')
+  await writeFile(join(dir, 'notes.txt'), secret)
+  await writeFile(join(dir, 'edited.txt'), secret + 'one more line\n')
+  await writeFile(join(dir, 'app.js'), 'y\n')
+  g(dir, 'add', '.'); g(dir, 'commit', '-qm', 'copies')
+  const c = collectChange(dir, { maxBytes: 600_000 })
+  assert.ok(!buildRequest(c, loadConfig({})).prompt.includes('COPYSECRET'), 'a copy of .env was sent')
+  assert.deepEqual(c.files.map((f) => f.path), ['app.js'])
+  assert.deepEqual([...c.omitted].sort(), ['.env', 'edited.txt', 'notes.txt'])
+})
+
+test('e2e: an ordinary copy is reviewed, and its unchanged source is not called withheld', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'luna-gate-copy2-'))
+  g(dir, 'init', '-q', '-b', 'main')
+  await writeFile(join(dir, 'lib.js'), Array.from({ length: 30 }, (_, i) => `export const v${i} = ${i}`).join('\n') + '\n')
+  g(dir, 'add', '.'); g(dir, 'commit', '-qm', 'base')
+  g(dir, 'checkout', '-q', '-b', 'feat')
+  await writeFile(join(dir, 'lib2.js'), await readFile(join(dir, 'lib.js'), 'utf8'))
+  g(dir, 'add', '.'); g(dir, 'commit', '-qm', 'copy')
+  const c = collectChange(dir, { maxBytes: 600_000 })
+  assert.deepEqual(c.files.map((f) => f.path), ['lib2.js'])
+  assert.deepEqual(c.omitted, [])
+})
+
 test('e2e: byte budget truncates the diff and drops full contents', async () => {
   const dir = await makeRepo()
   const c = collectChange(dir, { maxBytes: 40 })
@@ -483,7 +522,9 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['echo $(gh pr create --head feat) && gh pr create', /2 times/],
       ['cd ../other && gh pr create', /shares this Bash call/],
       ['git checkout feat && gh pr create --base main', /shares this Bash call/],
-      ['GH_REPO=upstream/proj gh pr create', /GH_REPO/]]) {
+      ['GH_REPO=upstream/proj gh pr create', /GH_REPO/],
+      ['GH_HOST=ghe.corp gh pr create -R schmug/proj', /not this checkout's origin/],
+      ['x=$(git checkout feat) gh pr create --base main', /shares this Bash call/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)

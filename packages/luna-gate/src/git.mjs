@@ -71,11 +71,13 @@ export function remoteId(url) {
 }
 
 // Does `-R [HOST/]OWNER/REPO` (or GH_REPO) name the repository `remoteUrl` points at?
-export function sameRepo(repoFlag, remoteUrl) {
+// A hostless selector means GH_HOST when set, as gh resolves it, else github.com.
+export function sameRepo(repoFlag, remoteUrl, defaultHost = 'github.com') {
   const parts = String(repoFlag).toLowerCase().replace(/\.git$/, '').split('/')
   if (parts.length < 2 || parts.length > 3 || parts.some((p) => !p)) return false
   const id = remoteId(remoteUrl)
-  return !!id && id === [parts.length === 3 ? parts[0] : 'github.com', ...parts.slice(-2)].join('/')
+  const host = parts.length === 3 ? parts[0] : String(defaultHost || 'github.com').toLowerCase()
+  return !!id && id === [host, ...parts.slice(-2)].join('/')
 }
 
 // Without -R/GH_REPO, gh targets the remote pinned by `gh repo set-default`
@@ -111,6 +113,21 @@ export function parseNameStatus(raw) {
   return out
 }
 
+// Parses `git diff --raw -z --no-abbrev`: { status, from?, path, oldSha, newSha }.
+export function parseRaw(raw) {
+  const parts = raw.split('\0')
+  const out = []
+  for (let i = 0; i < parts.length - 1;) {
+    const head = parts[i++]
+    if (!head.startsWith(':')) continue
+    const [, , oldSha, newSha, st] = head.slice(1).split(' ')
+    const status = st[0]
+    if (status === 'R' || status === 'C') out.push({ status, from: parts[i++], path: parts[i++], oldSha, newSha })
+    else out.push({ status, path: parts[i++], oldSha, newSha })
+  }
+  return out
+}
+
 // Reads `.luna-gate.json` at a ref. Returns true only for an explicit `"enabled": false`.
 export function optedOut(cwd, ref) {
   const raw = tryGit(cwd, ['show', `${ref}:.luna-gate.json`])
@@ -120,13 +137,13 @@ export function optedOut(cwd, ref) {
 
 // `reject`: gh would open the PR from refs this machine cannot see, so reviewing local
 // refs would review a substitute. Not an error to fail open on; block mode denies it.
-export function collectChange(cwd, { base = null, head = null, repo = null, maxBytes }) {
+export function collectChange(cwd, { base = null, head = null, repo = null, ghHost = null, maxBytes }) {
   const root = repoRoot(cwd)
   if (!root) return { error: 'not inside a git repository' }
   if (head && head.includes(':')) {
     return { reject: `\`--head ${head}\` names a branch in another user's repository, which luna-gate cannot review locally` }
   }
-  if (repo && !sameRepo(repo, originUrl(root))) {
+  if (repo && !sameRepo(repo, originUrl(root), ghHost || undefined)) {
     return { reject: `\`--repo ${repo}\` (or GH_REPO) is not this checkout's origin, so luna-gate cannot resolve the PR's base and head locally` }
   }
   if (!repo) {
@@ -143,18 +160,34 @@ export function collectChange(cwd, { base = null, head = null, repo = null, maxB
   if (!mergeBase) return { error: `${baseRef} and ${headRef} share no history` }
 
   const range = [mergeBase, headSha]
-  const allFiles = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range]))
+  // -C --find-copies-harder: an unchanged `.env` copied to `notes.txt` shows up as a copy.
+  const allFiles = parseRaw(git(root, ['diff', '--raw', '-z', '--no-abbrev', '-M', '-C', '--find-copies-harder', ...range]))
   // A rename or copy with a credential-shaped path at EITHER end is withheld whole. The
   // excludes alone would drop only the sensitive side, and the other side would still
   // carry the bytes: `config.txt -> .env` as a full deletion hunk, `.env -> notes.txt`
-  // as a full addition.
-  const sensitive = new Set(git(root, ['diff', '--name-only', '-z', '--no-renames', ...range, ...SENSITIVE_ONLY]).split('\0').filter(Boolean))
-  const pairExcludes = allFiles.filter((f) => f.from && (sensitive.has(f.from) || sensitive.has(f.path)))
-    .flatMap((f) => [f.from, f.path]).map((p) => `:(exclude,literal)${p}`)
+  // as a full addition. Copy detection is heuristic (and gives up past diff.renameLimit),
+  // so any file whose old or new blob IS a credential file's blob is withheld as well.
+  // Every credential-shaped file in either tree, with its blob: a diff from the empty tree,
+  // because ls-tree does not take glob/icase pathspec magic.
+  const emptyTree = git(root, ['hash-object', '-t', 'tree', '/dev/null']).trim()
+  const emptyBlob = git(root, ['hash-object', '-t', 'blob', '/dev/null']).trim()
+  const sensitive = new Set()
+  const sensitiveBlobs = new Set()
+  for (const ref of [mergeBase, headSha]) {
+    for (const f of parseRaw(git(root, ['diff', '--raw', '-z', '--no-abbrev', '--no-renames', emptyTree, ref, ...SENSITIVE_ONLY]))) {
+      sensitive.add(f.path)
+      if (f.newSha !== emptyBlob) sensitiveBlobs.add(f.newSha)
+    }
+  }
+  const leaks = (f) => (f.from && (sensitive.has(f.from) || sensitive.has(f.path))) ||
+    (!sensitive.has(f.path) && (sensitiveBlobs.has(f.newSha) || sensitiveBlobs.has(f.oldSha)))
+  const pairExcludes = allFiles.filter(leaks).flatMap((f) => [f.from, f.path].filter(Boolean)).map((p) => `:(exclude,literal)${p}`)
   const pathspec = [...PATHSPEC, ...pairExcludes]
   const files = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range, ...pathspec]))
   const kept = new Set(files.flatMap((f) => [f.from, f.path]).filter(Boolean))
-  const omitted = [...new Set(allFiles.flatMap((f) => [f.from, f.path]).filter((p) => p && !kept.has(p)))]
+  // A copy's source is unchanged, so it is only "withheld" when the pair was withheld.
+  const omitted = [...new Set(allFiles.flatMap((f) => (f.status === 'C' && !leaks(f) ? [f.path] : [f.from, f.path]))
+    .filter((p) => p && !kept.has(p)))]
 
   let diff = git(root, ['diff', '--no-color', '--no-ext-diff', '-M', '--function-context', ...range, ...pathspec])
   let truncated = false

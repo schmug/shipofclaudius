@@ -30,13 +30,13 @@ export function remoteSkipped(cfg, remotes) {
   return [remotes].flat().some((r) => r && re.test(r)) ? { skip: true, note: null } : { skip: false }
 }
 
-export async function prepare({ cwd, base, head, repo = null, remoteUrl = null, cfg }) {
+export async function prepare({ cwd, base, head, repo = null, ghHost = null, remoteUrl = null, cfg }) {
   // Skip-listed repos are checked first, so they are left alone silently rather than
   // rejected or errored on.
   const root = repoRoot(cwd)
   const rs = remoteSkipped(cfg, [root ? originUrl(root) : '', remoteUrl])
   if (rs.skip) return { outcome: { kind: 'skip', note: rs.note } }
-  const change = collectChange(cwd, { base, head, repo, maxBytes: cfg.maxBytes })
+  const change = collectChange(cwd, { base, head, repo, ghHost, maxBytes: cfg.maxBytes })
   if (change.reject) return { outcome: { kind: 'reject', message: change.reject } }
   if (change.error) return { outcome: { kind: 'error', message: change.error } }
   if (change.empty) {
@@ -57,8 +57,8 @@ export async function writeAck(cfg, change) {
   await writeFile(ackPath(cfg, change.ackKey), `${change.mergeBase}..${change.headSha}\n${new Date().toISOString()}\n`)
 }
 
-export async function review({ cwd, base = null, head = null, repo = null, remoteUrl = null, cfg, fetchImpl, useCache = true }) {
-  const prep = await prepare({ cwd, base, head, repo, remoteUrl, cfg })
+export async function review({ cwd, base = null, head = null, repo = null, ghHost = null, remoteUrl = null, cfg, fetchImpl, useCache = true }) {
+  const prep = await prepare({ cwd, base, head, repo, ghHost, remoteUrl, cfg })
   if (prep.outcome) return prep.outcome
   const { change } = prep
 

@@ -51,7 +51,8 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   } else {
     const [pr] = prs
     try {
-      outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head, repo: pr.repo || env.GH_REPO || null, cfg, fetchImpl })
+      outcome = await review({ cwd: event.cwd || process.cwd(), base: pr.base, head: pr.head,
+        repo: pr.repo || env.GH_REPO || null, ghHost: pr.host || env.GH_HOST || null, cfg, fetchImpl })
     } catch (e) {
       outcome = { kind: 'error', message: e?.message || String(e) }
     }
