@@ -50,7 +50,9 @@ export async function cli(argv, { env = process.env, fetchImpl, out = console.lo
     return 0
   }
 
-  const o = await review({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, cfg, fetchImpl, useCache: a.cache })
+  // checkTarget: false. The gh-target rejections model what `gh pr create` would open;
+  // the CLI (and the pre-push hook) review an explicit or default range, not a gh call.
+  const o = await review({ cwd: a.cwd, base: a.base, head: a.head, from: a.from, remoteUrl: a.remoteUrl, checkTarget: false, cfg, fetchImpl, useCache: a.cache })
   if (a.json) {
     const { change, ...rest } = o
     out(JSON.stringify({ ...rest, range: change ? `${change.mergeBase}..${change.headSha}` : null }, null, 2))

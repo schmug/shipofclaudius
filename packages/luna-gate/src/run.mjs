@@ -57,8 +57,8 @@ export async function writeAck(cfg, change) {
   await writeFile(ackPath(cfg, change.ackKey), `${change.mergeBase}..${change.headSha}\n${new Date().toISOString()}\n`)
 }
 
-export async function review({ cwd, base = null, head = null, repo = null, ghHost = null, from = null, remoteUrl = null, cfg, fetchImpl, useCache = true }) {
-  const prep = await prepare({ cwd, base, head, repo, ghHost, from, remoteUrl, cfg })
+export async function review({ cwd, base = null, head = null, repo = null, ghHost = null, from = null, remoteUrl = null, checkTarget = true, cfg, fetchImpl, useCache = true }) {
+  const prep = await prepare({ cwd, base, head, repo, ghHost, from, remoteUrl, checkTarget, cfg })
   if (prep.outcome) return prep.outcome
   const { change } = prep
 

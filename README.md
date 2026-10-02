@@ -389,17 +389,28 @@ status=0
 while read -r lref lsha rref rsha; do
   case "$lsha" in *[!0]*) ;; *) continue ;; esac   # all zeros: a deletion, nothing to review
   # An existing remote ref is diffed DIRECTLY against what replaces it (--from), so a
-  # rewind or force-push shows the commits it removes too. Only a new ref (all zeros)
-  # uses the default base; a remote tip this clone has not fetched is refused.
-  from=
-  case "$rsha" in *[!0]*)
-    if ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
-      echo "luna-gate: $rref is at $rsha on the remote, which this clone lacks; fetch, then push again" >&2
-      status=1; continue
-    fi
-    from=$rsha ;;
+  # rewind or force-push shows the commits it removes too; a remote tip this clone has
+  # not fetched is refused. A new ref (all zeros) is reviewed against the REMOTE's
+  # default branch, never the checked-out branch's gh-merge-base.
+  from= base=
+  case "$rsha" in
+    *[!0]*)
+      if ! git cat-file -e "$rsha^{commit}" 2>/dev/null; then
+        echo "luna-gate: $rref is at $rsha on the remote, which this clone lacks; fetch, then push again" >&2
+        status=1; continue
+      fi
+      from=$rsha ;;
+    *)
+      base=$(git symbolic-ref -q --short "refs/remotes/$1/HEAD" 2>/dev/null) || base=
+      for b in "$1/main" "$1/master"; do
+        [ -z "$base" ] && git rev-parse -q --verify "$b^{commit}" >/dev/null 2>&1 && base=$b
+      done
+      if [ -z "$base" ]; then
+        echo "luna-gate: no default branch known for remote $1; run: git remote set-head $1 --auto" >&2
+        status=1; continue
+      fi ;;
   esac
-  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" ${from:+--from "$from"} </dev/null || status=1
+  node /absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs --head "$lsha" --remote-url "$2" ${from:+--from "$from"} ${base:+--base "$base"} </dev/null || status=1
 done
 exit $status
 ```
@@ -410,7 +421,7 @@ exit $status
 - a fork head (`--head owner:branch`);
 - a target repository other than `origin`, whether from `-R` (in any position gh accepts), `GH_REPO`, `gh repo set-default`, or another remote gh might pick when none is pinned;
 - more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
-- `gh` behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
+- `gh` run from a path other than bare `gh` or a standard install location, or behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
 - a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
 - `${...}`, `$((...))` or `$[...]` expansion anywhere outside single quotes (`${x@P}` runs code);
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.

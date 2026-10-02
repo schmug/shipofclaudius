@@ -84,6 +84,26 @@ function skipHeredocBodies(s, nl, pending, expand = null) {
   return k
 }
 
+// Bash ANSI-C quoting `$'...'`, starting at the `'` (s[i]). Returns [decoded, index of
+// the closing quote]. `$'gh' pr $'create'` runs gh pr create, so it must read as such.
+const SIMPLE_ESC = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' }
+function ansiC(s, i) {
+  let out = ''
+  let k = i + 1
+  for (; k < s.length && s[k] !== "'"; k++) {
+    if (s[k] !== '\\') { out += s[k]; continue }
+    const n = s[++k]
+    let m
+    if (n in SIMPLE_ESC) out += SIMPLE_ESC[n]
+    else if ((m = /^[0-7]{1,3}/.exec(s.slice(k)))) { out += String.fromCharCode(parseInt(m[0], 8)); k += m[0].length - 1 }
+    else if (n === 'x' && (m = /^[0-9a-fA-F]{1,2}/.exec(s.slice(k + 1)))) { out += String.fromCharCode(parseInt(m[0], 16)); k += m[0].length }
+    else if ((n === 'u' || n === 'U') && (m = new RegExp(`^[0-9a-fA-F]{1,${n === 'u' ? 4 : 8}}`).exec(s.slice(k + 1)))) { out += String.fromCodePoint(parseInt(m[0], 16)); k += m[0].length }
+    else if (n === 'c' && k + 1 < s.length) { out += String.fromCharCode(s[++k].charCodeAt(0) & 31) }
+    else out += '\\' + (n ?? '')
+  }
+  return [out, k]
+}
+
 // A small POSIX-ish tokenizer: quotes, backslashes, `$(...)` and heredocs are honoured,
 // and unquoted separators become `{ sep }` objects so they can never be confused with an
 // argument that happens to be the string ";".
@@ -104,6 +124,8 @@ export function tokenize(s, subs = [], meta = {}) {
     // `${...}` (e.g. `${x@P}` runs the command substitutions in x), `$((...))` and `$[...]`
     // can execute code without a visible `$(`; flagged wherever expansion happens.
     if (c === '$' && q !== "'" && (s[i + 1] === '{' || s[i + 1] === '[' || (s[i + 1] === '(' && s[i + 2] === '('))) meta.expansion = true
+    if (c === '$' && !q && s[i + 1] === "'") { const [dec, e] = ansiC(s, i + 1); cur += dec; has = true; i = e; continue }
+    if (c === '$' && !q && s[i + 1] === '"') { q = '"'; has = true; i++; continue }   // $"..." (locale) is "..."
     if (c === '$' && s[i + 1] === '(' && q !== "'") {
       const j = skipSubst(s, i)
       subs.push(s.slice(i + 2, j - 1))
@@ -154,7 +176,6 @@ export function hasRiskyExpansion(command, depth = 0) {
 
 // Substitutions that only produce text: the `--body "$(cat <<'EOF' ...)"` idiom.
 const TEXT_ONLY = new Set(['cat', 'echo', 'printf'])
-const firstWord = (toks) => toks.find((x) => typeof x === 'string' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x))
 
 // How many commands the line runs (separator-delimited, non-empty). The hook reviews refs
 // as they are BEFORE the Bash call, so anything running alongside `gh pr create` (a `cd`,
@@ -174,8 +195,9 @@ export function commandCount(command, depth = 0) {
     const inner = commandCount(sub, depth + 1)
     const meta = {}
     const nested = []
-    const word = firstWord(tokenize(sub, nested, meta))
-    const free = inner === 1 && TEXT_ONLY.has(word) && !meta.redirect && !nested.length
+    const toks = tokenize(sub, nested, meta)
+    // The text-only word must come FIRST: `PATH=/tmp/bin cat` could run any `cat`.
+    const free = inner === 1 && TEXT_ONLY.has(toks[0]) && !meta.redirect && !nested.length
     if (depth > 8 || (inner > 0 && !free)) n += Math.max(inner, 1)
   }
   return n
@@ -188,6 +210,9 @@ const VALUE_FLAGS = new Set(['--title', '-t', '--body', '-b', '--body-file', '-F
   '--template', '-T', '--recover'])
 
 const isGh = (t) => typeof t === 'string' && (t === 'gh' || t.endsWith('/gh'))
+// Only bare `gh` (resolved through the session's own PATH) or a standard install location
+// is trusted; any other path could be a wrapper that runs the real gh somewhere else.
+const TRUSTED_GH = new Set(['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh', '/snap/bin/gh'])
 
 const FLAGS = [['base', '--base', '-B'], ['head', '--head', '-H'], ['repo', '--repo', '-R']]
 
@@ -246,6 +271,7 @@ export function findPrCreates(command, depth = 0) {
     // `gh` must be the command word. Anything else first (`env -C dir`, `sudo`, `xargs`,
     // `sh -c`) may run it in another context, so it is reported as wrapped.
     if (b >= 0 && typeof t[b] === 'string') found.wrapped = true
+    if (!TRUSTED_GH.has(t[i])) found.wrapped = true
     for (let j = k + 1; j < t.length && typeof t[j] === 'string'; j++) {
       const a = t[j]
       const next = typeof t[j + 1] === 'string' ? t[j + 1] : null

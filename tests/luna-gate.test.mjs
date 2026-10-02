@@ -84,6 +84,12 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
   assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
   assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
+  assert.deepEqual(findPrCreates("$'gh' pr create --head risky"), [{ base: null, head: 'risky', repo: null }], 'ANSI-C quoted command word')
+  assert.deepEqual(findPrCreates("gh pr $'cr\\x65ate' --head r"), [{ base: null, head: 'r', repo: null }], 'ANSI-C escapes are decoded')
+  assert.deepEqual(findPrCreates('gh pr $"create" --head r'), [{ base: null, head: 'r', repo: null }], 'locale quoting')
+  assert.ok(findPrCreates('/tmp/gh pr create')[0].wrapped, 'an untrusted gh path is a wrapper')
+  assert.ok(!findPrCreates('/opt/homebrew/bin/gh pr create')[0].wrapped)
+  assert.equal(commandCount('gh pr create --body "$(PATH=/tmp/bin cat body)"'), 2, 'an assignment before cat forfeits the text-only exemption')
   assert.deepEqual(findPrCreates('gh pr create -H=feat -B=main -R=o/r'), [{ base: 'main', head: 'feat', repo: 'o/r' }], 'pflag -X=value form')
   assert.ok(hasRiskyExpansion('gh pr create --title "${x@P}"'), '${x@P} runs command substitutions')
   assert.ok(hasRiskyExpansion('gh pr create --title "$((a[0]))"'))
@@ -621,7 +627,8 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['PATH=/tmp/bin gh pr create --base main', /wrapper/],
       ['gh pr create --head "$(printf feat)" --base main', /computed by the shell/],
       ['gh pr create --base $BASE', /computed by the shell/],
-      ['gh pr create --base main --title "${x@P}"', /expansion/]]) {
+      ['gh pr create --base main --title "${x@P}"', /expansion/],
+      ['/tmp/gh pr create --base main', /wrapper/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)
@@ -831,6 +838,26 @@ test('pre-push: an existing remote ref is the base, so a push the default base a
   // A brand-new remote ref still works (default base, no empty --from argument).
   const clean = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [] }) })
   execFileSync('git', ['push', '-q', 'origin', 'feat:brand-new'], { cwd: dir, env: { ...env, LUNA_GATE_CODEX_BIN: clean.bin }, stdio: 'pipe' })
+})
+
+test('pre-push: a new ref is reviewed against the remote default, never the checkout\'s gh-merge-base', async () => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
+  const snippet = readme.match(/```sh\n(#!\/bin\/sh\n[^`]*?review\.mjs[^`]*?)```/)[1]
+    .replace('/absolute/path/to/shipofclaudius/packages/luna-gate/bin/review.mjs', fileURLToPath(new URL('../packages/luna-gate/bin/review.mjs', import.meta.url)))
+  const dir = await makeRepo()
+  const remote = await mkdtemp(join(tmpdir(), 'luna-gate-remote-'))
+  g(remote, 'init', '-q', '--bare')
+  g(dir, 'remote', 'add', 'origin', remote)
+  g(dir, 'push', '-q', 'origin', 'main'); g(dir, 'fetch', '-q', 'origin')
+  // An unpinned second remote: gh-target checks must not apply to a plain push review.
+  g(dir, 'remote', 'add', 'upstream', 'https://github.com/someone/else.git')
+  g(dir, 'checkout', '-q', 'main'); g(dir, 'config', 'branch.main.gh-merge-base', 'feat')
+  await writeFile(join(dir, '.git', 'hooks', 'pre-push'), snippet, { mode: 0o755 })
+  const fake = await fakeCodex({ out: JSON.stringify({ summary: '', findings: [F()] }) })
+  const env = { ...(await codexEnv(fake.bin)), LUNA_GATE: '' }
+  assert.throws(() => execFileSync('git', ['push', '-q', 'origin', 'feat:brand-new'], { cwd: dir, env, stdio: 'pipe' }),
+    'origin/main..feat was reviewed (gh-merge-base=feat would have made it empty) and the finding blocked it')
+  assert.ok((await fake.record()).stdin.includes('db.query'))
 })
 
 // The real process, end to end: exit 0 with no stdout when off, and exit 0 always.
