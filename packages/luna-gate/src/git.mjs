@@ -183,8 +183,26 @@ export function collectChange(cwd, { base = null, head = null, repo = null, ghHo
       if (f.newSha !== emptyBlob) sensitiveBlobs.add(f.newSha)
     }
   }
+  // An edited copy can fall below git's similarity threshold and keep a different blob
+  // while still carrying a credential line. So every line (12+ chars, trimmed) of every
+  // credential-shaped file is a marker, and any changed file whose old or new content
+  // contains one is withheld whole. Best effort: a secret reformatted onto a different
+  // line is not caught.
+  const secretLines = new Set()
+  for (const sha of sensitiveBlobs) {
+    let text = ''
+    try { text = gitBuf(root, ['cat-file', 'blob', sha]).toString('utf8') } catch { continue }
+    for (const l of text.split('\n')) { const t = l.trim(); if (t.length >= 12) secretLines.add(t) }
+  }
+  const carriesSecret = (sha) => {
+    if (!secretLines.size || !sha || /^0+$/.test(sha)) return false
+    let text = ''
+    try { text = gitBuf(root, ['cat-file', 'blob', sha]).toString('utf8') } catch { return false }
+    return text.split('\n').some((l) => secretLines.has(l.trim()))
+  }
   const leaks = (f) => (f.from && (sensitive.has(f.from) || sensitive.has(f.path))) ||
-    (!sensitive.has(f.path) && (sensitiveBlobs.has(f.newSha) || sensitiveBlobs.has(f.oldSha)))
+    (!sensitive.has(f.path) && (sensitiveBlobs.has(f.newSha) || sensitiveBlobs.has(f.oldSha) ||
+      carriesSecret(f.newSha) || carriesSecret(f.oldSha)))
   const pairExcludes = allFiles.filter(leaks).flatMap((f) => [f.from, f.path].filter(Boolean)).map((p) => `:(exclude,literal)${p}`)
   const pathspec = [...PATHSPEC, ...pairExcludes]
   const files = parseNameStatus(git(root, ['diff', '--name-status', '-z', '-M', ...range, ...pathspec]))

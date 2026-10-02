@@ -412,6 +412,7 @@ exit $status
 - more than one `gh pr create` (or its alias `gh pr new`) in one Bash call, including any inside `$(...)` or backticks;
 - `gh` behind a wrapper (`env -C dir`, `sudo`, `xargs`, ...) or an inline assignment outside a small allowlist (gh's own `GH_*` auth/display variables, `GH_REPO`/`GH_HOST`, `PAGER`, `NO_COLOR`, `TERM`, locale), since `PATH`, `GIT_*`, `GH_CONFIG_DIR` and the like can swap the binary or point it at another repository;
 - a `--head`, `--base`, `-R`, `GH_REPO` or `GH_HOST` value containing `$`, a backtick, or a glob/brace/tilde character, since the shell computes it after the review;
+- `${...}`, `$((...))` or `$[...]` expansion anywhere outside single quotes (`${x@P}` runs code);
 - `gh pr create` sharing its Bash call with any other command. The review sees the refs as they are before the call, so a `cd`, `git checkout` or `git commit` alongside it could change what the PR carries. Run it on its own.
 
 In `block` mode these are denied with a reason. In `advisory` mode they get a "not reviewed" message. Error text from the API endpoint, and a model's refusal text, are reduced to a status and a code-shaped token before they reach any message, because neither is fenced there.
@@ -442,7 +443,7 @@ Invariants (`tests/luna-gate.test.mjs`):
 - **The hook never breaks a session.** Every path exits 0. A failure is a `systemMessage`, never an exit code.
 - **It can only take permission away.** It emits `permissionDecision: "deny"` or nothing, and never `"allow"`, which would skip your normal permission prompt for `gh pr create`.
 - **Untrusted in, untrusted out.** The diff is attacker-writable, so it is nonce-fenced behind an anti-injection preamble, as in the workflows. The model's findings are derived from that diff, so they are validated field by field, length-clamped, and fenced again before Claude reads them, framed as claims to verify. That includes the summary `review.mjs` prints.
-- **No credential bytes leave the machine.** Credential-shaped files are excluded at the pathspec, case-insensitively, and the codex backend runs with no tool that could read them off disk.
+- **No credential bytes leave the machine.** Credential-shaped files are excluded at the pathspec, case-insensitively. So is any changed file that is a rename or copy of one, shares its exact contents, or contains one of its lines (12+ characters); a secret reformatted onto a different line is the residual. The codex backend runs with no tool that could read them off disk.
 
 This is a quality gate, not a security boundary against the agent. Claude can still open a PR through `gh api`, and a hook that times out lets the call through (see the hooks docs). For real enforcement, put the same `review.mjs` call in CI or a pre-push hook.
 

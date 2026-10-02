@@ -78,7 +78,7 @@ function skipHeredocBodies(s, nl, pending, expand = null) {
       k = end < 0 ? s.length : end
     }
     const body = s.slice(start, bodyEnd)
-    if (expand && !quoted && /\$\(|`/.test(body)) expand.push(body)
+    if (expand && !quoted && /\$[({[]|`/.test(body)) expand.push(body)
     if (k >= s.length) return s.length
   }
   return k
@@ -101,6 +101,9 @@ export function tokenize(s, subs = [], meta = {}) {
   const flush = () => { if (has || cur) out.push(cur); cur = ''; has = false }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
+    // `${...}` (e.g. `${x@P}` runs the command substitutions in x), `$((...))` and `$[...]`
+    // can execute code without a visible `$(`; flagged wherever expansion happens.
+    if (c === '$' && q !== "'" && (s[i + 1] === '{' || s[i + 1] === '[' || (s[i + 1] === '(' && s[i + 2] === '('))) meta.expansion = true
     if (c === '$' && s[i + 1] === '(' && q !== "'") {
       const j = skipSubst(s, i)
       subs.push(s.slice(i + 2, j - 1))
@@ -138,6 +141,15 @@ export function tokenize(s, subs = [], meta = {}) {
   }
   flush()
   return out
+}
+
+// True when the command (or any substitution or expandable heredoc in it) uses `${...}`,
+// `$((...))` or `$[...]`: parameter/arithmetic expansion that can run code before gh.
+export function hasRiskyExpansion(command, depth = 0) {
+  const subs = []
+  const meta = {}
+  tokenize(String(command), subs, meta)
+  return !!meta.expansion || (depth < 8 && subs.some((sub) => hasRiskyExpansion(sub, depth + 1)))
 }
 
 // Substitutions that only produce text: the `--body "$(cat <<'EOF' ...)"` idiom.
@@ -187,7 +199,7 @@ function skipRepoFlags(t, j, found) {
     const a = t[j]
     if (a === '--repo' || a === '-R') { if (typeof t[j + 1] === 'string') found.repo = t[j + 1]; j += 2 }
     else if (typeof a === 'string' && a.startsWith('--repo=')) { found.repo = a.slice(7); j++ }
-    else if (typeof a === 'string' && a.startsWith('-R') && a.length > 2) { found.repo = a.slice(2); j++ }
+    else if (typeof a === 'string' && a.startsWith('-R') && a.length > 2) { found.repo = a.slice(a[2] === '=' ? 3 : 2); j++ }
     else return j
   }
 }
@@ -241,7 +253,8 @@ export function findPrCreates(command, depth = 0) {
       for (const [key, long, short] of FLAGS) {
         if (a === long || a === short) { if (next) { found[key] = next; j++ } }
         else if (a.startsWith(long + '=')) found[key] = a.slice(long.length + 1)
-        else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) found[key] = a.slice(2)
+        // pflag also takes `-H=feat`: the `=` is a separator, not part of the value.
+        else if (a.startsWith(short) && a.length > 2 && !a.startsWith('--')) found[key] = a.slice(a[2] === '=' ? 3 : 2)
       }
     }
     if ([found.base, found.head, found.repo, found.host].some((v) => typeof v === 'string' && DYNAMIC.test(v))) found.dynamic = true

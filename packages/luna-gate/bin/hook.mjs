@@ -11,7 +11,7 @@
 import { readSync, realpathSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { loadConfig } from '../src/config.mjs'
-import { findPrCreates, commandCount } from '../src/command.mjs'
+import { findPrCreates, commandCount, hasRiskyExpansion } from '../src/command.mjs'
 import { review } from '../src/run.mjs'
 import { hookOutput } from '../src/decide.mjs'
 
@@ -49,6 +49,8 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
     outcome = { kind: 'reject', message: `this command runs \`gh pr create\` ${prs.length} times, and one review covers one PR` }
   } else if (prs[0].dynamic) {
     outcome = { kind: 'reject', message: 'a --head/--base/--repo (or GH_REPO/GH_HOST) value is computed by the shell, so the reviewed range cannot be known in advance; pass a literal branch name' }
+  } else if (hasRiskyExpansion(event.tool_input.command)) {
+    outcome = { kind: 'reject', message: 'the command uses `${...}`, `$((...))` or `$[...]` expansion, which can run code before gh does' }
   } else if (prs[0].wrapped) {
     outcome = { kind: 'reject', message: '`gh pr create` runs behind a wrapper (such as `env -C`) or an environment assignment (PATH, GIT_*, GH_CONFIG_DIR, ...) that can swap the binary or point it at another repository than this checkout' }
   } else if (commandCount(event.tool_input.command) > 1) {

@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadConfig, DEFAULTS } from '../packages/luna-gate/src/config.mjs'
-import { tokenize, parsePrCreate, findPrCreates, commandCount } from '../packages/luna-gate/src/command.mjs'
+import { tokenize, parsePrCreate, findPrCreates, commandCount, hasRiskyExpansion } from '../packages/luna-gate/src/command.mjs'
 import { parseNameStatus, collectChange, sameRepo } from '../packages/luna-gate/src/git.mjs'
 import { buildRequest, SCHEMA } from '../packages/luna-gate/src/prompt.mjs'
 import { parseResponse, validateReview, estimateCost, MAX_FINDINGS } from '../packages/luna-gate/src/openai.mjs'
@@ -84,6 +84,13 @@ test('findPrCreates: sees every PR creation, including inside $(...) and backtic
   assert.deepEqual(findPrCreates('gh pr new --base main'), [{ base: 'main', head: null, repo: null }], 'gh pr new is an alias')
   assert.deepEqual(findPrCreates('gh pr \\\ncreate --head feature'), [{ base: null, head: 'feature', repo: null }], 'backslash-newline is a continuation')
   assert.equal(findPrCreates('GH_HOST=ghe.corp gh pr create -R o/r')[0].host, 'ghe.corp')
+  assert.deepEqual(findPrCreates('gh pr create -H=feat -B=main -R=o/r'), [{ base: 'main', head: 'feat', repo: 'o/r' }], 'pflag -X=value form')
+  assert.ok(hasRiskyExpansion('gh pr create --title "${x@P}"'), '${x@P} runs command substitutions')
+  assert.ok(hasRiskyExpansion('gh pr create --title "$((a[0]))"'))
+  assert.ok(hasRiskyExpansion('gh pr create -F - <<EOF\n${x@P}\nEOF'), 'unquoted heredoc bodies expand')
+  assert.ok(!hasRiskyExpansion("gh pr create --title '${x@P}'"), 'single quotes are literal')
+  assert.ok(!hasRiskyExpansion('gh pr create --body "$(cat <<\'EOF\'\n${literal}\nEOF\n)"'), 'a quoted heredoc body is literal')
+  assert.ok(!hasRiskyExpansion('gh pr create --title "$HOME"'))
   assert.deepEqual(findPrCreates('gh pr cre\\ate --head risky'), [{ base: null, head: 'risky', repo: null }], 'escaped spelling still matches')
   assert.deepEqual(findPrCreates("gh pr cre''ate --head risky"), [{ base: null, head: 'risky', repo: null }])
   assert.ok(findPrCreates('gh pr create --head risk?')[0].dynamic, 'a glob is expanded by the shell')
@@ -415,6 +422,25 @@ test('e2e: a copy of a credential file is withheld, unchanged or edited', async 
   assert.deepEqual([...c.omitted].sort(), ['.env', 'edited.txt', 'notes.txt'])
 })
 
+test('e2e: a heavily edited copy that keeps one credential line is withheld', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'luna-gate-partial-'))
+  g(dir, 'init', '-q', '-b', 'main')
+  const lines = Array.from({ length: 100 }, (_, i) => `SETTING_${i}=value-${i}`)
+  lines[50] = 'API_TOKEN=tok_live_RETAINEDSECRET123'
+  await writeFile(join(dir, '.env'), lines.join('\n') + '\n')
+  await writeFile(join(dir, 'app.js'), 'x\n')
+  g(dir, 'add', '-f', '.'); g(dir, 'commit', '-qm', 'base')
+  g(dir, 'checkout', '-q', '-b', 'feat')
+  const rewritten = lines.map((l, i) => (i === 50 ? l : `# rewritten note ${i}`))
+  await writeFile(join(dir, 'notes.txt'), rewritten.join('\n') + '\n')
+  await writeFile(join(dir, 'app.js'), 'y\n')
+  g(dir, 'add', '.'); g(dir, 'commit', '-qm', 'partial copy')
+  const c = collectChange(dir, { maxBytes: 600_000 })
+  assert.ok(!buildRequest(c, loadConfig({})).prompt.includes('RETAINEDSECRET'), 'the retained credential line was sent')
+  assert.deepEqual(c.files.map((f) => f.path), ['app.js'])
+  assert.ok(c.omitted.includes('notes.txt'))
+})
+
 test('e2e: an ordinary copy is reviewed, and its unchanged source is not called withheld', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'luna-gate-copy2-'))
   g(dir, 'init', '-q', '-b', 'main')
@@ -594,7 +620,8 @@ test('e2e: fork heads, another --repo, and two PR creations are rejected, never 
       ['GIT_DIR=../other/.git gh pr create --base main', /wrapper/],
       ['PATH=/tmp/bin gh pr create --base main', /wrapper/],
       ['gh pr create --head "$(printf feat)" --base main', /computed by the shell/],
-      ['gh pr create --base $BASE', /computed by the shell/]]) {
+      ['gh pr create --base $BASE', /computed by the shell/],
+      ['gh pr create --base main --title "${x@P}"', /expansion/]]) {
       const out = await run(cmd)
       assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', cmd)
       assert.match(out.hookSpecificOutput.permissionDecisionReason, why)
