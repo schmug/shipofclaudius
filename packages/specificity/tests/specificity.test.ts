@@ -22,6 +22,12 @@ type World = {
   messages: SessionMessage[]
   /** The prompts the haiku judge was sent. */
   asked: string[]
+  /** The forks taken. */
+  forks: number
+  /** When set, the session holds these once the fork answers (the main thread moved on meanwhile). */
+  afterFork: SessionMessage[] | null
+  /** When set, `$.command.list()` rejects. */
+  commandsFail: boolean
   /** While set, `$.command.list()` waits on it. */
   commandsHeld: Promise<void> | null
 }
@@ -40,7 +46,7 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], commandsHeld: null }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
@@ -54,8 +60,10 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
   })
   on('model.fork', async () => {
     w.modelCalls += 1
+    w.forks += 1
     if (typeof forkReply !== 'string' && !forkReply.isAnswered && forkReply.reason === 'nothing-to-fork') return fork(forkReply)
     await w.clock.sleep(SLOW_MS)
+    if (w.afterFork !== null) w.messages = w.afterFork
     return fork(forkReply)
   })
   on('ui.toast', ($, e) => {
@@ -70,6 +78,7 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', async () => {
     await w.commandsHeld
+    if (w.commandsFail) throw new Error('command lookup failed')
     return { value: [{ name: 'compact', description: 'Compact', source: 'builtin' as const }] }
   })
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: { key: 'engine' }, children: [] }))
@@ -192,6 +201,39 @@ describe('prompt.submit', () => {
     expect(await spec($)).toContain('(fork,')
   })
 
+  test("fork mode never forks once Claude's answer has started", { options: { mode: 'fork' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    w.messages = [
+      { role: 'user', text: 'yes, do option 2', toolUses: [] },
+      { role: 'assistant', text: 'ANSWER-ALREADY-STARTED', toolUses: [] },
+    ]
+    await submit($, 'yes, do option 2')
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+
+    expect(w.forks).toBe(0)
+    expect(w.asked[0] ?? '').not.toContain('ANSWER-ALREADY-STARTED')
+    expect(await spec($)).toContain('(haiku,')
+  })
+
+  test("fork mode drops a fork taken while Claude's answer started", { options: { mode: 'fork' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    w.messages = [{ role: 'user', text: 'yes, do option 2', toolUses: [] }]
+    w.afterFork = [...w.messages, { role: 'assistant', text: 'ANSWER-ALREADY-STARTED', toolUses: [] }]
+    await submit($, 'yes, do option 2')
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+
+    expect(w.forks).toBe(1)
+    expect(w.asked).toHaveLength(1)
+    expect(w.asked[0] ?? '').not.toContain('ANSWER-ALREADY-STARTED')
+    expect(await spec($)).toContain('(haiku,')
+  })
+
   test('fork mode falls back to haiku before the first response', { options: { mode: 'fork' } }, async ($, on) => {
     const w = world(on, GOOD, { isAnswered: false, reason: 'nothing-to-fork' })
     await scored($, w, 'fix the bug')
@@ -302,6 +344,15 @@ describe('prompt.submit', () => {
     await w.clock.advance(SLOW_MS)
     expect(w.modelCalls).toBe(1)
     expect(await spec($)).toContain('spec 72/100')
+  })
+
+  test('a failed command lookup still scores a path-led prompt, replacing the old score', async ($, on) => {
+    const w = world(on, GOOD)
+    await scored($, w, 'fix the bug in src/a.ts')
+    w.commandsFail = true
+    await scored($, w, '/tmp is full')
+
+    expect(await spec($)).toContain('for "/tmp is full"')
   })
 
   test('api errors and aborts are quiet', async ($, on) => {

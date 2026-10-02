@@ -19,6 +19,7 @@ import {
   excerpt,
   forkPrompt,
   HISTORY_CAP,
+  isAnswerUnderway,
   isUserPrompt,
   slashName,
   parseJudgement,
@@ -102,13 +103,29 @@ async function judgeAndWrite(
 ): Promise<void> {
   const name = slashName(prompt)
   if (name !== null) {
-    if ((await $.command.list()).some(c => c.name === name)) return
+    // A lookup that fails is read as "not a command": the prompt is judged and
+    // supersedes the previous score, so a failed lookup never leaves that
+    // score standing as if it were this prompt's.
+    const commands = await $.command.list().catch(() => [])
+    if (commands.some(c => c.name === name)) return
     confirm(order)
   }
 
   const startedAt = await $.clock.now()
   let judge = mode
-  let reply = mode === 'fork' ? await $.model.fork({ prompt: forkPrompt(prompt) }) : null
+  let reply: Awaited<ReturnType<typeof $.model.fork>> | null = null
+  // The fork is the transcript as the main thread last sent it, so once Claude's
+  // answer to this prompt has started it may carry that answer. Checked before
+  // forking and again once the fork answers: if the answer may be in it, the
+  // fork's score is dropped and the haiku judge, whose context is cut at the
+  // prompt, rates it instead.
+  if (mode === 'fork' && !isAnswerUnderway(await $.session.messages(), prompt)) {
+    reply = await $.model.fork({ prompt: forkPrompt(prompt) })
+    if (reply.isAnswered && isAnswerUnderway(await $.session.messages(), prompt)) {
+      $.ui.log('specificity: fork dropped, the answer may be in it; judging with haiku', { to: 'debug' })
+      reply = null
+    }
+  }
   // A session's first prompt has no response to fork yet (and none right after
   // /clear); the context is empty then anyway, so the cheap judge stands in.
   if (reply === null || (!reply.isAnswered && reply.reason === 'nothing-to-fork')) {

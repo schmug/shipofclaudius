@@ -56,6 +56,16 @@ const TOOL_OUTPUT_CHARS = 120
  * kept only as a snippet. Everything from the prompt being scored onward is
  * dropped, so the judge reads the prompt once and never Claude's answer to it.
  */
+/**
+ * Claude's answer to `prompt` has started: the session holds the prompt with
+ * something after it. A fork taken then may carry that answer, which would let
+ * the answer rate the prompt, so the fork judge stands down.
+ */
+export function isAnswerUnderway(messages: readonly SessionMessage[], prompt: string): boolean {
+  const at = messages.findLastIndex(m => m.role === 'user' && m.text.trim() === prompt.trim())
+  return at >= 0 && at < messages.length - 1
+}
+
 export function buildContext(messages: readonly SessionMessage[], prompt: string, limit: number): string {
   // The judge runs after the prompt entered the session, so the session may
   // already hold the prompt and even the start of Claude's answer to it. Cut
