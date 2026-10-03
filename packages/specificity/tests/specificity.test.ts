@@ -7,6 +7,12 @@ const GOOD = JSON.stringify({
   dimensions: { target: 3, outcome: 2, constraints: 1, scope: 2 },
   gap: 'which file?',
   rationale: 'The file is named but done-criteria are loose.',
+  // Out of order on purpose: the panel lists quoted pieces first, missing ones after.
+  notes: [
+    { quote: null, dimension: 'constraints', suggestion: 'Should the public API stay the same?' },
+    { quote: 'fix the bug', dimension: 'outcome', suggestion: 'Say what correct behaviour looks like.' },
+  ],
+  improved: 'Fix [which bug?] in src/a.ts so that [expected behaviour], keeping the public API unchanged.',
 })
 
 const USAGE = { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
@@ -32,6 +38,8 @@ type World = {
   commandsHeld: Promise<void> | null
   /** Panes opened and closed, in order: `open <id>` / `close <id>`. */
   panes: string[]
+  /** The prompt box's draft, which `$.prompt.fill` writes. */
+  draft: string
 }
 
 const answered = (text: string) => ({ isAnswered: true as const, text, usage: USAGE })
@@ -48,7 +56,7 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null, panes: [] }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null, panes: [], draft: '' }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
@@ -80,6 +88,11 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
   on('ui.open', ($, e) => {
     w.panes.push(`open ${e.id}`)
     return { value: { isPlaced: true as const } }
+  })
+  on('prompt.read', () => ({ value: { text: w.draft, cursor: w.draft.length } }))
+  on('prompt.fill', ($, e) => {
+    w.draft = e.mode === 'append' ? w.draft + e.text : e.text
+    return { isFilled: true, text: w.draft }
   })
   on('ui.close', ($, e) => {
     w.panes.push(`close ${e.id}`)
@@ -120,10 +133,10 @@ const PANE_PROPS = {
   view: {},
 }
 
-/** The score on the footer chip, or undefined when no chip is drawn. */
+/** The footer chip's circle, or undefined when no chip is drawn. */
 async function chip($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string | undefined> {
   const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
-  const score = await ui.find({ key: 'score' })
+  const score = await ui.find({ key: 'chip' })
   await ui.unmount()
   return score === undefined ? undefined : String(score.props['label'])
 }
@@ -143,7 +156,7 @@ describe('prompt.submit', () => {
 
     await w.clock.advance(SLOW_MS)
     expect(await spec($)).toContain('spec 72/100')
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
     // The chip replaced the status-line entry: nothing is published there.
     expect(w.statuses).toEqual([])
   })
@@ -369,7 +382,7 @@ describe('prompt.submit', () => {
     await scored($, w, 'clean out /tmp/cache older than a day')
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
   })
 
   test('a command after the newest score does not hide it at exit', async ($, on) => {
@@ -381,7 +394,7 @@ describe('prompt.submit', () => {
     await w.clock.settle()
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
   })
 
   test('exiting after the newest score landed still republishes it on restart', async ($, on) => {
@@ -391,13 +404,13 @@ describe('prompt.submit', () => {
     await scored($, w, 'fix the bug in src/a.ts')
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
   })
 
   test('a failed judge for the newest prompt hides the previous score', async ($, on) => {
     const w = world(on, [GOOD, 'not json'])
     await scored($, w, 'fix the bug in src/a.ts')
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
     await scored($, w, 'and the other one')
     expect(w.modelCalls).toBe(2)
     expect(await chip($)).toBeUndefined()
@@ -438,7 +451,7 @@ describe('prompt.submit', () => {
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     await scored($, w, 'fix the bug in src/a.ts')
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
   })
 
   test('a real command sent while the previous judge finishes does not drop it', async ($, on) => {
@@ -488,15 +501,16 @@ describe('prompt.submit', () => {
 })
 
 describe('chip', () => {
-  test('draws a colored glyph and the score on terminal and desktop', async ($, on) => {
+  test('is one colored circle, no number, on terminal and desktop', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
-      const chipBox = await ui.find({ key: 'chip' })
-      expect(chipBox?.text).toContain('◑')
-      expect((await ui.find({ key: 'score' }))?.props['label']).toBe('72')
+      const button = await ui.find({ key: 'chip' })
+      expect(button?.type).toBe('Button')
+      expect(button?.props['label']).toBe('🟢')
+      expect((await ui.find({ key: 'specificity' }))?.text).not.toContain('72')
       await ui.unmount()
     }
   })
@@ -507,32 +521,94 @@ describe('chip', () => {
 
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
-      expect(await ui.find({ key: 'score' })).toBeDefined()
+      expect(await ui.find({ key: 'chip' })).toBeDefined()
       expect(await ui.find({ key: 'engine' })).toBeDefined()
       await ui.unmount()
     }
   })
 
-  test('pressing the score opens the panel with the breakdown', async ($, on) => {
+  test('the circle is red under 40, yellow under 70, green from 70', async ($, on) => {
+    const tiers = [[0, '🔴'], [39, '🔴'], [40, '🟡'], [69, '🟡'], [70, '🟢'], [100, '🟢']] as const
+    const w = world(on, tiers.map(([score]) => JSON.stringify({ ...JSON.parse(GOOD), score })))
+    for (const [score, circle] of tiers) {
+      await scored($, w, `prompt scored ${score}`)
+      expect(await chip($)).toBe(circle)
+    }
+  })
+})
+
+describe('panel', () => {
+  const openPanel = async ($: Engine) => {
+    const footer = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
+    await footer.press({ key: 'chip' })
+    await footer.unmount()
+    return $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+  }
+
+  test('pressing the circle opens the marked-up prompt with suggestions', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
-    const footer = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
-    await footer.press({ key: 'score' })
+    const pane = await openPanel($)
     expect(w.panes).toEqual(['open specificity'])
-
-    const pane = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
     const panel = (await pane.find({ key: 'panel' }))?.text ?? ''
     expect(panel).toContain("Last prompt's specificity: 72/100")
-    expect(panel).toContain('Missing: which file?')
     expect(panel).toContain('target 3/3 · outcome 2/3 · constraints 1/3 · scope 2/3')
     expect(panel).toContain('Why: The file is named')
+    expect((await pane.find({ key: 'prompt' }))?.text).toContain('fix the bug[1] in src/a.ts')
+    const marked = await pane.find({ type: 'Text', text: /^fix the bug\[1\]$/ })
+    expect(marked?.props['color']).toBe('warning')
+    expect((await pane.find({ key: 'note-0' }))?.text).toBe('1. outcome: Say what correct behaviour looks like.')
+    expect((await pane.find({ key: 'note-1' }))?.text).toBe('2. Missing constraints: Should the public API stay the same?')
+    expect((await pane.find({ key: 'improved' }))?.text).toContain('Fix [which bug?] in src/a.ts')
     expect(panel).toContain('Recent ▆')
     await pane.press({ key: 'close' })
     expect(w.panes).toEqual(['open specificity', 'close specificity'])
   })
 
-  test("the panel says when it shows the previous prompt's score", async ($, on) => {
+  test('the sharper prompt goes into the prompt box, never sent, keeping a typed draft', async ($, on) => {
+    const w = world(on, GOOD)
+    await scored($, w, 'fix the bug in src/a.ts')
+    const sent = w.submitted.length
+
+    const pane = await openPanel($)
+    await pane.press({ key: 'use' })
+    expect(w.draft).toBe('Fix [which bug?] in src/a.ts so that [expected behaviour], keeping the public API unchanged.')
+    expect(w.submitted).toHaveLength(sent)
+    expect(w.panes.at(-1)).toBe('close specificity')
+    await pane.unmount()
+
+    w.draft = 'also check b.ts'
+    const again = await openPanel($)
+    await again.press({ key: 'use' })
+    expect(w.draft).toBe('also check b.ts\n\nFix [which bug?] in src/a.ts so that [expected behaviour], keeping the public API unchanged.')
+  })
+
+  test('a quote not in the prompt is shown as a missing piece, never as words the person wrote', async ($, on) => {
+    const reply = JSON.stringify({
+      ...JSON.parse(GOOD),
+      notes: [{ quote: 'refactor the parser', dimension: 'target', suggestion: 'Which parser?' }],
+    })
+    const w = world(on, reply)
+    await scored($, w, 'fix the bug in src/a.ts')
+
+    const pane = await openPanel($)
+    expect((await pane.find({ key: 'prompt' }))?.text).toBe('Your promptfix the bug in src/a.ts')
+    expect((await pane.find({ key: 'note-0' }))?.text).toBe('1. Missing target: Which parser?')
+  })
+
+  test('a reply with no notes or improved prompt still scores, and offers nothing to fill', async ($, on) => {
+    const { notes: _n, improved: _i, ...bare } = JSON.parse(GOOD) as Record<string, unknown>
+    const w = world(on, JSON.stringify(bare))
+    await scored($, w, 'fix the bug in src/a.ts')
+
+    expect(await chip($)).toBe('🟢')
+    const pane = await openPanel($)
+    expect(await pane.find({ key: 'notes' })).toBeUndefined()
+    expect(await pane.find({ key: 'use' })).toBeUndefined()
+  })
+
+  test("says when it shows the previous prompt's score", async ($, on) => {
     const w = world(on, [GOOD, 'not json'])
     await scored($, w, 'fix the bug in src/a.ts')
     await scored($, w, 'and the other one')
@@ -540,22 +616,8 @@ describe('chip', () => {
     const pane = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
     const panel = (await pane.find({ key: 'panel' }))?.text ?? ''
     expect(panel).toContain('The newest prompt has no score; this is the one before it.')
-    expect(panel).toContain('For "fix the bug in src/a.ts"')
-  })
-
-  test('the glyph fills and the color warms with the score', async ($, on) => {
-    const RED = '#e5534b'
-    const AMBER = '#d4a72c'
-    const GREEN = '#57ab5a'
-    const marks = [[10, '○', RED], [30, '◔', RED], [65, '◑', AMBER], [80, '◕', GREEN], [95, '●', GREEN]] as const
-    const w = world(on, marks.map(([score]) => JSON.stringify({ ...JSON.parse(GOOD), score })))
-    for (const [score, mark, color] of marks) {
-      await scored($, w, `prompt scored ${score}`)
-      const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'SessionMode', props: FOOTER_PROPS })
-      const glyph = await ui.find({ type: 'Text', text: mark })
-      expect(glyph?.props['color']).toBe(color)
-      await ui.unmount()
-    }
+    expect(panel).toContain('fix the bug')
+    expect(panel).toContain('in src/a.ts')
   })
 })
 
@@ -576,9 +638,9 @@ describe('/spec', () => {
     await spec($, 'off')
     expect(await chip($)).toBeUndefined()
     await spec($, 'on')
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
     await spec($, 'hide')
     expect(w.panes).toEqual(['open specificity', 'close specificity'])
-    expect(await chip($)).toBe('72')
+    expect(await chip($)).toBe('🟢')
   })
 })

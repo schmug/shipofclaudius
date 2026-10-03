@@ -17,10 +17,12 @@ import {
   completePrompt,
   excerpt,
   forkPrompt,
-  glyph,
+  chip,
   HISTORY_CAP,
   isAnswerUnderway,
   isUserPrompt,
+  markup,
+  noteLine,
   panelLines,
   slashName,
   parseJudgement,
@@ -28,7 +30,6 @@ import {
   readMode,
   RUBRIC,
   sparkline,
-  tone,
 } from './judge'
 
 const last = atom({ plugin: 'specificity', key: 'last' } as const, null)
@@ -73,6 +74,22 @@ async function openPanel($: EngineInterface): Promise<void> {
 
 async function closePanel($: EngineInterface): Promise<void> {
   await $.ui.close({ id: PANE })
+}
+
+/**
+ * Puts the judge's sharper prompt in the prompt box for the person to edit and
+ * send. It never sends anything: the scored prompt has long since gone, and the
+ * next one is the person's to submit. A draft already typed is kept, with the
+ * suggestion added after it.
+ */
+async function fillImproved($: EngineInterface): Promise<void> {
+  const current = await read($, last)
+  if (current === null || current.improved === null) return
+  const { text } = await $.prompt.read()
+  const filled = await $.prompt.fill(
+    text.trim() === '' ? { text: current.improved, mode: 'replace' } : { text: `\n\n${current.improved}`, mode: 'append' },
+  )
+  if (filled.isFilled) await closePanel($)
 }
 
 /**
@@ -161,7 +178,7 @@ async function judgeAndWrite(
       model: 'haiku',
       system: RUBRIC,
       prompt: completePrompt(buildContext(messages, prompt, contextMessages), prompt),
-      maxTokens: 400,
+      maxTokens: 1000,
       effort: 'low',
       timeoutMs: HAIKU_TIMEOUT_MS,
     })
@@ -171,7 +188,7 @@ async function judgeAndWrite(
     await quiet($, isStale, `${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? '-'} ${reply.error}` : ''}`)
     return
   }
-  const judged = parseJudgement(reply.text)
+  const judged = parseJudgement(reply.text, prompt)
   if (judged === null) {
     await quiet($, isStale, `unparseable reply, ${reply.text.length} chars`)
     return
@@ -266,48 +283,91 @@ export const register: Register = (on, options) => {
     return { text: breakdown(current, mode) }
   })
 
-  // The chip: a glyph filled by the score, in its color, and the score as a
-  // button that opens the panel. It sits in the footer beside the model, ahead
-  // of the mode labels the hooks beneath draw, never in place of them.
+  // The chip: one colored circle, a button that opens the panel. It sits in
+  // the footer beside the model, ahead of the mode labels the hooks beneath
+  // draw, never in place of them. The footer draws text only (no tooltip), so
+  // the press is the way in.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     if (mode === 'off') return next(e)
     const current = await read($, last)
     if (current === null || (await read($, isChipOff)) || (await read($, isHidden))) return next(e)
 
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Button } = $.ui.resolve(e)
     const below = await next(e)
     return (
       <Box key="specificity" flexDirection="row" columnGap={1}>
-        <Box key="chip" flexDirection="row" columnGap={1}>
-          <Text color={tone(current.score)}>{glyph(current.score)}</Text>
-          <Button key="score" label={String(current.score)} plain dimColor onPress={() => openPanel($)} />
-        </Box>
+        <Button key="chip" label={chip(current.score)} plain onPress={() => openPanel($)} />
         {below}
       </Box>
     )
   })
 
+  // The panel: the score, the prompt marked up where it could be sharper with
+  // a numbered suggestion per piece (and questions for what it leaves out), and
+  // the judge's sharper prompt with a button that puts it in the prompt box.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const current = await read($, last)
-    const lines =
-      mode === 'off' || current === null ? [breakdown(current, mode)] : panelLines(current, await read($, isHidden))
+    if (mode === 'off' || current === null) {
+      return (
+        <Box key="panel" flexDirection="column">
+          <Text wrap="wrap">{breakdown(current, mode)}</Text>
+          <Button key="close" label="Close" role="dismiss" onPress={() => closePanel($)} />
+        </Box>
+      )
+    }
     const spark = sparkline(await read($, history))
+    const header = panelLines(current, await read($, isHidden))
     return (
-      <Box key="panel" flexDirection="column">
-        {lines.map((line, i) => (
-          <Box key={`line-${i}`}>
-            <Text wrap="wrap">
-              {line}
-            </Text>
+      <Box key="panel" flexDirection="column" rowGap={1}>
+        <Box key="header" flexDirection="column">
+          {header.map((line, i) => (
+            <Box key={`header-${i}`}>
+              <Text wrap="wrap" dimColor={i > 0 && !line.startsWith('The newest')}>
+                {line}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+        <Box key="prompt" flexDirection="column">
+          <Text bold>Your prompt</Text>
+          <Text wrap="wrap">
+            {markup(current.prompt, current.notes).map(run =>
+              run.note === null ? (
+                run.text
+              ) : (
+                <Text color="warning" underline>{`${run.text}[${run.note}]`}</Text>
+              ),
+            )}
+          </Text>
+        </Box>
+        {current.notes.length > 0 && (
+          <Box key="notes" flexDirection="column">
+            <Text bold>Suggestions</Text>
+            {current.notes.map((note, i) => (
+              <Box key={`note-${i}`}>
+                <Text wrap="wrap">{noteLine(note, i)}</Text>
+              </Box>
+            ))}
           </Box>
-        ))}
+        )}
+        {current.improved !== null && (
+          <Box key="improved" flexDirection="column">
+            <Text bold>A sharper prompt</Text>
+            <Text wrap="wrap">{current.improved}</Text>
+          </Box>
+        )}
         {spark !== '' && (
           <Box key="spark">
             <Text dimColor>{`Recent ${spark}`}</Text>
           </Box>
         )}
-        <Button key="close" label="Close" role="dismiss" onPress={() => closePanel($)} />
+        <Box key="actions" flexDirection="row" columnGap={1}>
+          {current.improved !== null && (
+            <Button key="use" label="Put in prompt box" variant="primary" onPress={() => fillImproved($)} />
+          )}
+          <Button key="close" label="Close" role="dismiss" onPress={() => closePanel($)} />
+        </Box>
       </Box>
     )
   })

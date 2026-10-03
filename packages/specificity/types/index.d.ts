@@ -14,6 +14,18 @@ export type SpecificityDimensions = {
   scope: number
 }
 
+/** One rubric dimension's name. */
+export type SpecificityDimension = keyof SpecificityDimensions
+
+/** One suggestion: a piece of the prompt to sharpen, or (no quote) a missing piece to add. */
+export type SpecificityNote = {
+  /** The exact words of the prompt this is about, or null for something the prompt leaves out. */
+  quote: string | null
+  dimension: SpecificityDimension
+  /** What to change or add, at most 25 words; a question to the person when only they know. */
+  suggestion: string
+}
+
 /** One scored prompt, as the judge answered it and the mod checked it. */
 export type SpecificityResult = {
   /** 0-100. */
@@ -27,6 +39,12 @@ export type SpecificityResult = {
   mode: 'haiku' | 'fork'
   /** The prompt's first 80 characters, so `/spec` can say which prompt it was. */
   excerpt: string
+  /** The prompt itself, cut to 2,000 characters, so the panel can mark it up. */
+  prompt: string
+  /** At most 5 suggestions, in the prompt's order, missing pieces last. */
+  notes: SpecificityNote[]
+  /** The judge's sharper version of the prompt, with [brackets] where only the person can fill in; null when it needs none. */
+  improved: string | null
   /** When the score landed, ms since the epoch. */
   at: number
   /** How long the judge took, in ms. */

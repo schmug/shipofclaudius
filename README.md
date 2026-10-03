@@ -310,9 +310,10 @@ Installing `shipofclaudius` does not install it, and it does not install `shipof
 
 **What you see**
 
-- A chip in the prompt footer, beside the model: a circle filled by the score (`○ ◔ ◑ ◕ ●`), red under 40, amber under 70 and green from 70, then the score itself, as in `◑ 65`. It sits ahead of the footer's mode labels, never in their place. The footer draws text only, so the chip has no hover tooltip; it is a button instead.
-- Pressing the score opens a **Specificity** panel: `Last prompt's specificity: 72/100`, `Missing: which file?` (the judge's guess at the one detail that would most sharpen the prompt), the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), why, which prompt and judge it was, and `Recent ▃▅▆`, a sparkline of the last 10 scores, oldest first, taller is more specific. If the newest prompt got no score, the chip is hidden and the panel says it is showing the one before.
-- `/spec` prints the same breakdown and opens the panel. `/spec off` removes the chip and `/spec on` brings it back. `/spec hide` closes the panel.
+- A chip in the prompt footer, beside the model: one colored circle, 🔴 under 40, 🟡 under 70, 🟢 from 70, with no number. It sits ahead of the footer's mode labels, never in their place. The footer draws text only (a live test drew no graphic there), so the circle has no hover tooltip; it is a button instead.
+- Pressing the circle opens a **Specificity** panel: the score out of 100 with the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3) and why; **your prompt, marked up**, with each piece the judge would sharpen underlined and numbered; a numbered **suggestion** per piece, with things the prompt leaves out listed last as questions only you can answer; **a sharper prompt** the judge rewrote, with `[brackets]` where only you know the answer; and `Recent ▃▅▆`, a sparkline of the last 10 scores. If the newest prompt got no score, the chip is hidden and the panel says it is showing the one before.
+- **Put in prompt box** puts the sharper prompt in your prompt box (after anything you have already typed) for you to fill in the brackets and send. It never sends anything itself.
+- `/spec` prints the score breakdown and opens the panel. `/spec off` removes the chip and `/spec on` brings it back. `/spec hide` closes the panel.
 
 **What it never does.** It never blocks, delays, rewrites or drops your prompt. The `prompt.submit` hook passes the prompt on untouched and returns at once, and the judge runs afterwards from a timer. Only your own prompts are scored: typed, sent over Remote Control, or given to `claude -p`. Plugin, peer, notification, scheduled and relayed submissions are skipped, and so are bare slash commands. If the judge fails, times out or returns something that isn't the rubric's JSON, nothing is shown and one line goes to the debug log (`claude --debug`).
 
@@ -324,7 +325,7 @@ Installing `shipofclaudius` does not install it, and it does not install `shipof
 | `fork` | `$.model.fork`: a tool-less question over the session's **own** transcript, using the same model and system prompt as the main thread. It is the most accurate, since the judge sees everything. A session's first prompt has nothing to fork, so it falls back to `haiku`. So does a prompt whose answer has already started by the time the fork is taken or returns, because the fork could then see Claude's answer; `/spec` names which judge scored it. | **The fork bills the whole transcript prefix against your usage** at the main model's rates. While the main thread's prompt cache is warm, that prefix is a cache read (about 45k cached tokens in a short test session). After the cache lapses, or after `/model`, it is billed in full. |
 | `off` | Nothing. No model calls are made, and no chip is drawn. | None. |
 
-**Privacy.** Prompts go only through the session's own model client. The mod makes no `$.http` calls and writes no files. It keeps the last result in `$.state`, including the prompt's first 80 characters so `/spec` can say which prompt was scored. History holds only numbers.
+**Privacy.** Prompts go only through the session's own model client. The mod makes no `$.http` calls and writes no files. It keeps the last result in `$.state` for this session, including the prompt itself (cut to 2,000 characters) so the panel can mark it up. History holds only numbers.
 
 **Checking a change.** These run under the `claude` CLI, not `npm test`:
 
