@@ -390,6 +390,19 @@ test('factory.yml: the bound SHA is the one build-input recorded, and a missing 
   assert.ok(!/--match-head-commit "\$\{\{/.test(land), 'the judged SHA reaches run: via env, not ${{ }} interpolation')
 })
 
+test('factory.yml: land refuses a head the fix-verified self-heal never checked (#267 x #268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  // The self-heal and the evidence download both use the EVENT head; build-input reads the LIVE
+  // head later. A push in between would otherwise let a stale label carry an unreviewed head
+  // through the gate and the --match-head-commit merge.
+  assert.match(jobs.land, /CHECKED_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/)
+  assert.match(jobs.land, /"\$JUDGED_SHA" != "\$CHECKED_SHA"/, 'land compares the judged head to the checked head')
+  const sweep = jobs['land-sweep']
+  assert.ok(sweep.indexOf('remove-label fix-verified') < sweep.indexOf('"$judged_sha" != "$head_sha"'),
+    'land-sweep self-heals against $head_sha and then requires the judged head to equal it')
+})
+
 test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
   const y = await factoryYml()
   // Previously a flat "never appears" ban. #64 needs the PR body to pick the fixture test, and the
@@ -405,6 +418,52 @@ test('factory.yml: untrusted GitHub context reaches run: blocks only via env', a
     }
   }
   assert.ok(/case "\$\{FACTORY_STOP_AFTER\}"/.test(y), 'dispatch inputs are allowlist-validated before reaching the driver')
+})
+
+test('factory.yml: a push voids a stale fix-verified via a dedicated synchronize job (#268)', async () => {
+  const y = await factoryCode()
+  assert.ok(/types: \[labeled, synchronize\]/.test(y), 'pull_request_target also listens for synchronize')
+  const jobs = factoryJobs(y)
+  const voider = jobs['void-stale-verification']
+  assert.ok(voider, 'a dedicated stale-verification voider job exists')
+  assert.ok(/needs: killswitch/.test(voider) && /needs\.killswitch\.outputs\.paused == 'false'/.test(voider),
+    'it is killswitch-gated like every other privileged job')
+  assert.ok(/github\.event_name == 'pull_request_target'/.test(voider) && /github\.event\.action == 'synchronize'/.test(voider),
+    'it only fires on a new commit to an existing PR')
+  assert.ok(!/uses:\s*actions\/checkout/.test(voider) && !/git\s+checkout/.test(voider),
+    'it never checks out anything — removing a label needs no repo')
+  assert.ok(/--remove-label fix-verified/.test(voider), 'it removes exactly the trust token')
+  assert.ok(!/--add-label/.test(voider), 'it never adds a label')
+})
+
+test('factory.yml: land and land-sweep void a stale fix-verified before the gate reads labels (#268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const name of ['land', 'land-sweep']) {
+    const body = jobs[name]
+    assert.ok(body, `${name} job exists`)
+    const voidIdx = body.indexOf('remove-label fix-verified')
+    const buildIdx = body.indexOf('build-input.mjs')
+    assert.ok(voidIdx > 0 && buildIdx > 0 && voidIdx < buildIdx,
+      `${name} must void a stale fix-verified BEFORE build-input.mjs reads current labels — the ` +
+      'synchronize job above is not guaranteed to have finished first, so each land path must ' +
+      'guarantee freshness itself, not merely benefit from the faster job when it wins the race')
+  }
+})
+
+test('factory.yml: label freshness never trusts a pusher-settable commit date (#268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const name of ['land', 'land-sweep']) {
+    const body = jobs[name]
+    // `git commit --date` / GIT_COMMITTER_DATE let the pusher backdate a head so it reads as older
+    // than the human's label, and the self-heal would wave a stale fix-verified through.
+    assert.ok(!/committer\.date|author\.date/.test(body), `${name} must not date the head by a git date`)
+    assert.match(body, /actions\/runs\?head_sha=[^"]*&event=pull_request/,
+      `${name} dates the head by a server-stamped pull_request run`)
+    assert.match(body, /\.pull_requests\[\]\?; \.number == /,
+      `${name} counts only runs GitHub tied to THIS PR, so a pre-push of the same SHA elsewhere is not an alibi`)
+  }
 })
 
 // A suite cannot run the suites, so a hardcoded "**638 passing** (12 + 65 + ...)" total is a claim no

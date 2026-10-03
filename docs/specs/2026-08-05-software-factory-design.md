@@ -165,13 +165,15 @@ Two workflows, following `fix-finding.js` as the structural template throughout.
 
 ### 7.2 `factory-land.js` — gated landing
 
-`meta.phases`: `Gather`, `Gate`, `Land`.
+> **2026-09-26 correction (#264):** this section describes factory-land's pre-#264 design, when it merged directly. It no longer does — see the struck-through claims below. `factory-land` is now an advisory, read-only verdict; merging moved to the model-free Action in `.factory/templates/factory.yml`. Decision record: https://github.com/schmug/shipofclaudius/issues/264#issuecomment-5849403441.
 
-Gathers PR + linked issue + CI state via read-only relays, builds the gate input, calls `evaluate()` **in script code** (not via an agent — the gate must not be model-mediated), posts `renderVerdict()` as the audit comment, and squash-merges only on `pass`.
+`meta.phases`: ~~`Gather`, `Gate`, `Land`~~ → `Gather`, `Gate` *(2026-09-26: corrected by #264 — the `Land` phase was deleted; factory-land dispatches no write agent.)*
 
-- **Stage by default.** `execute: true` required to merge. Same ladder as `merge-pr-with-gate`.
+Gathers PR + linked issue + CI state via read-only relays, builds the gate input, calls `evaluate()` **in script code** (not via an agent — the gate must not be model-mediated), ~~posts `renderVerdict()` as the audit comment, and squash-merges only on `pass`~~ *(2026-09-26: corrected by #264 — it returns the verdict and the rendered table to the caller; it posts nothing and merges nothing.)*
+
+- ~~**Stage by default.** `execute: true` required to merge. Same ladder as `merge-pr-with-gate`.~~ *(2026-09-26: corrected by #264 — `execute` throws before any agent is dispatched; there is no merge ladder here anymore.)*
 - **Never** `--admin`, never `--delete-branch` on a predecessor in a stack, never force-push.
-- On `escalate`: apply `needs-you`, post the verdict table, stop.
+- ~~On `escalate`: apply `needs-you`, post the verdict table, stop.~~ *(2026-09-26: corrected by #264 — factory-land applies no labels and posts nothing; it only returns the verdict for the caller to act on.)*
 - Re-derive eligibility **in code** from the gate result — never trust an agent's boolean. (Direct port of the deterministic backstop in dmarcheck's `.claude/workflows/pr-triage.js`.)
 
 ### 7.3 Wrapper skills
@@ -182,7 +184,7 @@ Gathers PR + linked issue + CI state via read-only relays, builds the gate input
 Workflow({ scriptPath: "${CLAUDE_PLUGIN_ROOT}/.claude/workflows/<name>.js", args: { ... } })
 ```
 
-`factory-issue-fix` is read-mostly but its fix phase **WRITES** — say so, and note it needs a write-scoped `gh` token. `factory-land` **WRITES (merges)** — stage-by-default, `execute:true` to merge.
+`factory-issue-fix` is read-mostly but its fix phase **WRITES** — say so, and note it needs a write-scoped `gh` token. ~~`factory-land` **WRITES (merges)** — stage-by-default, `execute:true` to merge.~~ *(2026-09-26: corrected by #264 — factory-land is read-only and advisory; it never writes. Run it under the read-scoped token like the other read-only fan-outs.)*
 
 ## 8. The gate — `packages/factory-gate/` ✅ **LANDED**
 
@@ -263,7 +265,7 @@ Same harness as every sibling sim (`AsyncFunction` + stubbed globals, zero token
 - Every non-`fix` agent has `agentType === READONLY_AGENT`; the `fix` agent does **not**, and has `isolation === 'worktree'`.
 - Phase ordering: reproduce **strictly before** diagnose before verify before fix.
 - Each short-circuit spends **zero** write agents (`NOT_REPRODUCED`, `INTENDED_BEHAVIOUR`, `skipped_existing`).
-- `factory-land` in stage mode makes **zero** merge agent calls; `execute:true` makes exactly one; no `--admin` / force-push appears in any prompt.
+- ~~`factory-land` in stage mode makes **zero** merge agent calls; `execute:true` makes exactly one~~; no `--admin` / force-push appears in any prompt. *(2026-09-26: corrected by #264 — factory-land makes zero merge agent calls unconditionally; `execute:true` throws before any agent is dispatched.)*
 - `SPINE_VERSION` is declared.
 
 Reminder from CLAUDE.md: **`node --check` reports a bogus "Illegal return statement"** on workflow files. `npm test` is the real parser check.
