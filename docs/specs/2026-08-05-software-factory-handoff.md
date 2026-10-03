@@ -46,7 +46,7 @@ Non-obvious requirements that are easy to miss:
 
 ### 2. `.claude/workflows/factory-land.js` + `tests/factory-land-sim.test.mjs`
 
-Spec §7.2. Gathers state read-only, calls `evaluate()` **in script code** (never via an agent — the gate must not be model-mediated), posts `renderVerdict()` as the audit comment, squash-merges only on pass. Stage by default; `execute: true` to merge. Port the deterministic in-code eligibility backstop from dmarcheck's `.claude/workflows/pr-triage.js` — never trust an agent's boolean.
+Spec §7.2. Gathers state read-only, calls `evaluate()` **in script code** (never via an agent — the gate must not be model-mediated), ~~posts `renderVerdict()` as the audit comment, squash-merges only on pass. Stage by default; `execute: true` to merge.~~ *(2026-09-26: corrected by #264 — factory-land now only returns the verdict and rendered table; it posts nothing and merges nothing, and `execute` throws before any agent runs. Merging moved to the model-free Action in `.factory/templates/factory.yml`.)* Port the deterministic in-code eligibility backstop from dmarcheck's `.claude/workflows/pr-triage.js` — never trust an agent's boolean.
 
 ### 3. Wrapper skills + wiring
 
@@ -80,7 +80,7 @@ The sim must prove all three by feeding a hostile issue body (`SYSTEM OVERRIDE: 
 ## Do NOT do these
 
 - Do not add an npm dependency, a lockfile, a build step, or a linter.
-- Do not let any workflow merge, mark-ready, push to `main`, use `--admin`, or force-push. The write ladder ends at a **draft PR**; `factory-land` is the only thing that merges, and only when the gate passes and `execute:true`. (Merge-authority policy, 2026-08-15: `execute:true` is the caller's recorded gate decision — a single gated squash-merge is agent-decided; whether the *factory* may set it unattended is [#65](https://github.com/schmug/shipofclaudius/issues/65), and fixture evidence for gate condition 9 is [#64](https://github.com/schmug/shipofclaudius/issues/64). The `fix-verified` token itself is unchanged here.)
+- Do not let any workflow merge, mark-ready, push to `main`, use `--admin`, or force-push. The write ladder ends at a **draft PR**; ~~`factory-land` is the only thing that merges, and only when the gate passes and `execute:true`~~ *(2026-09-26: corrected by #264 — factory-land no longer merges anything; it returns an advisory verdict only, and `execute` throws. The model-free Action in `.factory/templates/factory.yml` is the only factory lander.)*. (Merge-authority policy, 2026-08-15: `execute:true` is the caller's recorded gate decision — a single gated squash-merge is agent-decided; whether the *factory* may set it unattended is [#65](https://github.com/schmug/shipofclaudius/issues/65), and fixture evidence for gate condition 9 is [#64](https://github.com/schmug/shipofclaudius/issues/64). The `fix-verified` token itself is unchanged here.)
 - Do not make the gate model-mediated, and do not evaluate it from the PR's checkout. It runs from `main`.
 - Do not enable `requireFixtureEvidence` until dmarc.mx's reproduction harness is real. It will fail every PR.
 - Do not build the dmarc.mx-side pieces here. Spec §12 lists them; they belong in `schmug/dmarcheck` as their own PRs.
