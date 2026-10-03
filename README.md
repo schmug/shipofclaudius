@@ -306,13 +306,13 @@ State is the issue label set, so the loop is restartable, inspectable, and inter
 
 Installing `shipofclaudius` does not install it, and it does not install `shipofclaudius`. To try a checkout without installing, run `claude --plugin-dir packages/specificity`.
 
-**Upgrading from the old scorer.** The earlier version shipped as scripts you wired into your own settings by hand, and this version deletes them. If your `settings.json` (user or project) still names `packages/specificity/bin/fast.mjs` under `hooks.UserPromptSubmit` or `packages/specificity/bin/render.sh` as the `statusLine` command, remove those entries before you pull this change. Otherwise every prompt reports a failed hook and the status line goes blank. The mod needs neither: its status entry comes from the plugin itself.
+**Upgrading from the old scorer.** The earlier version shipped as scripts you wired into your own settings by hand, and this version deletes them. If your `settings.json` (user or project) still names `packages/specificity/bin/fast.mjs` under `hooks.UserPromptSubmit` or `packages/specificity/bin/render.sh` as the `statusLine` command, remove those entries before you pull this change. Otherwise every prompt reports a failed hook and the status line goes blank. The mod needs neither: it draws its own score chip in the prompt footer.
 
 **What you see**
 
-- A band above the prompt reading `Last prompt's specificity: 72/100 · missing: which file?`, then `recent ▃▅▆` (a sparkline of the last 10 scores, oldest first, taller is more specific) and a Hide button. The missing part is the judge's guess at the one detail that would most sharpen the prompt. It yields to surveys, drops the sparkline below 40 columns and truncates rather than wraps.
-- `spec 72` in the status line.
-- `/spec` prints the last result in full: the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), the gap and the rationale. `/spec off` removes the band and `/spec on` brings it back. Hide (or `/spec hide`) collapses it to one line, `Specificity 72/100` with a Show button, and it stays collapsed until you press Show or run `/spec on`.
+- A chip in the prompt footer, beside the model: a circle filled by the score (`○ ◔ ◑ ◕ ●`), red under 40, amber under 70 and green from 70, then the score itself, as in `◑ 65`. It sits ahead of the footer's mode labels, never in their place. The footer draws text only, so the chip has no hover tooltip; it is a button instead.
+- Pressing the score opens a **Specificity** panel: `Last prompt's specificity: 72/100`, `Missing: which file?` (the judge's guess at the one detail that would most sharpen the prompt), the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3), why, which prompt and judge it was, and `Recent ▃▅▆`, a sparkline of the last 10 scores, oldest first, taller is more specific. If the newest prompt got no score, the chip is hidden and the panel says it is showing the one before.
+- `/spec` prints the same breakdown and opens the panel. `/spec off` removes the chip and `/spec on` brings it back. `/spec hide` closes the panel.
 
 **What it never does.** It never blocks, delays, rewrites or drops your prompt. The `prompt.submit` hook passes the prompt on untouched and returns at once, and the judge runs afterwards from a timer. Only your own prompts are scored: typed, sent over Remote Control, or given to `claude -p`. Plugin, peer, notification, scheduled and relayed submissions are skipped, and so are bare slash commands. If the judge fails, times out or returns something that isn't the rubric's JSON, nothing is shown and one line goes to the debug log (`claude --debug`).
 
@@ -322,7 +322,7 @@ Installing `shipofclaudius` does not install it, and it does not install `shipof
 | --- | --- | --- |
 | `haiku` (default) | One `$.model.complete` call to Haiku at low effort with a 15 s cap. It reads the last `contextMessages` messages (default 8), each cut to a few hundred characters, with tool output kept to a short snippet. | One small Haiku request per prompt. |
 | `fork` | `$.model.fork`: a tool-less question over the session's **own** transcript, using the same model and system prompt as the main thread. It is the most accurate, since the judge sees everything. A session's first prompt has nothing to fork, so it falls back to `haiku`. So does a prompt whose answer has already started by the time the fork is taken or returns, because the fork could then see Claude's answer; `/spec` names which judge scored it. | **The fork bills the whole transcript prefix against your usage** at the main model's rates. While the main thread's prompt cache is warm, that prefix is a cache read (about 45k cached tokens in a short test session). After the cache lapses, or after `/model`, it is billed in full. |
-| `off` | Nothing. No model calls are made, and the band and status entry are hidden. | None. |
+| `off` | Nothing. No model calls are made, and no chip is drawn. | None. |
 
 **Privacy.** Prompts go only through the session's own model client. The mod makes no `$.http` calls and writes no files. It keeps the last result in `$.state`, including the prompt's first 80 characters so `/spec` can say which prompt was scored. History holds only numbers.
 
@@ -392,7 +392,7 @@ shipofclaudius/
 │   │   └── src/                   #   glob, extract, config, build-input, gate-core
 │   └── specificity/               # a separate plugin: the prompt-specificity mod (TypeScript, function hooks)
 │       ├── .claude-plugin/plugin.json # manifest + userConfig (mode, contextMessages)
-│       ├── hooks/register.tsx     #   prompt.submit, ui.render (AbovePrompt band), /spec
+│       ├── hooks/register.tsx     #   prompt.submit, ui.render (SessionMode chip, Pane), /spec
 │       ├── hooks/judge.ts         #   pure helpers: origin filter, context, rubric, strict parse
 │       ├── types/index.d.ts       #   $.state contract
 │       └── tests/*.test.ts        #   run by `claude plugin test`

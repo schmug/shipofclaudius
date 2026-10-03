@@ -10,7 +10,7 @@
     {
       "name": "specificity",
       "source": "./packages/specificity",
-      "description": "A mod that scores each prompt you submit for specificity given the session so far: a band above the prompt, the status line, and /spec."
+      "description": "A mod that scores each prompt you submit for specificity given the session so far: a score chip beside the model that opens a breakdown panel, and /spec."
     }
   ]
 }

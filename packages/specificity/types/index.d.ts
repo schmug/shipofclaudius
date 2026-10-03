@@ -40,12 +40,10 @@ declare module 'claude-code' {
       last: SpecificityResult | null
       /** Recent scores, oldest first, capped at 50. */
       history: number[]
-      /** The newest prompt has no score to show (its judge failed, or the session ended mid-judge): no band until the next score lands. */
+      /** The newest prompt has no score to show (its judge failed, or the session ended mid-judge): no chip until the next score lands. */
       isHidden: boolean
-      /** The band is off until `/spec on` (`/spec off`). */
-      isBandOff: boolean
-      /** The person pressed Hide (`/spec hide`): the band is one short line with a Show button until Show or `/spec on`. */
-      isCollapsed: boolean
+      /** The footer chip is off until `/spec on` (`/spec off`). */
+      isChipOff: boolean
     }
   }
 }

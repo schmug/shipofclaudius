@@ -192,10 +192,29 @@ export function sparkline(history: readonly number[]): string {
     .join('')
 }
 
-/** The band's line: what was rated, the score out of 100, and what the prompt left out. */
-export function bandText(last: SpecificityResult): string {
-  const rated = `Last prompt's specificity: ${last.score}/100`
-  return last.gap === null ? `${rated} · nothing important missing` : `${rated} · missing: ${last.gap}`
+const GLYPHS = ['○', '◔', '◑', '◕', '●'] as const
+
+/** The chip's glyph: a circle filled in quarters, empty at 0 and full from 90. */
+export function glyph(score: number): string {
+  return GLYPHS[score >= 90 ? 4 : Math.min(3, Math.max(0, Math.floor(score / 25)))] ?? '○'
+}
+
+/** The chip's color: red under 40, amber under 70, green from 70. Raw colors, so no theme can lack them. */
+export function tone(score: number): string {
+  return score < 40 ? '#e5534b' : score < 70 ? '#d4a72c' : '#57ab5a'
+}
+
+/** The panel's lines: what was rated, the score, what is missing, the four dimensions and why. */
+export function panelLines(last: SpecificityResult, isOutdated: boolean): string[] {
+  const d = last.dimensions
+  return [
+    ...(isOutdated ? ['The newest prompt has no score; this is the one before it.'] : []),
+    `Last prompt's specificity: ${last.score}/100`,
+    last.gap === null ? 'Nothing important missing.' : `Missing: ${last.gap}`,
+    `target ${d.target}/3 · outcome ${d.outcome}/3 · constraints ${d.constraints}/3 · scope ${d.scope}/3`,
+    `Why: ${last.rationale}`,
+    `For "${last.excerpt}" (${last.mode}, ${(last.ms / 1000).toFixed(1)}s)`,
+  ]
 }
 
 /** `/spec`'s full breakdown of the last result. */

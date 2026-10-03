@@ -1,6 +1,6 @@
 {
   "name": "specificity",
-  "description": "Scores each prompt you submit for specificity given the session so far, and shows it above the prompt, in the status line and under /spec.",
+  "description": "Scores each prompt you submit for specificity given the session so far, and shows it as a chip beside the model that opens a breakdown panel, and under /spec.",
   "author": {
     "name": "schmug"
   },
@@ -9,7 +9,7 @@
     "mode": {
       "type": "string",
       "title": "Judge",
-      "description": "haiku: a cheap Haiku call over the last few messages. fork: a tool-less fork of this session's own transcript (most accurate; bills the cached prefix against your usage). off: no model calls, no band.",
+      "description": "haiku: a cheap Haiku call over the last few messages. fork: a tool-less fork of this session's own transcript (most accurate; bills the cached prefix against your usage). off: no model calls, no chip.",
       "options": [
         "haiku",
         "fork",

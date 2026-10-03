@@ -1,42 +1,44 @@
 // The specificity mod: scores each prompt the person submits for how specific it
-// is given the session so far, and shows the score above the prompt, in the
-// status line and under /spec.
+// is given the session so far, and shows the score as a chip beside the model
+// in the prompt footer; the chip opens a panel with the breakdown, as does /spec.
 //
 // THE INVARIANT: the prompt is never blocked, delayed, rewritten or dropped. The
 // `prompt.submit` hook passes `e` to `next` untouched and returns its result; the
 // scoring runs from a `$.clock.after(0)` timer, so it is not part of the prompt's
 // dispatch (whose abandonment would abort its model call) and nothing waits on it.
-// Every non-answer is logged to the debug log alone: no toast, no band.
+// Every non-answer is logged to the debug log alone: no toast, no chip.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SpecificityResult } from '../types'
 import {
-  bandText,
   breakdown,
   buildContext,
   completePrompt,
   excerpt,
   forkPrompt,
+  glyph,
   HISTORY_CAP,
   isAnswerUnderway,
   isUserPrompt,
+  panelLines,
   slashName,
   parseJudgement,
   readCount,
   readMode,
   RUBRIC,
   sparkline,
+  tone,
 } from './judge'
 
 const last = atom({ plugin: 'specificity', key: 'last' } as const, null)
 const history = atom({ plugin: 'specificity', key: 'history' } as const, [])
 const isHidden = atom({ plugin: 'specificity', key: 'isHidden' } as const, false)
-const isBandOff = atom({ plugin: 'specificity', key: 'isBandOff' } as const, false)
-const isCollapsed = atom({ plugin: 'specificity', key: 'isCollapsed' } as const, false)
+const isChipOff = atom({ plugin: 'specificity', key: 'isChipOff' } as const, false)
+
+const PANE = 'specificity'
 
 const HAIKU_TIMEOUT_MS = 15_000
-const SPARK_MIN_COLUMNS = 40
 
 // Only the newest prompt's score may land: a slow judge for an older prompt is
 // dropped rather than overwrite a newer result. `submitted` orders submissions;
@@ -64,16 +66,24 @@ function debug($: EngineInterface, line: string): void {
   $.ui.log(`specificity: ${line}`, { to: 'debug' })
 }
 
+/** Opens the breakdown panel; the chip's press and `/spec` are both the person asking. */
+async function openPanel($: EngineInterface): Promise<void> {
+  await $.ui.open({ id: PANE, title: 'Specificity' })
+}
+
+async function closePanel($: EngineInterface): Promise<void> {
+  await $.ui.close({ id: PANE })
+}
+
 /**
- * The newest prompt got no score: hide the band and clear the status line so
- * neither shows the previous prompt's score as if it were this one's. `last`
- * and `history` keep the previous result, which `/spec` names by its excerpt.
+ * The newest prompt got no score: hide the chip so it doesn't show the previous
+ * prompt's score as if it were this one's. `last` and `history` keep the
+ * previous result, which the panel and `/spec` name by its excerpt.
  */
 async function quiet($: EngineInterface, isStale: () => boolean, why: string): Promise<void> {
   $.ui.log(`specificity: no score (${why})`, { to: 'debug' })
   if (isStale()) return
   await update($, isHidden, hidden => (isStale() ? hidden : true))
-  if (!isStale()) $.ui.status(undefined)
 }
 
 /**
@@ -179,7 +189,6 @@ async function judgeAndWrite(
   await update($, last, current => (isStale() ? current : result))
   await update($, history, list => (isStale() ? list : [...list, result.score].slice(-HISTORY_CAP)))
   await update($, isHidden, hidden => (isStale() ? hidden : false))
-  if (!isStale()) $.ui.status(`spec ${result.score}`)
 }
 
 export const register: Register = (on, options) => {
@@ -190,15 +199,10 @@ export const register: Register = (on, options) => {
     epoch += 1
     await $.command.register({
       name: 'spec',
-      description: 'Show the last prompt specificity score, or turn its band on, off or hide it',
+      description: 'Show the last prompt specificity breakdown, turn its chip on or off, or hide its panel',
       argumentHint: '[on|off|hide]',
       immediate: true,
     })
-    // A hidden band means the newest prompt has no visible score (Hide, /spec
-    // hide, or its judge failed): don't republish the older one on restart.
-    const current = await read($, last)
-    const isShown = mode !== 'off' && current !== null && !(await read($, isHidden))
-    $.ui.status(isShown ? `spec ${current.score}` : undefined)
     return next(e)
   })
 
@@ -214,10 +218,9 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       await update($, last, () => null)
       await update($, history, () => [])
-      $.ui.status(undefined)
     } else if (latest > finished || isCandidatePending) {
       // The newest prompt's judge is cut off here and will never land: hide
-      // the band so a reopened conversation doesn't show the older score as
+      // the chip so a reopened conversation doesn't show the older score as
       // if it were this prompt's. A finished score still comes back.
       await update($, isHidden, () => true)
     }
@@ -246,68 +249,65 @@ export const register: Register = (on, options) => {
     if (arg === 'on') {
       // isHidden is not cleared: it means the newest prompt has no score, and
       // only a new score may lift it, or an older one would pose as the latest.
-      await update($, isBandOff, () => false)
-      await update($, isCollapsed, () => false)
-      return { text: mode === 'off' ? 'Band on, but the scorer is off (mode: off).' : 'Specificity band on.' }
+      await update($, isChipOff, () => false)
+      return { text: mode === 'off' ? 'Chip on, but the scorer is off (mode: off).' : 'Specificity chip on.' }
     }
     if (arg === 'off') {
-      await update($, isBandOff, () => true)
-      return { text: 'Specificity band off. /spec on brings it back.' }
+      await update($, isChipOff, () => true)
+      return { text: 'Specificity chip off. /spec on brings it back.' }
     }
     if (arg === 'hide') {
-      await update($, isCollapsed, () => true)
-      return { text: 'Specificity band collapsed to one line. Its Show button or /spec on opens it.' }
+      await closePanel($)
+      return { text: 'Specificity panel closed. The chip or /spec opens it.' }
     }
     if (arg !== '') return { text: 'Usage: /spec [on|off|hide]' }
-    return { text: breakdown(await read($, last), mode) }
+    const current = await read($, last)
+    if (mode !== 'off' && current !== null) await openPanel($)
+    return { text: breakdown(current, mode) }
   })
 
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (mode === 'off' || e.props.hasSurvey) return next(e)
+  // The chip: a glyph filled by the score, in its color, and the score as a
+  // button that opens the panel. It sits in the footer beside the model, ahead
+  // of the mode labels the hooks beneath draw, never in place of them.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (mode === 'off') return next(e)
     const current = await read($, last)
-    if (current === null || (await read($, isBandOff)) || (await read($, isHidden))) return next(e)
+    if (current === null || (await read($, isChipOff)) || (await read($, isHidden))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
-    // Hide collapses the band to a short line with a Show button rather than
-    // removing it, so it can always be brought back from where it was hidden.
-    if (await read($, isCollapsed)) {
-      const below = await next(e)
-      return (
-        <Box key="specificity" flexDirection="column">
-          <Box key="collapsed" flexDirection="row" columnGap={1}>
-            <Box key="label" flexShrink={1}>
-              <Text dimColor wrap="truncate-end">
-                {`Specificity ${current.score}/100`}
-              </Text>
-            </Box>
-            <Button key="show" label="Show" plain dimColor onPress={() => update($, isCollapsed, () => false)} />
-          </Box>
-          {below}
-        </Box>
-      )
-    }
-    const spark = e.props.bodyColumns >= SPARK_MIN_COLUMNS ? sparkline(await read($, history)) : ''
-    // The band is one slot that every plugin's AbovePrompt hook shares. The
-    // score is one row on top of whatever the plugins beneath draw, never a
-    // replacement for it, so another mod's band still shows under this one.
     const below = await next(e)
-
     return (
-      <Box key="specificity" flexDirection="column">
-        <Box key="spec" flexDirection="row" columnGap={1}>
-          <Box key="text" flexShrink={1}>
-            <Text dimColor wrap="truncate-end">
-              {bandText(current)}
-            </Text>
-          </Box>
-          {spark !== '' && (
-            <Box key="spark" flexShrink={0}>
-              <Text dimColor>{`recent ${spark}`}</Text>
-            </Box>
-          )}
-          <Button key="hide" label="Hide" plain dimColor onPress={() => update($, isCollapsed, () => true)} />
+      <Box key="specificity" flexDirection="row" columnGap={1}>
+        <Box key="chip" flexDirection="row" columnGap={1}>
+          <Text color={tone(current.score)}>{glyph(current.score)}</Text>
+          <Button key="score" label={String(current.score)} plain dimColor onPress={() => openPanel($)} />
         </Box>
         {below}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const current = await read($, last)
+    const lines =
+      mode === 'off' || current === null ? [breakdown(current, mode)] : panelLines(current, await read($, isHidden))
+    const spark = sparkline(await read($, history))
+    return (
+      <Box key="panel" flexDirection="column">
+        {lines.map((line, i) => (
+          <Box key={`line-${i}`}>
+            <Text wrap="wrap">
+              {line}
+            </Text>
+          </Box>
+        ))}
+        {spark !== '' && (
+          <Box key="spark">
+            <Text dimColor>{`Recent ${spark}`}</Text>
+          </Box>
+        )}
+        <Button key="close" label="Close" role="dismiss" onPress={() => closePanel($)} />
       </Box>
     )
   })

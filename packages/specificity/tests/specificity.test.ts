@@ -30,6 +30,8 @@ type World = {
   commandsFail: boolean
   /** While set, `$.command.list()` waits on it. */
   commandsHeld: Promise<void> | null
+  /** Panes opened and closed, in order: `open <id>` / `close <id>`. */
+  panes: string[]
 }
 
 const answered = (text: string) => ({ isAnswered: true as const, text, usage: USAGE })
@@ -46,7 +48,7 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null, panes: [] }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
@@ -75,13 +77,21 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('ui.open', ($, e) => {
+    w.panes.push(`open ${e.id}`)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', ($, e) => {
+    w.panes.push(`close ${e.id}`)
+    return { value: undefined }
+  })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('command.list', async () => {
     await w.commandsHeld
     if (w.commandsFail) throw new Error('command lookup failed')
     return { value: [{ name: 'compact', description: 'Compact', source: 'builtin' as const }] }
   })
-  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: { key: 'engine' }, children: [] }))
+  on('ui.render', { component: 'SessionMode' }, () => ({ type: 'Box', props: { key: 'engine' }, children: [] }))
   return w
 }
 
@@ -100,13 +110,22 @@ async function scored($: Engine, w: World, text: string) {
   await w.clock.advance(SLOW_MS)
 }
 
-const BAND_PROPS = {
-  hasSurvey: false,
-  isWorking: false,
-  maxRows: 6,
-  bodyColumns: 80,
-  scroll: { offset: 0, bodyRows: 5 },
+const FOOTER_PROPS = { modes: [] as string[] }
+const PANE_PROPS = {
+  title: 'Specificity',
+  isFocused: false,
+  bodyColumns: 60,
+  placement: 'dock' as const,
+  scroll: { offset: 0, bodyRows: 20 },
   view: {},
+}
+
+/** The score on the footer chip, or undefined when no chip is drawn. */
+async function chip($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string | undefined> {
+  const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
+  const score = await ui.find({ key: 'score' })
+  await ui.unmount()
+  return score === undefined ? undefined : String(score.props['label'])
 }
 
 describe('prompt.submit', () => {
@@ -124,7 +143,9 @@ describe('prompt.submit', () => {
 
     await w.clock.advance(SLOW_MS)
     expect(await spec($)).toContain('spec 72/100')
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
+    // The chip replaced the status-line entry: nothing is published there.
+    expect(w.statuses).toEqual([])
   })
 
   test('non-user origins and slash commands are not scored', async ($, on) => {
@@ -170,28 +191,23 @@ describe('prompt.submit', () => {
     expect(asked.split('yes, do option 2')).toHaveLength(2)
   })
 
-  test('a malformed reply produces no band and no toast', async ($, on) => {
+  test('a malformed reply produces no chip and no toast', async ($, on) => {
     const w = world(on, 'Sure! The prompt is fairly specific, maybe 70.')
     await scored($, w, 'fix the bug')
 
     expect(w.modelCalls).toBe(1)
     expect(await spec($)).toBe(NONE)
     expect(w.toasts).toEqual([])
-    for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'AbovePrompt', props: BAND_PROPS })
-      expect(await ui.find({ key: 'spec' })).toBeUndefined()
-      await ui.unmount()
-    }
+    for (const surface of ['terminal', 'desktop'] as const) expect(await chip($, surface)).toBeUndefined()
   })
 
-  test('mode off makes no model calls and draws no band', { options: { mode: 'off' } }, async ($, on) => {
+  test('mode off makes no model calls and draws no chip', { options: { mode: 'off' } }, async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
     expect(w.submitted).toEqual(['fix the bug in src/a.ts'])
     expect(w.modelCalls).toBe(0)
-    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('fork mode judges through $.model.fork', { options: { mode: 'fork' } }, async ($, on) => {
@@ -264,7 +280,7 @@ describe('prompt.submit', () => {
     await $.session.end({ reason: 'clear', sessionId: 'old', resume: { id: 'old' } })
     await w.clock.advance(SLOW_MS)
     expect(await spec($)).toBe(NONE)
-    expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a /clear before the queued judge starts drops it', async ($, on) => {
@@ -276,7 +292,7 @@ describe('prompt.submit', () => {
     await w.clock.advance(SLOW_MS)
     expect(w.modelCalls).toBe(0)
     expect(await spec($)).toBe(NONE)
-    expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a /clear before the queued judge starts takes no fork', { options: { mode: 'fork' } }, async ($, on) => {
@@ -314,7 +330,7 @@ describe('prompt.submit', () => {
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await w.clock.advance(SLOW_MS)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a command after a prompt still being judged does not mask it at exit', async ($, on) => {
@@ -328,7 +344,7 @@ describe('prompt.submit', () => {
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await w.clock.advance(SLOW_MS)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('exiting while a /name prompt is unclassified keeps the older score hidden', async ($, on) => {
@@ -341,7 +357,7 @@ describe('prompt.submit', () => {
     await w.clock.settle()
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a superseded /name prompt still in lookup does not hide the newest score at exit', async ($, on) => {
@@ -353,7 +369,7 @@ describe('prompt.submit', () => {
     await scored($, w, 'clean out /tmp/cache older than a day')
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
   })
 
   test('a command after the newest score does not hide it at exit', async ($, on) => {
@@ -365,7 +381,7 @@ describe('prompt.submit', () => {
     await w.clock.settle()
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
   })
 
   test('exiting after the newest score landed still republishes it on restart', async ($, on) => {
@@ -375,19 +391,17 @@ describe('prompt.submit', () => {
     await scored($, w, 'fix the bug in src/a.ts')
     await $.session.end({ reason: 'prompt_input_exit', sessionId: 'old', resume: { id: 'old' } })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
   })
 
   test('a failed judge for the newest prompt hides the previous score', async ($, on) => {
     const w = world(on, [GOOD, 'not json'])
     await scored($, w, 'fix the bug in src/a.ts')
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
     await scored($, w, 'and the other one')
     expect(w.modelCalls).toBe(2)
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
     expect(w.toasts).toEqual([])
-    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
     expect(await spec($)).toContain('for "fix the bug in src/a.ts"')
   })
 
@@ -396,9 +410,7 @@ describe('prompt.submit', () => {
     await scored($, w, 'fix the bug in src/a.ts')
     await scored($, w, 'and the other one')
     await spec($, 'on')
-    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
-    expect(await ui.find({ key: 'show' })).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a path-led prompt keeps its submission order', async ($, on) => {
@@ -418,7 +430,7 @@ describe('prompt.submit', () => {
     await scored($, w, 'fix the bug in src/a.ts')
     await scored($, w, 'and the other one')
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
   })
 
   test('a restart republishes a visible score', async ($, on) => {
@@ -426,7 +438,7 @@ describe('prompt.submit', () => {
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     await scored($, w, 'fix the bug in src/a.ts')
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect(w.statuses.at(-1)).toBe('spec 72')
+    expect(await chip($)).toBe('72')
   })
 
   test('a real command sent while the previous judge finishes does not drop it', async ($, on) => {
@@ -471,76 +483,87 @@ describe('prompt.submit', () => {
     await scored($, w, 'fix the bug')
     expect(await spec($)).toBe(NONE)
     expect(w.toasts).toEqual([])
-    expect(w.statuses.filter(s => s !== undefined)).toEqual([])
+    expect(await chip($)).toBeUndefined()
   })
 })
 
-describe('band', () => {
-  test('renders on terminal and desktop, hides under a survey', async ($, on) => {
+describe('chip', () => {
+  test('draws a colored glyph and the score on terminal and desktop', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
     for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'AbovePrompt', props: BAND_PROPS })
-      expect((await ui.find({ key: 'text' }))?.text).toBe("Last prompt's specificity: 72/100 · missing: which file?")
-      expect((await ui.find({ key: 'spark' }))?.text).toBe('recent ▆')
-      expect(await ui.find({ key: 'hide' })).toBeDefined()
+      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
+      const chipBox = await ui.find({ key: 'chip' })
+      expect(chipBox?.text).toContain('◑')
+      expect((await ui.find({ key: 'score' }))?.props['label']).toBe('72')
       await ui.unmount()
-
-      const survey = await $.ui.mount({
-        plugin: 'specificity',
-        surface,
-        component: 'AbovePrompt',
-        props: { ...BAND_PROPS, hasSurvey: true },
-      })
-      expect(await survey.find({ key: 'spec' })).toBeUndefined()
-      await survey.unmount()
     }
   })
 
-  test("stacks on top of another mod's band instead of replacing it", async ($, on) => {
+  test("sits ahead of the footer's mode labels instead of replacing them", async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
     for (const surface of ['terminal', 'desktop'] as const) {
-      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'AbovePrompt', props: BAND_PROPS })
-      expect(await ui.find({ key: 'spec' })).toBeDefined()
+      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
+      expect(await ui.find({ key: 'score' })).toBeDefined()
       expect(await ui.find({ key: 'engine' })).toBeDefined()
       await ui.unmount()
     }
   })
 
-  test('drops the sparkline at narrow widths and Hide collapses it until Show', async ($, on) => {
+  test('pressing the score opens the panel with the breakdown', async ($, on) => {
     const w = world(on, GOOD)
     await scored($, w, 'fix the bug in src/a.ts')
 
-    const ui = await $.ui.mount({
-      plugin: 'specificity',
-      surface: 'terminal',
-      component: 'AbovePrompt',
-      props: { ...BAND_PROPS, bodyColumns: 24 },
-    })
-    expect(await ui.find({ key: 'text' })).toBeDefined()
-    expect(await ui.find({ key: 'spark' })).toBeUndefined()
-    await ui.press({ key: 'hide' })
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
-    expect((await ui.find({ key: 'label' }))?.text).toBe('Specificity 72/100')
+    const footer = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
+    await footer.press({ key: 'score' })
+    expect(w.panes).toEqual(['open specificity'])
 
-    // A later score keeps the person's choice: still one line, with the new score.
-    await scored($, w, 'now the same in src/b.ts')
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
-    expect(await ui.find({ key: 'show' })).toBeDefined()
+    const pane = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+    const panel = (await pane.find({ key: 'panel' }))?.text ?? ''
+    expect(panel).toContain("Last prompt's specificity: 72/100")
+    expect(panel).toContain('Missing: which file?')
+    expect(panel).toContain('target 3/3 · outcome 2/3 · constraints 1/3 · scope 2/3')
+    expect(panel).toContain('Why: The file is named')
+    expect(panel).toContain('Recent ▆')
+    await pane.press({ key: 'close' })
+    expect(w.panes).toEqual(['open specificity', 'close specificity'])
+  })
 
-    await ui.press({ key: 'show' })
-    expect(await ui.find({ key: 'spec' })).toBeDefined()
-    expect(await ui.find({ key: 'show' })).toBeUndefined()
+  test("the panel says when it shows the previous prompt's score", async ($, on) => {
+    const w = world(on, [GOOD, 'not json'])
+    await scored($, w, 'fix the bug in src/a.ts')
+    await scored($, w, 'and the other one')
+
+    const pane = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+    const panel = (await pane.find({ key: 'panel' }))?.text ?? ''
+    expect(panel).toContain('The newest prompt has no score; this is the one before it.')
+    expect(panel).toContain('For "fix the bug in src/a.ts"')
+  })
+
+  test('the glyph fills and the color warms with the score', async ($, on) => {
+    const RED = '#e5534b'
+    const AMBER = '#d4a72c'
+    const GREEN = '#57ab5a'
+    const marks = [[10, '○', RED], [30, '◔', RED], [65, '◑', AMBER], [80, '◕', GREEN], [95, '●', GREEN]] as const
+    const w = world(on, marks.map(([score]) => JSON.stringify({ ...JSON.parse(GOOD), score })))
+    for (const [score, mark, color] of marks) {
+      await scored($, w, `prompt scored ${score}`)
+      const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'SessionMode', props: FOOTER_PROPS })
+      const glyph = await ui.find({ type: 'Text', text: mark })
+      expect(glyph?.props['color']).toBe(color)
+      await ui.unmount()
+    }
   })
 })
 
 describe('/spec', () => {
-  test('shows the breakdown and toggles the band', async ($, on) => {
+  test('shows the breakdown, opens the panel and toggles the chip', async ($, on) => {
     const w = world(on, GOOD)
     expect(await spec($)).toBe(NONE)
+    expect(w.panes).toEqual([])
 
     await scored($, w, 'fix the bug in src/a.ts')
     const text = await spec($)
@@ -548,16 +571,14 @@ describe('/spec', () => {
     expect(text).toContain('target 3/3 · outcome 2/3 · constraints 1/3 · scope 2/3')
     expect(text).toContain('gap: which file?')
     expect(text).toContain('why: The file is named')
+    expect(w.panes).toEqual(['open specificity'])
 
-    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
     await spec($, 'off')
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
+    expect(await chip($)).toBeUndefined()
     await spec($, 'on')
-    expect(await ui.find({ key: 'spec' })).toBeDefined()
+    expect(await chip($)).toBe('72')
     await spec($, 'hide')
-    expect(await ui.find({ key: 'spec' })).toBeUndefined()
-    expect(await ui.find({ key: 'show' })).toBeDefined()
-    await spec($, 'on')
-    expect(await ui.find({ key: 'spec' })).toBeDefined()
+    expect(w.panes).toEqual(['open specificity', 'close specificity'])
+    expect(await chip($)).toBe('72')
   })
 })
