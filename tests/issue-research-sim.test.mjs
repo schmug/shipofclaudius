@@ -58,7 +58,7 @@ function defaultCkptMeta(nums) {
   return { items: nums.map((n) => ({ number: n, updatedAt: DEFAULT_UPDATED_AT })) }
 }
 
-async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, onWrite } = {}) {
+async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, onWrite, writeResult } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], gatherPrompt: '', parallelBatches: [], metaNumbers: [], written: null }
   const agent = async (prompt, opts = {}) => {
@@ -83,7 +83,9 @@ async function runScript({ args, gather, fetch, research, ckptLoad, ckptMeta, on
       if (mm) { try { parsed = JSON.parse(mm[1]) } catch { parsed = null } }
       calls.written = parsed
       if (onWrite) onWrite(parsed)
-      return { written: true }
+      const json = mm ? mm[1] : ''
+      const bytes = unescape(encodeURIComponent(json)).length
+      return writeResult ? writeResult({ bytes }) : { written: true, bytes, reason: '' }
     }
     if (label.startsWith('gather')) { calls.gatherPrompt = prompt; return gather ?? { numbers: [] } }
     if (label.startsWith('fetch:#')) {
@@ -363,6 +365,35 @@ test('the writer persists a MERGED state: prior untouched entries + the newly co
   assert.ok(calls.written.entries['12'], 'the recomputed entry (#12) is present')
   assert.equal(calls.written.entries['12'].spineVersion, SPINE, '#12 is re-stamped with the current spine version')
   assert.notEqual(calls.written.entries['12'].result.rationale, 'STALE', '#12 carries the fresh result, not the stale cached one')
+})
+
+test('#279: a writer returning written:false is a failed checkpoint and the log carries its reason', async () => {
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    writeResult: () => ({ written: false, bytes: 0, reason: 'permission denied: heredoc write blocked' }),
+  })
+  assert.equal(result.checkpointWritten, false, 'checkpointWritten is false')
+  const line = calls.logs.find((l) => /^Checkpoint: FAILED to write/.test(l))
+  assert.ok(line, 'a FAILED log line exists (not the old "attempted to write")')
+  assert.ok(line.includes('permission denied: heredoc write blocked'), 'the agent-stated reason is logged')
+  assert.ok(!calls.logs.some((l) => /attempted to write/.test(l)), 'the vague wording is gone')
+})
+
+test('#279: written:true with a read-back size that does not match the handed bytes is NOT trusted', async () => {
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    writeResult: () => ({ written: true, bytes: 3, reason: '' }),
+  })
+  assert.equal(result.checkpointWritten, false)
+  assert.ok(calls.logs.some((l) => /FAILED to write/.test(l) && /read-back size 3/.test(l)), 'size mismatch is logged')
+})
+
+test('#279: a verified write (size matches, trailing newline tolerated) reports checkpointWritten', async () => {
+  const ok = await runScript({ args: { numbers: [12] } })
+  assert.equal(ok.result.checkpointWritten, true)
+  const nl = await runScript({ args: { numbers: [12] }, writeResult: ({ bytes }) => ({ written: true, bytes: bytes + 1, reason: '' }) })
+  assert.equal(nl.result.checkpointWritten, true)
+  assert.ok(ok.calls.logs.some((l) => /bytes verified/.test(l)))
 })
 
 test('the writer is skipped when nothing was newly computed (full reuse leaves state untouched)', async () => {
