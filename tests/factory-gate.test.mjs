@@ -376,7 +376,20 @@ test('build-input: emits exactly the keys gate-core reads', () => {
   assert.deepEqual(Object.keys(input).sort(), ['evidence', 'issue', 'pr', 'requiredContexts'])
   assert.deepEqual(Object.keys(input.issue).sort(), ['author', 'body', 'labels', 'number'])
   assert.deepEqual(Object.keys(input.pr).sort(),
-    ['additions', 'body', 'changedFiles', 'checks', 'deletions', 'labels', 'mergeStateStatus', 'number'])
+    ['additions', 'body', 'changedFiles', 'checks', 'deletions', 'headSha', 'labels', 'mergeStateStatus', 'number'])
+})
+
+test('build-input: headSha carries the headRefOid the Action binds its --match-head-commit merge to', () => {
+  const withHead = buildGateInput({ pr: ghPr({ headRefOid: 'deadbeef' }), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(withHead.pr.headSha, 'deadbeef')
+
+  const withoutHead = buildGateInput({ pr: ghPr(), issue: ghIssue(), requiredContexts: ['check'] })
+  assert.equal(withoutHead.pr.headSha, null, 'an unresolved head is null, never a guessed SHA')
+
+  for (const bad of [123, '', null, undefined]) {
+    const input = buildGateInput({ pr: ghPr({ headRefOid: bad }), issue: ghIssue(), requiredContexts: ['check'] })
+    assert.equal(input.pr.headSha, null, `headRefOid=${JSON.stringify(bad)} must not produce a truthy non-string headSha`)
+  }
 })
 
 test('build-input: labels are unwrapped from {name} and from bare strings alike', () => {

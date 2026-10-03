@@ -343,6 +343,66 @@ test('factory.yml: the merge is never forced', async () => {
   assert.ok(!/force/.test(y.slice(y.indexOf('  land:'))), 'never force-pushes')
 })
 
+test('factory.yml: both merge calls bind to the exact head the gate judged (#267)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  for (const jobName of ['land', 'land-sweep']) {
+    const job = jobs[jobName]
+    assert.ok(job, `the ${jobName} job exists`)
+    const mergeCalls = job.split('\n').filter((l) => /gh pr merge\b/.test(l))
+    assert.ok(mergeCalls.length > 0, `${jobName} calls gh pr merge`)
+    // The flag can land on the same line as `gh pr merge` or a few continuation lines later, so
+    // scan forward from each call to the next blank line / step boundary rather than one line only.
+    const lines = job.split('\n')
+    lines.forEach((l, i) => {
+      if (!/gh pr merge\b/.test(l)) return
+      let j = i
+      while (j < lines.length && /\\\s*$/.test(lines[j])) j++
+      const block = lines.slice(i, j + 1).join('\n')
+      assert.match(block, /--match-head-commit/,
+        `${jobName}'s gh pr merge call must carry --match-head-commit, or a push landing after ` +
+        `build-input read the PR gets squash-merged without ever passing through the gate`)
+    })
+  }
+  // A refused merge (head moved) is a real escalation — a label plus an audit comment — never a
+  // bare ::warning:: annotation nobody acts on.
+  assert.ok(!/::warning::merge failed/.test(y), 'a match-head-commit refusal must escalate, not just warn')
+  assert.ok(/needs-you/.test(jobs.land) && /needs-you/.test(jobs['land-sweep']),
+    'both jobs label a refused/escalated PR needs-you')
+})
+
+test('factory.yml: the bound SHA is the one build-input recorded, and a missing one never aborts silently (#267)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  // land-sweep: a second, independent headRefOid read is an ABA window (H1 -> H2 -> H1 lets the
+  // gate judge H2 while --match-head-commit H1 still succeeds). Bind to gate-input.json's headSha,
+  // and require it to agree with the read the fixture evidence was fetched for.
+  const sweep = jobs['land-sweep']
+  assert.match(sweep, /--match-head-commit "\$judged_sha"/, 'land-sweep binds to the SHA build-input recorded')
+  assert.ok(!/--match-head-commit "\$head_sha"/.test(sweep), 'land-sweep never binds to its own separate headRefOid read')
+  assert.match(sweep, /"\$judged_sha" != "\$head_sha"/, 'land-sweep skips a PR whose two head reads disagree')
+  assert.match(sweep, /rm -f [^\n]*comment\.md/, "land-sweep clears the previous PR's comment.md before gating the next")
+  // land: under bash -e, a process.exit(1) on a null headSha kills the build-input step, which
+  // skips the gate and every always()-guarded audit/escalation step after it.
+  const land = jobs.land
+  assert.ok(!/process\.exit\(1\)/.test(land), 'a missing headSha must not fail the build-input step')
+  assert.match(land, /if \[ -z "\$JUDGED_SHA" \]/, 'the merge step refuses an empty judged SHA')
+  assert.ok(!/--match-head-commit "\$\{\{/.test(land), 'the judged SHA reaches run: via env, not ${{ }} interpolation')
+})
+
+test('factory.yml: land refuses a head the fix-verified self-heal never checked (#267 x #268)', async () => {
+  const y = await factoryCode()
+  const jobs = factoryJobs(y)
+  // The self-heal and the evidence download both use the EVENT head; build-input reads the LIVE
+  // head later. A push in between would otherwise let a stale label carry an unreviewed head
+  // through the gate and the --match-head-commit merge.
+  assert.match(jobs.land, /CHECKED_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/)
+  assert.match(jobs.land, /"\$JUDGED_SHA" != "\$CHECKED_SHA"/, 'land compares the judged head to the checked head')
+  const sweep = jobs['land-sweep']
+  assert.ok(sweep.indexOf('remove-label fix-verified') < sweep.indexOf('"$judged_sha" != "$head_sha"'),
+    'land-sweep self-heals against $head_sha and then requires the judged head to equal it')
+})
+
 test('factory.yml: untrusted GitHub context reaches run: blocks only via env', async () => {
   const y = await factoryYml()
   // Previously a flat "never appears" ban. #64 needs the PR body to pick the fixture test, and the

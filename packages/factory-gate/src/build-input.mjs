@@ -68,7 +68,7 @@ export function requiredContextsPath(repo, base, kind) {
  * Shape the gate input from raw `gh` payloads.
  *
  * @param {object} o
- * @param {object} o.pr        `gh pr view --json number,body,labels,files,additions,deletions,mergeStateStatus,statusCheckRollup`
+ * @param {object} o.pr        `gh pr view --json number,body,labels,files,additions,deletions,mergeStateStatus,statusCheckRollup,headRefOid`
  * @param {object} [o.issue]   `gh issue view --json number,author,body,labels` — omit when unresolved
  * @param {string[]} [o.requiredContexts]  the base branch's required-check contexts
  * @param {object} [o.evidence]  factory-issue-fix's `{ fixtureTest, redOnBase, greenOnHead }`
@@ -100,6 +100,10 @@ export function buildGateInput({ pr, issue, requiredContexts, evidence } = {}) {
       deletions,
       mergeStateStatus: p.mergeStateStatus || null,
       checks: normalizeChecks(p.statusCheckRollup),
+      // The head build-input actually observed. The caller binds its merge call to this exact SHA
+      // (`gh pr merge --match-head-commit`) so a push landing after this fetch is refused rather
+      // than silently squash-merged past a gate that never saw it.
+      headSha: (typeof p.headRefOid === 'string' && p.headRefOid) ? p.headRefOid : null,
     },
     requiredContexts: Array.isArray(requiredContexts) ? requiredContexts.map(String).filter(Boolean) : [],
     evidence: (evidence && typeof evidence === 'object') ? evidence : null,
