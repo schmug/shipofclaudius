@@ -877,6 +877,97 @@ test('saturation: no budget target => measured floor is inert (loop bounded only
   assert.equal(result.rounds_run, 3, 'ran to the round cap, unaffected by any budget floor')
 })
 
+// ---- #249: a capped (not saturated) run must mark its counts as a floor, in the return, the
+// sealed bundle's coverage doc, and the report prompt right next to the funnel counts — not only
+// in terminal_state, which a caller (e.g. a cross-tool comparison) can read past unweighted. ----
+
+test('#249: a capped run marks counts_are_floor + a non-empty discovery_caveat in the return', async () => {
+  // Never dry across 3 rounds => capped, exactly like the "honors args.maxRounds" case above.
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `finding round ${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+  }
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'capped')
+  assert.equal(result.counts_are_floor, true, 'a capped run flags its counts as a floor')
+  assert.ok(result.discovery_caveat && result.discovery_caveat.length > 0, 'a capped run carries a non-empty caveat')
+  assert.match(result.discovery_caveat, /cap/i)
+  assert.match(result.discovery_caveat, /floor/i)
+})
+
+test('#249: a saturated run makes no floor claim in the return', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo } // round 2 finds nothing new => saturated
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'saturated')
+  assert.equal(result.counts_are_floor, false, 'a saturated run never claims its counts are a floor')
+  assert.equal(result.discovery_caveat, '', 'no caveat text when discovery actually saturated')
+})
+
+test('#249: the zero-candidate early return still carries counts_are_floor + discovery_caveat fields', async () => {
+  // A round that adds zero unique candidates always sets terminal_state='saturated' (the `added
+  // === 0` check fires before the `round === MAX_ROUNDS` cap check, every round) — so the
+  // zero-candidate early-return path can never itself be 'capped'. This test only pins that the
+  // new fields are present and correctly false/empty on that path, not a capped scenario.
+  const map = { tool: toolMissing, discovery: () => emptyDiscovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.candidates, 0, 'zero-candidate early return path')
+  assert.equal(result.terminal_state, 'saturated', 'zero new candidates in round 1 saturates immediately')
+  assert.ok('counts_are_floor' in result, 'early return still carries counts_are_floor')
+  assert.ok('discovery_caveat' in result, 'early return still carries discovery_caveat')
+  assert.equal(result.counts_are_floor, false)
+  assert.equal(result.discovery_caveat, '')
+})
+
+test('#249: the sealed bundle coverage doc carries the discovery terminal state + counts_are_floor', async () => {
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `finding round ${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+  }
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'capped')
+  assert.deepEqual(result.bundle.coverage.discovery, { rounds_run: 3, max_rounds: 3, terminal_state: 'capped', counts_are_floor: true })
+  assert.ok(result.bundle.coverage.exclusions.some((e) => /round cap/i.test(e) && /floor/i.test(e)), 'the cap is also listed as a machine-readable exclusion')
+})
+
+test('#249: the sealed bundle coverage doc reports counts_are_floor=false on a saturated run', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'saturated')
+  assert.equal(result.bundle.coverage.discovery.terminal_state, 'saturated')
+  assert.equal(result.bundle.coverage.discovery.counts_are_floor, false)
+  assert.ok(!result.bundle.coverage.exclusions.some((e) => /round cap/i.test(e)), 'no false cap exclusion on a saturated run')
+})
+
+test('#249: a capped run tells the report agent to state the floor-counts caveat beside the funnel counts, not only in the coverage statement', async () => {
+  const discovery = (_p, opts) => {
+    const r = roundOf(opts)
+    return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `finding round ${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+  }
+  const map = { tool: toolMissing, discovery }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'capped')
+  // The caveat paragraph appears BEFORE the "Reportable findings" funnel-count section starts —
+  // i.e. right where a reader hits the counts, not buried after them in the coverage statement.
+  const caveatIdx = map.reportPrompt.search(/NOT SATURATED/i)
+  const reportableIdx = map.reportPrompt.indexOf('Reportable findings (confirmed')
+  assert.ok(caveatIdx >= 0, 'report prompt states the run was NOT saturated')
+  assert.ok(reportableIdx >= 0, 'report prompt has the reportable-findings funnel section')
+  assert.ok(caveatIdx < reportableIdx, 'the floor-counts caveat precedes the funnel-count section, not only the trailing coverage statement')
+  assert.match(map.reportPrompt, /floor/i)
+  assert.match(map.reportPrompt, /SAME sentence/i)
+  assert.match(map.reportPrompt, /not enough/i)
+})
+
+test('#249: a saturated run adds no cap-caveat instruction to the report prompt', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 2 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'saturated')
+  assert.ok(!/NOT SATURATED/i.test(map.reportPrompt), 'no false "not saturated" claim injected when discovery actually saturated')
+  assert.ok(!/floor counts/i.test(map.reportPrompt), 'no floor-counts caveat when the run is not capped')
+})
+
 // ================= SEVERITY / ATTACK-PATH STAGE (issue #22) =================
 // Severity is split OUT of the validator into a dedicated post-validation stage that
 // derives an attacker-path FACTS record, calibrates severity, then runs a mechanical
