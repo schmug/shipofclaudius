@@ -1,5 +1,5 @@
 {
-  "description": "Two session-lifecycle hooks. SessionStart injects open questions from the schmug/agent-notes board (pairs with the ask-board skill). Stop checks whether the session left anything unresolved and, if so, blocks once so it gets filed (pairs with the file-concerns skill).",
+  "description": "Two session-lifecycle hooks. SessionStart injects open questions from the schmug/agent-notes board (pairs with the ask-board skill). Stop checks whether the session left anything unresolved (a question it is paused on for the user's reply does not count, except in an unattended run) and, if so, blocks once so it gets filed (pairs with the file-concerns skill).",
   "hooks": {
     "SessionStart": [
       {
@@ -19,7 +19,8 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "Either this session surfaced nothing unresolved, or every unresolved item has already been recorded this session — by invoking the shipofclaudius:file-concerns skill, or by appending to ~/.claude/concerns-spool.jsonl after a failed gh call. Unresolved means: a completion claim resting on a check that was never actually run, a scope reduction never stated plainly to the user, a question raised and never answered, or a doubt about whether the change is correct. Work that is still legitimately in flight — a background task, a spawned agent, or an armed monitor that the transcript shows is still running and whose result the session is waiting on — is not unresolved; a check that has been started and has not yet returned is a pending check, not a skipped one. Default to satisfied — if nothing clearly unresolved stands out, the condition is met.",
+            "prompt": "Either this session surfaced nothing unresolved, or every unresolved item has already been recorded this session — by invoking the shipofclaudius:file-concerns skill, or by appending to ~/.claude/concerns-spool.jsonl after a failed gh call. Unresolved means: a completion claim resting on a check that was never actually run, a scope reduction never stated plainly to the user, a question raised and never answered, or a doubt about whether the change is correct. Work that is still legitimately in flight — a background task, a spawned agent, or an armed monitor that the transcript shows is still running and whose result the session is waiting on — is not unresolved; a check that has been started and has not yet returned is a pending check, not a skipped one. A question the session is paused on, waiting for the user's reply, is not unresolved either: the user reads it, so it already sits with the person who answers it — unless it hands the user a check the session could have run itself. That exemption does not cover an unattended run — an opening prompt carrying a <scheduled-task> frame or stating that no person is watching — where a question left in chat reaches no one. Default to satisfied — if nothing clearly unresolved stands out, the condition is met.",
+            "model": "claude-sonnet-5",
             "timeout": 30
           }
         ]
