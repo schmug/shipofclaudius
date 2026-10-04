@@ -265,8 +265,39 @@ const BARS = '▁▂▃▄▅▆▇█'
 export function sparkline(history: readonly number[]): string {
   return history
     .slice(-SPARK_WIDTH)
-    .map(s => BARS[Math.min(BARS.length - 1, Math.max(0, Math.round((s / 100) * (BARS.length - 1))))])
+    .map(bar)
     .join('')
+}
+
+function bar(score: number): string {
+  return BARS.charAt(Math.min(BARS.length - 1, Math.max(0, Math.round((score / 100) * (BARS.length - 1)))))
+}
+
+/** How many recent scores the footer sparkline draws. */
+export const FOOTER_SPARK_WIDTH = 20
+
+/**
+ * A score's color on a red-to-green gradient: hue 0 at 0, 60 (yellow) at 50,
+ * 120 at 100, as a hex string. Text takes a raw color, so each bar carries its
+ * own; the footer draws no Svg (an earlier desktop test drew nothing there).
+ */
+export function scoreColor(score: number): string {
+  const t = Math.min(100, Math.max(0, score)) / 100
+  const hue = 120 * t
+  // HSL(hue, 70%, 45%) to RGB.
+  const s = 0.7
+  const l = 0.45
+  const c = (1 - Math.abs(2 * l - 1)) * s
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
+  const m = l - c / 2
+  const [r, g] = hue < 60 ? [c, x] : [x, c]
+  const hex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0')
+  return `#${hex(r)}${hex(g)}${hex(0)}`
+}
+
+/** The footer sparkline: the last `FOOTER_SPARK_WIDTH` scores, each a block character in its score's color. */
+export function footerSpark(history: readonly number[]): { glyph: string; color: string }[] {
+  return history.slice(-FOOTER_SPARK_WIDTH).map(score => ({ glyph: bar(score), color: scoreColor(score) }))
 }
 
 /**
