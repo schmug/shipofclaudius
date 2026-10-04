@@ -273,8 +273,8 @@ function bar(score: number): string {
   return BARS.charAt(Math.min(BARS.length - 1, Math.max(0, Math.round((score / 100) * (BARS.length - 1)))))
 }
 
-/** How many recent scores the footer sparkline draws. */
-export const FOOTER_SPARK_WIDTH = 20
+/** How many recent scores the footer sparkline draws: two per character cell. */
+export const FOOTER_SPARK_WIDTH = 40
 
 /**
  * A score's color on a red-to-green gradient: hue 0 at 0, 60 (yellow) at 50,
@@ -295,9 +295,33 @@ export function scoreColor(score: number): string {
   return `#${hex(r)}${hex(g)}${hex(0)}`
 }
 
-/** The footer sparkline: the last `FOOTER_SPARK_WIDTH` scores, each a block character in its score's color. */
+// Braille dots by row, bottom to top, for the left and right dot columns of
+// one cell. A cell's two columns carry two consecutive scores.
+const BRAILLE_LEFT = [0x40, 0x04, 0x02, 0x01]
+const BRAILLE_RIGHT = [0x80, 0x20, 0x10, 0x08]
+
+function level(score: number): number {
+  return Math.min(3, Math.max(0, Math.round((score / 100) * 3)))
+}
+
+/**
+ * The footer sparkline: the last `FOOTER_SPARK_WIDTH` scores as a thin line of
+ * Braille dots, two scores per cell at one of four heights. Each cell is
+ * colored by the mean of its scores. Dots read as a line where block
+ * characters read as bars, which is the closest a text-only slot gets to one.
+ */
 export function footerSpark(history: readonly number[]): { glyph: string; color: string }[] {
-  return history.slice(-FOOTER_SPARK_WIDTH).map(score => ({ glyph: bar(score), color: scoreColor(score) }))
+  const recent = history.slice(-FOOTER_SPARK_WIDTH)
+  const cells: { glyph: string; color: string }[] = []
+  for (let i = 0; i < recent.length; i += 2) {
+    const left = recent[i] ?? 0
+    const right = recent[i + 1]
+    let bits = BRAILLE_LEFT[level(left)] ?? 0
+    if (right !== undefined) bits |= BRAILLE_RIGHT[level(right)] ?? 0
+    const mean = right === undefined ? left : (left + right) / 2
+    cells.push({ glyph: String.fromCharCode(0x2800 + bits), color: scoreColor(mean) })
+  }
+  return cells
 }
 
 /**

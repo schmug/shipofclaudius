@@ -368,20 +368,21 @@ export const register: Register = (on, options) => {
   // the footer beside the model, ahead of the mode labels the hooks beneath
   // draw, never in place of them. The footer draws text only (no tooltip), so
   // the press is the way in. Ahead of the chip, once two prompts are scored,
-  // a sparkline of the session's recent scores: one block character per
-  // score, each colored on a red-to-green gradient. The footer drew no Svg in
-  // a desktop test, so the line is colored Text, not a drawn line.
+  // a sparkline of the session's recent scores: a thin line of Braille dots,
+  // two scores per cell, each cell colored on a red-to-green gradient. The
+  // footer drew no Svg in a desktop test, so the line is colored Text.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     if (mode === 'off') return next(e)
     const current = await read($, last)
     if (current === null || (await read($, isChipOff)) || (await read($, isHidden))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
-    const spark = footerSpark(await read($, history))
+    const scores = await read($, history)
+    const spark = footerSpark(scores)
     const below = await next(e)
     return (
       <Box key="specificity" flexDirection="row" columnGap={1}>
-        {spark.length >= 2 && (
+        {scores.length >= 2 && (
           <Box key="spark" flexDirection="row">
             {spark.map((b, i) => (
               <Text key={String(i)} color={b.color}>
