@@ -367,7 +367,7 @@ export const register: Register = (on, options) => {
   // The chip: one colored circle, a button that opens the panel. It sits in
   // the footer beside the model, ahead of the mode labels the hooks beneath
   // draw, never in place of them. The footer draws text only (no tooltip), so
-  // the press is the way in. Ahead of the chip, once two prompts are scored,
+  // the press is the way in. Ahead of the chip, from the first score,
   // a sparkline of the session's recent scores: a thin line of Braille dots,
   // two scores per cell, each cell colored on a red-to-green gradient. The
   // footer drew no Svg in a desktop test, so the line is colored Text.
@@ -377,12 +377,11 @@ export const register: Register = (on, options) => {
     if (current === null || (await read($, isChipOff)) || (await read($, isHidden))) return next(e)
 
     const { Box, Text, Button } = $.ui.resolve(e)
-    const scores = await read($, history)
-    const spark = footerSpark(scores)
+    const spark = footerSpark(await read($, history))
     const below = await next(e)
     return (
       <Box key="specificity" flexDirection="row" columnGap={1}>
-        {scores.length >= 2 && (
+        {spark.length > 0 && (
           <Box key="spark" flexDirection="row">
             {spark.map((b, i) => (
               <Text key={String(i)} color={b.color}>
