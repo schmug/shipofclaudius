@@ -550,6 +550,67 @@ describe('clef mode', () => {
     expect(w.modelCalls).toBe(1)
     expect(await spec($)).toContain('(haiku,')
   })
+
+  test('falls back to haiku when the Clef server never answers', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    on('http.fetch', () => new Promise(() => {}))
+    await submit($, 'fix the bug in src/a.ts')
+    await w.clock.settle()
+    await w.clock.advance(10_000)
+    expect(w.modelCalls).toBe(1)
+    await w.clock.advance(SLOW_MS)
+    expect(await spec($)).toContain('(haiku,')
+  })
+
+  test('sends the prompt only to this machine, whatever clefUrl says', { options: { mode: 'clef', clefUrl: 'https://example.com/v1/systemone' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    const seen = clefServer(on, clefReply({ target: 2, outcome: 2, constraints: 2, scope: 2 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(seen.map(r => r.url)).toEqual([CLEF_URL])
+  })
+
+  test('a press asks haiku for suggestions, which join the Clef score', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    const mount = () => $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+
+    const pane = await mount()
+    expect(await pane.find({ key: 'use' })).toBeUndefined()
+    expect(await pane.find({ key: 'notes' })).toBeUndefined()
+    // The press resolves once haiku answers, so the slow model is let run first.
+    const pressed = pane.press({ key: 'suggest' })
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+    expect(w.asked[0]).toContain('fix the bug in src/a.ts')
+    expect(await pane.find({ key: 'suggesting' })).toBeDefined()
+    await w.clock.advance(SLOW_MS)
+    await pressed
+    await pane.unmount()
+
+    const after = await mount()
+    expect((await after.find({ key: 'note-0' }))?.text).toBe('1. outcome: Say what correct behaviour looks like.')
+    expect(await after.find({ key: 'use' })).toBeDefined()
+    expect(await after.find({ key: 'suggest' })).toBeUndefined()
+    const out = await spec($)
+    expect(out).toContain('spec 50/100 (clef,')
+    expect(out).toContain('gap: which file?')
+  })
+
+  test('suggestions for an older score never land on a newer one', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, clefReply({ target: 2, outcome: 2, constraints: 2, scope: 2 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    const pane = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+    const pressed = pane.press({ key: 'suggest' })
+    await w.clock.settle()
+    await w.clock.advance(1)
+    await scored($, w, 'and the other one')
+    await w.clock.advance(SLOW_MS)
+    await pressed
+    await pane.unmount()
+    expect(await spec($)).not.toContain('which file?')
+  })
 })
 
 describe('chip', () => {

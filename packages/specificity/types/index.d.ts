@@ -62,6 +62,8 @@ declare module 'claude-code' {
       isHidden: boolean
       /** The footer chip is off until `/spec on` (`/spec off`). */
       isChipOff: boolean
+      /** mode clef: the haiku judge is writing suggestions for the last score, at the person's request. */
+      isSuggesting: boolean
     }
   }
 }

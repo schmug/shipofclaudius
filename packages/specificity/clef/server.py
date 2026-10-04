@@ -21,6 +21,9 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
+# The mod sends at most 2,000 prompt characters and a few messages of context.
+MAX_BODY = 256 * 1024
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -39,8 +42,21 @@ def main() -> None:
         def do_POST(self) -> None:
             if self.path != "/v1/systemone":
                 return self.reply(404, {"error": "not found"})
+            # Loopback is reachable from any web page the person has open: a
+            # foreign Host (DNS rebinding) or a non-JSON body (a plain form post,
+            # which needs no CORS preflight) is refused before the model runs.
+            host = self.headers.get("host", "")
+            if not host.endswith("]"):
+                host = host.rsplit(":", 1)[0]
+            if host not in ("127.0.0.1", "localhost", "[::1]"):
+                return self.reply(403, {"error": "forbidden host"})
+            if self.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+                return self.reply(415, {"error": "json only"})
+            length = int(self.headers.get("content-length", "0") or "0")
+            if length <= 0 or length > MAX_BODY:
+                return self.reply(413, {"error": "body too large"})
             try:
-                request = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))))
+                request = json.loads(self.rfile.read(length))
                 return self.reply(200, systemone(model, processor, request))
             except ValueError as err:
                 return self.reply(400, {"error": str(err)[:300]})

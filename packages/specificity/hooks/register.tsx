@@ -22,6 +22,7 @@ import {
   chip,
   HISTORY_CAP,
   isAnswerUnderway,
+  isLoopback,
   isUserPrompt,
   markup,
   noteLine,
@@ -33,16 +34,21 @@ import {
   readMode,
   RUBRIC,
   sparkline,
+  withSuggestions,
 } from './judge'
 
 const last = atom({ plugin: 'specificity', key: 'last' } as const, null)
 const history = atom({ plugin: 'specificity', key: 'history' } as const, [])
 const isHidden = atom({ plugin: 'specificity', key: 'isHidden' } as const, false)
 const isChipOff = atom({ plugin: 'specificity', key: 'isChipOff' } as const, false)
+const isSuggesting = atom({ plugin: 'specificity', key: 'isSuggesting' } as const, false)
 
 const PANE = 'specificity'
 
 const HAIKU_TIMEOUT_MS = 15_000
+// A Clef server that accepts the request but never answers must not hold the
+// score forever: past this, haiku judges instead.
+const CLEF_TIMEOUT_MS = 10_000
 
 // Only the newest prompt's score may land: a slow judge for an older prompt is
 // dropped rather than overwrite a newer result. `submitted` orders submissions;
@@ -93,6 +99,37 @@ async function fillImproved($: EngineInterface): Promise<void> {
     text.trim() === '' ? { text: current.improved, mode: 'replace' } : { text: `\n\n${current.improved}`, mode: 'append' },
   )
   if (filled.isFilled) await closePanel($)
+}
+
+/**
+ * mode clef scores without words: on the person's press, the haiku judge reads
+ * the scored prompt in its context and writes the gap, suggestions and sharper
+ * prompt, which join the Clef score in the panel. One call per press; a newer
+ * score landing meanwhile drops the answer.
+ */
+async function suggest($: EngineInterface, contextMessages: number): Promise<void> {
+  const current = await read($, last)
+  if (current === null || current.mode !== 'clef' || (await read($, isSuggesting))) return
+  await update($, isSuggesting, () => true)
+  try {
+    const messages = await $.session.messages()
+    const reply = await $.model.complete({
+      model: 'haiku',
+      system: RUBRIC,
+      prompt: completePrompt(buildContext(messages, current.prompt, contextMessages), current.prompt),
+      maxTokens: 1000,
+      effort: 'low',
+      timeoutMs: HAIKU_TIMEOUT_MS,
+    })
+    const judged = reply.isAnswered ? parseJudgement(reply.text, current.prompt) : null
+    if (judged === null) {
+      debug($, `no suggestions (${reply.isAnswered ? 'unparseable reply' : reply.reason})`)
+      return
+    }
+    await update($, last, now => (now !== null && now.at === current.at ? withSuggestions(now, judged) : now))
+  } finally {
+    await update($, isSuggesting, () => false)
+  }
 }
 
 /**
@@ -164,13 +201,16 @@ async function judgeAndWrite(
   if (mode === 'clef' && !isStale()) {
     const messages = await $.session.messages()
     try {
-      const res = await $.http.fetch(clefUrl, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: clefRequest(buildContext(messages, prompt, contextMessages), prompt),
-      })
-      judged = res.ok ? parseClef(res.text, prompt) : null
-      if (judged === null) $.ui.log(`specificity: clef reply unusable (status ${res.status}); judging with haiku`, { to: 'debug' })
+      const res = await Promise.race([
+        $.http.fetch(clefUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: clefRequest(buildContext(messages, prompt, contextMessages), prompt),
+        }),
+        $.clock.sleep(CLEF_TIMEOUT_MS).then(() => null),
+      ])
+      judged = res !== null && res.ok ? parseClef(res.text, prompt) : null
+      if (judged === null) debug($, `clef reply unusable (${res === null ? 'timed out' : `status ${res.status}`}); judging with haiku`)
     } catch (err: unknown) {
       $.ui.log(`specificity: clef unreachable (${err instanceof Error ? err.name : 'error'}); judging with haiku`, { to: 'debug' })
     }
@@ -236,10 +276,13 @@ async function judgeAndWrite(
 export const register: Register = (on, options) => {
   const mode = readMode(options['mode'])
   const contextMessages = readCount(options['contextMessages'], 8, 40)
-  const clefUrl = typeof options['clefUrl'] === 'string' && options['clefUrl'].trim() !== '' ? options['clefUrl'].trim() : CLEF_URL
+  const clefSetting = typeof options['clefUrl'] === 'string' ? options['clefUrl'].trim() : ''
+  // The prompt goes to clefUrl, so only this machine may receive it.
+  const clefUrl = isLoopback(clefSetting) ? clefSetting : CLEF_URL
 
   on('session.start', async ($, e, next) => {
     epoch += 1
+    if (mode === 'clef' && clefSetting !== '' && clefUrl !== clefSetting) debug($, `clefUrl is not on this machine; using ${CLEF_URL}`)
     await $.command.register({
       name: 'spec',
       description: 'Show the last prompt specificity breakdown, turn its chip on or off, or hide its panel',
@@ -389,6 +432,15 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         <Box key="actions" flexDirection="row" columnGap={1}>
+          {current.mode === 'clef' && current.notes.length === 0 && current.improved === null && (
+            (await read($, isSuggesting)) ? (
+              <Box key="suggesting">
+                <Text dimColor>Asking Haiku for suggestions…</Text>
+              </Box>
+            ) : (
+              <Button key="suggest" label="Get suggestions" variant="primary" onPress={() => suggest($, contextMessages)} />
+            )
+          )}
           {current.improved !== null && (
             <Button key="use" label="Put in prompt box" variant="primary" onPress={() => fillImproved($)} />
           )}
