@@ -1,6 +1,6 @@
 {
   "name": "specificity",
-  "description": "Scores each prompt you submit for specificity given the session so far, and shows it as a chip beside the model that opens a breakdown panel, and under /spec.",
+  "description": "Scores each prompt you submit for specificity given the session so far, and shows it as a chip beside the model that opens a breakdown panel, and under /specificity.",
   "author": {
     "name": "schmug"
   },

@@ -340,7 +340,7 @@ export function noteLine(note: SpecificityNote, index: number): string {
     : `${index + 1}. ${note.dimension}: ${note.suggestion}`
 }
 
-/** `/spec`'s full breakdown of the last result. */
+/** `/specificity`'s full breakdown of the last result. */
 export function breakdown(last: SpecificityResult | null, mode: Mode): string {
   if (mode === 'off') return 'The specificity scorer is off (mode: off). Set mode to haiku, fork or clef in /config.'
   if (last === null) return 'No prompt scored yet this session.'

@@ -37,7 +37,7 @@ export type SpecificityResult = {
   rationale: string
   /** Which judge produced it. */
   mode: 'haiku' | 'fork' | 'clef'
-  /** The prompt's first 80 characters, so `/spec` can say which prompt it was. */
+  /** The prompt's first 80 characters, so `/specificity` can say which prompt it was. */
   excerpt: string
   /** The prompt itself, cut to 2,000 characters, so the panel can mark it up. */
   prompt: string
@@ -60,7 +60,7 @@ declare module 'claude-code' {
       history: number[]
       /** The newest prompt has no score to show (its judge failed, or the session ended mid-judge): no chip until the next score lands. */
       isHidden: boolean
-      /** The footer chip is off until `/spec on` (`/spec off`). */
+      /** The footer chip is off until `/specificity on` (`/specificity off`). */
       isChipOff: boolean
       /** mode clef: the haiku judge is writing suggestions for the last score, at the person's request. */
       isSuggesting: boolean

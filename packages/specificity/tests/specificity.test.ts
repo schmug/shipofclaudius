@@ -40,6 +40,8 @@ type World = {
   panes: string[]
   /** The prompt box's draft, which `$.prompt.fill` writes. */
   draft: string
+  /** Commands `$.command.register` accepted, by name. */
+  registered: string[]
 }
 
 const answered = (text: string) => ({ isAnswered: true as const, text, usage: USAGE })
@@ -56,7 +58,7 @@ type Reply = string | ModelCompleteResult
 /** The engine beneath the plugin. `reply` answers every completion; a list answers them in turn. */
 function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResult = Array.isArray(reply) ? GOOD : reply): World {
   const replies = Array.isArray(reply) ? [...reply] : null
-  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null, panes: [], draft: '' }
+  const w: World = { clock: mock.clock(on), submitted: [], modelCalls: 0, toasts: [], statuses: [], messages: [], asked: [], forks: 0, afterFork: null, commandsFail: false, commandsHeld: null, panes: [], draft: '', registered: [] }
   on('prompt.submit', ($, e) => {
     w.submitted.push(e.text)
     return { text: e.text }
@@ -98,7 +100,12 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
     w.panes.push(`close ${e.id}`)
     return { value: undefined }
   })
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  // The engine refuses a name the person already owns: their /spec skill.
+  on('command.register', ($, e) => {
+    if (e.name === 'spec') throw new Error(`$.command.register: "/spec" refused: it is the user's /spec`)
+    w.registered.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('command.list', async () => {
     await w.commandsHeld
     if (w.commandsFail) throw new Error('command lookup failed')
@@ -111,9 +118,9 @@ function world(on: On, reply: Reply | Reply[], forkReply: string | ModelForkResu
 const submit = ($: Engine, text: string, origin: PromptOrigin = { kind: 'composer' }) =>
   $.prompt.submit({ text, origin, wait: false })
 
-/** The last result as `/spec` reports it. */
+/** The last result as `/specificity` reports it. */
 const spec = async ($: Engine, args = '') =>
-  (await $.command.run({ command: 'spec', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })).text ?? ''
+  (await $.command.run({ command: 'specificity', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })).text ?? ''
 const NONE = 'No prompt scored yet this session.'
 
 /** Submits a prompt and lets the slow judge finish. */
@@ -438,7 +445,7 @@ describe('prompt.submit', () => {
     expect(await spec($)).toContain('for "fix the bug in src/a.ts"')
   })
 
-  test('/spec on after a failed newest judge does not bring back the older score', async ($, on) => {
+  test('/specificity on after a failed newest judge does not bring back the older score', async ($, on) => {
     const w = world(on, [GOOD, 'not json'])
     await scored($, w, 'fix the bug in src/a.ts')
     await scored($, w, 'and the other one')
@@ -590,12 +597,12 @@ describe('clef mode', () => {
     expect(seen.map(r => r.url)).toEqual([CLEF_URL])
   })
 
-  test('/spec asks haiku for suggestions without waiting on them', { options: { mode: 'clef' } }, async ($, on) => {
+  test('/specificity asks haiku for suggestions without waiting on them', { options: { mode: 'clef' } }, async ($, on) => {
     const w = world(on, GOOD)
     clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
     await scored($, w, 'fix the bug in src/a.ts')
 
-    // /spec answers with the Clef score at once; haiku runs after it.
+    // /specificity answers with the Clef score at once; haiku runs after it.
     expect(await spec($)).toContain('gap: not written yet')
     expect(w.panes).toEqual(['open specificity'])
     expect(w.modelCalls).toBe(0)
@@ -857,7 +864,14 @@ describe('panel', () => {
   })
 })
 
-describe('/spec', () => {
+describe('/specificity', () => {
+  test('registers /specificity, never the person\'s own /spec', async ($, on) => {
+    const w = world(on, GOOD)
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.registered).toEqual(['specificity'])
+  })
+
   test('shows the breakdown, opens the panel and toggles the chip', async ($, on) => {
     const w = world(on, GOOD)
     expect(await spec($)).toBe(NONE)
