@@ -368,8 +368,8 @@ export const register: Register = (on, options) => {
   // the footer beside the model, ahead of the mode labels the hooks beneath
   // draw, never in place of them. The footer draws text only (no tooltip), so
   // the press is the way in. Ahead of the chip, from the first score,
-  // a sparkline of the session's recent scores: a thin line of Braille dots,
-  // two scores per cell, each cell colored on a red-to-green gradient. The
+  // a sparkline of the session's recent scores: a line of 2x2 Braille dot
+  // blocks, one score per cell, each colored on a red-to-green gradient. The
   // footer drew no Svg in a desktop test, so the line is colored Text.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     if (mode === 'off') return next(e)

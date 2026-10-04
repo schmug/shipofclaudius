@@ -735,8 +735,8 @@ describe('chip', () => {
     }
   })
 
-  test('from the first score, a line of Braille dots sits ahead of the chip, red to green', async ($, on) => {
-    const scores = [0, 100, 50, 50, 100]
+  test('from the first score, a line of Braille dot blocks sits ahead of the chip, red to green', async ($, on) => {
+    const scores = [0, 50, 100]
     const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))
     const cells = async (surface: 'terminal' | 'desktop') => {
       const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
@@ -748,29 +748,28 @@ describe('chip', () => {
     }
 
     await scored($, w, 'first prompt')
-    expect(await cells('desktop')).toEqual([{ glyph: '\u2840', color: '#c32222' }])
+    expect(await cells('desktop')).toEqual([{ glyph: '\u28e4', color: '#c32222' }])
 
-    for (const text of ['second', 'third', 'fourth', 'fifth']) await scored($, w, text)
+    for (const text of ['second', 'third']) await scored($, w, text)
     for (const surface of ['terminal', 'desktop'] as const) {
       expect(await cells(surface)).toEqual([
-        // 0 low on the left, 100 high on the right: the mean is 50, yellow.
-        { glyph: '\u2848', color: '#c3c322' },
-        // 50 rounds to the third of four heights in both columns.
-        { glyph: '\u2812', color: '#c3c322' },
-        // An odd score out: the last cell has only its left dot, at the top.
-        { glyph: '\u2801', color: '#22c322' },
+        { glyph: '\u28e4', color: '#c32222' },
+        { glyph: '\u2836', color: '#c3c322' },
+        { glyph: '\u281b', color: '#22c322' },
       ])
     }
   })
 
-  test('the line keeps the last 40 scores, two to a cell', async ($, on) => {
-    const scores = Array.from({ length: 44 }, (_, i) => (i % 2) * 100)
+  test('the line keeps the last 20 scores, one to a cell', async ($, on) => {
+    const scores = Array.from({ length: 22 }, (_, i) => i * 4)
     const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))
     for (const score of scores) await scored($, w, `prompt scored ${score}`)
     const ui = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
     const found = await sparkBars(ui)
     await ui.unmount()
     expect(found).toHaveLength(20)
+    // The oldest two of 22 (0 and 4) are gone: the first cell is the score 8.
+    expect(found[0]).toEqual({ glyph: '\u28e4', color: '#c33c22' })
   })
 })
 
