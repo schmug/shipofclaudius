@@ -76,9 +76,19 @@ function debug($: EngineInterface, line: string): void {
   $.ui.log(`specificity: ${line}`, { to: 'debug' })
 }
 
-/** Opens the breakdown panel; the chip's press and `/spec` are both the person asking. */
-async function openPanel($: EngineInterface): Promise<void> {
+/**
+ * Opens the breakdown panel; the chip's press and `/spec` are both the person
+ * asking. A Clef score has no words yet, so opening it asks Haiku for them on a
+ * timer of its own: the panel opens at once and fills in when Haiku answers.
+ */
+async function openPanel($: EngineInterface, contextMessages: number): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Specificity' })
+  const current = await read($, last)
+  if (current !== null && current.mode === 'clef' && current.notes.length === 0 && current.improved === null) {
+    $.clock.after(0, () => {
+      suggest($, contextMessages).catch((err: unknown) => debug($, `no suggestions (${err instanceof Error ? err.name : 'error'})`))
+    })
+  }
 }
 
 async function closePanel($: EngineInterface): Promise<void> {
@@ -102,10 +112,11 @@ async function fillImproved($: EngineInterface): Promise<void> {
 }
 
 /**
- * mode clef scores without words: on the person's press, the haiku judge reads
- * the scored prompt in its context and writes the gap, suggestions and sharper
- * prompt, which join the Clef score in the panel. One call per press; a newer
- * score landing meanwhile drops the answer.
+ * mode clef scores without words: when the person opens the panel (or presses
+ * Get suggestions after a miss), the haiku judge reads the scored prompt in its
+ * context and writes the gap, suggestions and sharper prompt, which join the
+ * Clef score in the panel. One call at a time; a newer score landing meanwhile
+ * drops the answer.
  */
 async function suggest($: EngineInterface, contextMessages: number): Promise<void> {
   const current = await read($, last)
@@ -348,7 +359,7 @@ export const register: Register = (on, options) => {
     }
     if (arg !== '') return { text: 'Usage: /spec [on|off|hide]' }
     const current = await read($, last)
-    if (mode !== 'off' && current !== null) await openPanel($)
+    if (mode !== 'off' && current !== null) await openPanel($, contextMessages)
     return { text: breakdown(current, mode) }
   })
 
@@ -365,7 +376,7 @@ export const register: Register = (on, options) => {
     const below = await next(e)
     return (
       <Box key="specificity" flexDirection="row" columnGap={1}>
-        <Button key="chip" label={chip(current.score)} plain onPress={() => openPanel($)} />
+        <Button key="chip" label={chip(current.score)} plain onPress={() => openPanel($, contextMessages)} />
         {below}
       </Box>
     )

@@ -570,7 +570,72 @@ describe('clef mode', () => {
     expect(seen.map(r => r.url)).toEqual([CLEF_URL])
   })
 
-  test('a press asks haiku for suggestions, which join the Clef score', { options: { mode: 'clef' } }, async ($, on) => {
+  test('/spec asks haiku for suggestions without waiting on them', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+
+    // /spec answers with the Clef score at once; haiku runs after it.
+    expect(await spec($)).toContain('gap: not written yet')
+    expect(w.panes).toEqual(['open specificity'])
+    expect(w.modelCalls).toBe(0)
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+    expect(w.asked[0]).toContain('fix the bug in src/a.ts')
+    await w.clock.advance(SLOW_MS)
+    const out = await spec($)
+    expect(out).toContain('spec 50/100 (clef,')
+    expect(out).toContain('gap: which file?')
+    // Opening again with suggestions in hand asks nothing more.
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+  })
+
+  test('pressing the circle opens the panel and fills it with suggestions', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    const footer = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
+    await footer.press({ key: 'chip' })
+    await footer.unmount()
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+
+    const mount = () => $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+    const waiting = await mount()
+    expect(await waiting.find({ key: 'suggesting' })).toBeDefined()
+    expect(await waiting.find({ key: 'suggest' })).toBeUndefined()
+    await waiting.unmount()
+    await w.clock.advance(SLOW_MS)
+    const pane = await mount()
+    expect((await pane.find({ key: 'note-0' }))?.text).toBe('1. outcome: Say what correct behaviour looks like.')
+    expect(await pane.find({ key: 'use' })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('opening the panel on a haiku score asks nothing more', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, new Error('connect ECONNREFUSED'))
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(w.modelCalls).toBe(1)
+    await spec($)
+    await w.clock.settle()
+    expect(w.modelCalls).toBe(1)
+  })
+
+  test('a missed answer leaves Get suggestions to try again', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, ['not json', GOOD])
+    clefServer(on, clefReply({ target: 2, outcome: 2, constraints: 2, scope: 2 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    await spec($)
+    await w.clock.settle()
+    await w.clock.advance(SLOW_MS)
+    const pane = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'Pane', requestId: 'specificity', props: PANE_PROPS })
+    expect(await pane.find({ key: 'suggest' })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test('a Get suggestions press asks haiku, and its answer joins the Clef score', { options: { mode: 'clef' } }, async ($, on) => {
     const w = world(on, GOOD)
     clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
     await scored($, w, 'fix the bug in src/a.ts')
