@@ -760,6 +760,19 @@ describe('chip', () => {
     }
   })
 
+  test('the desktop tree is reversed, so the line lands left of the circle there too', async ($, on) => {
+    const w = world(on, GOOD)
+    await scored($, w, 'a prompt')
+    const order = async (surface: 'terminal' | 'desktop') => {
+      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
+      const drawn = (await ui.drawn()) as Drawn
+      await ui.unmount()
+      return (drawn.children ?? []).map(c => (typeof c === 'string' ? c : String(c.props?.['key'])))
+    }
+    expect(await order('terminal')).toEqual(['spark', 'chip', 'engine'])
+    expect(await order('desktop')).toEqual(['engine', 'chip', 'spark'])
+  })
+
   test('the line keeps the last 20 scores, one to a cell', async ($, on) => {
     const scores = Array.from({ length: 22 }, (_, i) => i * 4)
     const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))

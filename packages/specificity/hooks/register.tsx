@@ -379,18 +379,30 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const spark = footerSpark(await read($, history))
     const below = await next(e)
-    return (
+    const line =
+      spark.length > 0 ? (
+        <Box key="spark" flexDirection="row">
+          {spark.map((b, i) => (
+            <Text key={String(i)} color={b.color}>
+              {b.glyph}
+            </Text>
+          ))}
+        </Box>
+      ) : null
+    const button = <Button key="chip" label={chip(current.score)} plain onPress={() => openPanel($, contextMessages)} />
+    // The desktop footer drew this row's children right to left (a screenshot
+    // showed the circle left of the line), so its tree is in reverse order to
+    // land in the same place as the terminal's: line, circle, mode labels.
+    return e.surface === 'desktop' ? (
       <Box key="specificity" flexDirection="row" columnGap={1}>
-        {spark.length > 0 && (
-          <Box key="spark" flexDirection="row">
-            {spark.map((b, i) => (
-              <Text key={String(i)} color={b.color}>
-                {b.glyph}
-              </Text>
-            ))}
-          </Box>
-        )}
-        <Button key="chip" label={chip(current.score)} plain onPress={() => openPanel($, contextMessages)} />
+        {below}
+        {button}
+        {line}
+      </Box>
+    ) : (
+      <Box key="specificity" flexDirection="row" columnGap={1}>
+        {line}
+        {button}
         {below}
       </Box>
     )
