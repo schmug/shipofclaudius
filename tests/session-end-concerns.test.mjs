@@ -115,9 +115,9 @@ test('file-concerns: the concerns writer really emits the five-field envelope', 
   // not make the writer un-resolve paths to match an unresolved expectation. Before #195 the
   // cwd assertion failed on every Mac and passed on Linux CI, where tmpdir() is already real.
   // The blast radius is wider than one red line: package.json's `test` script `&&`-chains
-  // the suites, so a failure here stops the chain and hides specificity-fast,
-  // specificity-render, specificity-outcome-log and plugin-integrity locally on macOS. Each
-  // of those passes when run on its own, which is what makes the gap easy to miss.
+  // the suites, so a failure here stops the chain and hides every suite after it, plugin-integrity
+  // included, locally on macOS. Each of those passes when run on its own, which is what makes the
+  // gap easy to miss.
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'file-concerns-')))
   const spool = join(dir, 'spool.jsonl')
   const script = concernsSnippet

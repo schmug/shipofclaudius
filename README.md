@@ -234,7 +234,7 @@ The same is true one layer up: Claude Code's own **auto-mode permission classifi
 The `tests/` directory holds **offline simulators**. They wrap each workflow's source in an `AsyncFunction` with stubbed runtime globals (`agent()` / `parallel()` / `phase()` / `log()` / `workflow()`), so orchestration logic — dedup precedence, fail-open behavior, layer gating, diff-scoping & mode decision, coverage wiring, author resolution, schema satisfiability, the **sealed-bundle contract** (content-addressed fingerprint stability + line-independence, bundle shape, `priorBundle` dedup + coverage delta, and a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) projection validated by a dependency-free conformance checker), and the **prompt-injection hardening** (untrusted-text fencing + read-only `agentType` call shapes, see **Security model**) — is exercised in milliseconds at **zero token cost**. They use only Node built-ins (`node:fs/promises`, `node:assert/strict`); no dependencies to install.
 
 ```bash
-npm test          # runs all seventeen simulator suites, the gate unit tests, the specificity suites, and the plugin-integrity check
+npm test          # runs all seventeen simulator suites, the gate unit tests, and the plugin-integrity check
 # or individually:
 node tests/sarif-validator.test.mjs
 node tests/dss-sim.test.mjs
@@ -255,14 +255,12 @@ node tests/merge-pr-with-gate.test.mjs
 node tests/factory-gate.test.mjs
 node tests/factory-issue-fix-sim.test.mjs
 node tests/factory-land-sim.test.mjs
-node tests/specificity-fast.test.mjs
-node tests/specificity-render.test.mjs
 node tests/plugin-integrity.test.mjs
 ```
 
 Requires Node ≥ 18 (developed on Node 22). `npm test` prints the live total and must end `0 failing`; the standing contract is that the count only ever goes **up**. It is deliberately not restated here — a suite cannot run the suites, so a hardcoded total is a claim no check can enforce, and this one had drifted by 18 across four terms before anyone noticed. `tests/plugin-integrity.test.mjs` now fails the build if a total is pinned back into this file.
 
-The two `specificity-*` suites are the other non-simulators, for the same reason — the scorer makes no model calls, so there is nothing to stub. `specificity-fast` drives the real hook process end to end (including its gate-mode `exit 2`), and `specificity-render` runs the real `render.sh` + `render.jq` against temp cache files, so the sh/jq plumbing is exercised rather than reimplemented. Both are skipped gracefully where `jq` is absent.
+The specificity mod is TypeScript and is tested by the `claude` CLI rather than `npm test` (see **Prompt specificity scorer** below).
 
 `tests/factory-gate.test.mjs` is the odd one out: the merge gate is pure, model-free code, so there is nothing to simulate — those are ordinary unit tests, and for every condition there is a case proving that missing, ambiguous, or unknown input **fails closed**. The two factory sims additionally import the **real** gate and assert across the boundary: `factory-issue-fix`'s `evidence` block is fed to the real `checkFixtureEvidence`, and `factory-land`'s in-code condition list is compared against the package's `CONDITION_ORDER` — so the gate and its callers cannot drift apart silently.
 
@@ -299,53 +297,49 @@ State is the issue label set, so the loop is restartable, inspectable, and inter
 
 ## Prompt specificity scorer
 
-`packages/specificity/` scores each user turn for how much it narrows the space of acceptable outputs **given the context already in the window**, and shows the result in the status line. A prompt string has no specificity on its own: "fix the timeout" is fully grounded when exactly one timeout is in the window and vacuous when none is, so every number here is conditional on the transcript and the repo, and none of them transfer between sessions.
+[`packages/specificity/`](packages/specificity/) is a separate plugin in this marketplace: a Claude Code **mod** (function hooks, Claude Code 2.1.287 or later) that scores each prompt you submit for how specific it is **given the session so far**. A prompt string has no specificity on its own. "yes, do option 2" right after Claude lays out three options pins everything down, while "fix the bug" in a fresh session pins down nothing.
 
-Milestone **M1** is what ships today — the fast path and the status line, **no model calls anywhere**, Node built-ins only. The full design, the remaining milestones, and the open questions live in [`docs/specs/2026-08-30-prompt-specificity.md`](docs/specs/2026-08-30-prompt-specificity.md).
-
-**Installing the plugin does not turn this on.** It ships as scripts you register yourself, for two reasons: a `UserPromptSubmit` hook in `hooks/hooks.json` would fire in every session of every project the plugin is enabled in, and `statusLine` is a user/project setting a plugin cannot claim at all. Wiring it up is a deliberate two-part edit to your own settings:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      { "hooks": [ {
-        "type": "command",
-        "command": "node",
-        "args": ["${CLAUDE_PROJECT_DIR}/packages/specificity/bin/fast.mjs"],
-        "timeout": 10,
-        "statusMessage": "scoring prompt"
-      } ] }
-    ]
-  },
-  "statusLine": {
-    "type": "command",
-    "command": "${CLAUDE_PROJECT_DIR}/packages/specificity/bin/render.sh",
-    "padding": 0
-  }
-}
+```text
+/plugin marketplace add schmug/shipofclaudius
+/plugin install specificity@shipofclaudius
 ```
 
-The status line renders one field:
+Installing `shipofclaudius` does not install it, and it does not install `shipofclaudius`. To try a checkout without installing, run `claude --plugin-dir packages/specificity`.
 
+**Upgrading from the old scorer.** The earlier version shipped as scripts you wired into your own settings by hand, and this version deletes them. If your `settings.json` (user or project) still names `packages/specificity/bin/fast.mjs` under `hooks.UserPromptSubmit` or `packages/specificity/bin/render.sh` as the `statusLine` command, remove those entries before you pull this change. Otherwise every prompt reports a failed hook and the status line goes blank. The mod needs neither: it draws its own score chip in the prompt footer.
+
+**What you see**
+
+- A chip in the prompt footer, beside the model: one colored circle, 🔴 under 40, 🟡 under 70, 🟢 from 70, with no number. It sits ahead of the footer's mode labels, never in their place. The footer draws text only (a live test drew no graphic there), so the circle has no hover tooltip; it is a button instead.
+- Pressing the circle opens a **Specificity** panel: the score out of 100 with the four rubric dimensions (`target`, `outcome`, `constraints`, `scope`, each 0 to 3) and why; **your prompt, marked up**, with each piece the judge would sharpen underlined and numbered; a numbered **suggestion** per piece, with things the prompt leaves out listed last as questions only you can answer; **a sharper prompt** the judge rewrote, with `[brackets]` where only you know the answer; and `Recent ▃▅▆`, a sparkline of the last 10 scores. If the newest prompt got no score, the chip is hidden and the panel says it is showing the one before.
+- **Put in prompt box** puts the sharper prompt in your prompt box (after anything you have already typed) for you to fill in the brackets and send. It never sends anything itself.
+- `/spec` prints the score breakdown and opens the panel. `/spec off` removes the chip and `/spec on` brings it back. `/spec hide` closes the panel.
+
+**What it never does.** It never blocks, delays, rewrites or drops your prompt. The `prompt.submit` hook passes the prompt on untouched and returns at once, and the judge runs afterwards from a timer. Only your own prompts are scored: typed, sent over Remote Control, or given to `claude -p`. Plugin, peer, notification, scheduled and relayed submissions are skipped, and so are bare slash commands. If the judge fails, times out or returns something that isn't the rubric's JSON, nothing is shown and one line goes to the debug log (`claude --debug`).
+
+**Modes** (`/config`, or `pluginConfigs.specificity.options.mode` in settings):
+
+| `mode` | What judges | Cost |
+| --- | --- | --- |
+| `haiku` (default) | One `$.model.complete` call to Haiku at low effort with a 15 s cap. It reads the last `contextMessages` messages (default 8), each cut to a few hundred characters, with tool output kept to a short snippet. | One small Haiku request per prompt. |
+| `fork` | `$.model.fork`: a tool-less question over the session's **own** transcript, using the same model and system prompt as the main thread. It is the most accurate, since the judge sees everything. A session's first prompt has nothing to fork, so it falls back to `haiku`. So does a prompt whose answer has already started by the time the fork is taken or returns, because the fork could then see Claude's answer; `/spec` names which judge scored it. | **The fork bills the whole transcript prefix against your usage** at the main model's rates. While the main thread's prompt cache is warm, that prefix is a cache read (about 45k cached tokens in a short test session). After the cache lapses, or after `/model`, it is billed in full. |
+| `clef` | A local [Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef/) server (`packages/specificity/clef/server.py`, about 19 GB, run on your own machine) rates the four dimensions; the score is their mean. It writes no words, so opening the panel (the chip or `/spec`) asks Haiku for the suggestions and sharper prompt; the panel opens at once and fills in when Haiku answers, and **Get suggestions** tries again if that answer was missed. If the server is down, errors or doesn't answer within 10 s, `haiku` scores that prompt instead. On 28 hand-labelled prompts Clef-flash agreed with the labels as well as Haiku did (Spearman 0.56 vs 0.53). | No API call per prompt; one Haiku request when you open the panel on a Clef score, or per prompt while the server is down. About 3.4 s per prompt on an M4 Max. |
+| `off` | Nothing. No model calls are made, and no chip is drawn. | None. |
+
+`clef` also reads `clefUrl` (default `http://127.0.0.1:8765/v1/systemone`). Only a `127.0.0.1`, `localhost` or `[::1]` URL is used; any other value falls back to the default, so the prompt never leaves your machine. Start the server with the commands in its docstring. It answers only loopback `Host` headers and JSON bodies, so a web page you have open can't drive it.
+
+**Privacy.** Prompts go only through the session's own model client, except in `clef` mode, which also sends them to the Clef server on your own machine (loopback only). The mod writes no files. It keeps the last result in `$.state` for this session, including the prompt itself (cut to 2,000 characters) so the panel can mark it up. History holds only numbers.
+
+**Checking a change.** These run under the `claude` CLI, not `npm test`:
+
+```bash
+claude plugin validate packages/specificity
+claude --plugin-dir packages/specificity -p "ok"   # once on a fresh clone: lays .claude-plugin/types/ for tsc
+tsc -p packages/specificity
+claude plugin test packages/specificity
 ```
-spec ▓▓▓▓░░░░ .50 fast ⟂1        # 1 of 2 referents grounded, 1 resolved to nothing
-spec ▓▓▓▓▓▓░░ .74 carried        # (M2) the turn did the work
-spec ░░░░░░░░  ·  sampling       # (M2) async phase in flight
-```
 
-`${CLAUDE_PROJECT_DIR}` expands in both a hook `args` entry and a `statusLine.command`, so the snippet above is correct when **this repo is your project**. For a plugin install the checkout is not the project directory — use an absolute path there, since `${CLAUDE_PLUGIN_ROOT}` is only meaningful inside the plugin's own `hooks/hooks.json`, not in your `settings.json`. §3.4 of the spec is worth heeding on the first run: a mistyped path leaves the hook silently disabled, showing only `Failed with non-blocking status code:` in the transcript.
-
-A plugin cannot ship the main `statusLine` at all — bundled plugin settings support only `agent` and `subagentStatusLine` — which is the other half of why this is a manual edit rather than something the plugin turns on.
-
-`⟂n` counts referents that matched **nothing** in the window — the actionable part, and the reason the output is a list of unresolved referents rather than only a scalar. `jq` is required for the status line; without it the field renders empty rather than erroring.
-
-Two things worth knowing before enabling it:
-
-- **The governing invariant is that no configuration of this tool may break a session.** Every path exits 0 — a missing transcript, an unparseable one, an unwritable cache, a malformed `config.toml`, an unexpected throw. The status line prints nothing rather than an error string.
-- **`mode = "gate"` is the one exception, and it is destructive.** On `UserPromptSubmit`, exit 2 blocks the turn *and erases the prompt the user just typed*. It ships off, with a threshold high enough that turning it on has to be deliberate. Advisory mode is the default and never blocks.
-
-Configuration is `~/.claude/specificity/config.toml` (override the whole directory with `SPECIFICITY_DIR`); the keys and defaults are in §7 of the spec.
+The original design, written for an earlier shell-hook version, is [`docs/specs/2026-08-30-prompt-specificity.md`](docs/specs/2026-08-30-prompt-specificity.md). The mod keeps its premise (specificity is conditional on context) and replaces its M1 heuristics with a model judge.
 
 ## Process skills
 
@@ -400,12 +394,12 @@ shipofclaudius/
 │   │   ├── bin/gate.mjs           #   CLI — exit 0 merge / 2 escalate / 1 the gate broke
 │   │   ├── bin/build-input.mjs    #   CLI — fetches a PR's gate facts with `gh`
 │   │   └── src/                   #   glob, extract, config, build-input, gate-core
-│   └── specificity/               # prompt-specificity scorer, M1 (no dependencies, no model calls)
-│       ├── bin/fast.mjs           #   UserPromptSubmit hook — scores the turn, writes the cache
-│       ├── bin/render.sh          #   status line — reads the cache, computes nothing
-│       ├── bin/render.jq          #   the one-line render itself
-│       └── src/                   #   config, transcript, files, context-index, referents,
-│                                  #   constraints, record, cache
+│   └── specificity/               # a separate plugin: the prompt-specificity mod (TypeScript, function hooks)
+│       ├── .claude-plugin/plugin.json # manifest + userConfig (mode, contextMessages)
+│       ├── hooks/register.tsx     #   prompt.submit, ui.render (SessionMode chip, Pane), /spec
+│       ├── hooks/judge.ts         #   pure helpers: origin filter, context, rubric, strict parse
+│       ├── types/index.d.ts       #   $.state contract
+│       └── tests/*.test.ts        #   run by `claude plugin test`
 └── tests/
     ├── ci-abuse-lens.test.mjs     # pins security-diff-scan.js's gated CI/CD pipeline-abuse lens
     ├── dss-sim.test.mjs            # simulates deep-security-scan.js
@@ -424,8 +418,6 @@ shipofclaudius/
     ├── pr-triage-sim.test.mjs      # simulates pr-triage-fanout.js
     ├── routine-anti-noise.test.mjs # simulates routine-anti-noise.js
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
-    ├── specificity-fast.test.mjs   # UNIT-tests the specificity fast path (pure code + end-to-end)
-    ├── specificity-render.test.mjs # runs the REAL render.sh + render.jq over a temp cache
     ├── stacked-impl-sim.test.mjs   # simulates stacked-impl-lanes.js
     ├── stacked-merge-sim.test.mjs  # simulates stacked-merge-walk.js
     ├── triage-finding-sim.test.mjs # simulates triage-finding.js

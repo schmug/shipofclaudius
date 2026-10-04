@@ -1,0 +1,69 @@
+// The specificity mod's state contract: every value it keeps in `$.state`.
+// `claude plugin validate` holds each `$.state` key the hooks module names to
+// this file, and the module imports its value types from here.
+
+/** Each rubric dimension, 0-3, judged on what the prompt plus context pins down. */
+export type SpecificityDimensions = {
+  /** What and where: the file, function, option or thing acted on. */
+  target: number
+  /** Done-criteria: how anyone would know the work is finished. */
+  outcome: number
+  /** Constraints: what must not change, limits, style, tools. */
+  constraints: number
+  /** Scope: how far the change may reach. */
+  scope: number
+}
+
+/** One rubric dimension's name. */
+export type SpecificityDimension = keyof SpecificityDimensions
+
+/** One suggestion: a piece of the prompt to sharpen, or (no quote) a missing piece to add. */
+export type SpecificityNote = {
+  /** The exact words of the prompt this is about, or null for something the prompt leaves out. */
+  quote: string | null
+  dimension: SpecificityDimension
+  /** What to change or add, at most 25 words; a question to the person when only they know. */
+  suggestion: string
+}
+
+/** One scored prompt, as the judge answered it and the mod checked it. */
+export type SpecificityResult = {
+  /** 0-100. */
+  score: number
+  dimensions: SpecificityDimensions
+  /** The single most valuable missing detail, at most 12 words, or null. */
+  gap: string | null
+  /** One sentence. */
+  rationale: string
+  /** Which judge produced it. */
+  mode: 'haiku' | 'fork' | 'clef'
+  /** The prompt's first 80 characters, so `/spec` can say which prompt it was. */
+  excerpt: string
+  /** The prompt itself, cut to 2,000 characters, so the panel can mark it up. */
+  prompt: string
+  /** At most 5 suggestions, in the prompt's order, missing pieces last. */
+  notes: SpecificityNote[]
+  /** The judge's sharper version of the prompt, with [brackets] where only the person can fill in; null when it needs none. */
+  improved: string | null
+  /** When the score landed, ms since the epoch. */
+  at: number
+  /** How long the judge took, in ms. */
+  ms: number
+}
+
+declare module 'claude-code' {
+  interface PluginState {
+    specificity: {
+      /** The latest score, or null before the first one. */
+      last: SpecificityResult | null
+      /** Recent scores, oldest first, capped at 50. */
+      history: number[]
+      /** The newest prompt has no score to show (its judge failed, or the session ended mid-judge): no chip until the next score lands. */
+      isHidden: boolean
+      /** The footer chip is off until `/spec on` (`/spec off`). */
+      isChipOff: boolean
+      /** mode clef: the haiku judge is writing suggestions for the last score, at the person's request. */
+      isSuggesting: boolean
+    }
+  }
+}
