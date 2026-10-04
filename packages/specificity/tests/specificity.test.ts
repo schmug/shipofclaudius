@@ -141,6 +141,26 @@ async function chip($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Pr
   return score === undefined ? undefined : String(score.props['label'])
 }
 
+type Drawn = { type: string; props?: Record<string, unknown>; children?: (Drawn | string)[] }
+
+/** The footer sparkline's bars, oldest first, as glyph and color: the Text children of the Box keyed `spark`. */
+async function sparkBars(ui: { drawn: () => Promise<unknown> }) {
+  const walk = (node: Drawn | string): Drawn | undefined => {
+    if (typeof node === 'string') return undefined
+    if (node.props?.['key'] === 'spark') return node
+    for (const child of node.children ?? []) {
+      const hit = walk(child)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  const spark = walk((await ui.drawn()) as Drawn)
+  return (spark?.children ?? []).map(t => {
+    const text = t as Drawn
+    return { glyph: (text.children ?? []).join(''), color: text.props?.['color'] }
+  })
+}
+
 describe('prompt.submit', () => {
   test('the prompt reaches the session unchanged, before scoring finishes', async ($, on) => {
     const w = world(on, GOOD)
@@ -713,6 +733,44 @@ describe('chip', () => {
       await scored($, w, `prompt scored ${score}`)
       expect(await chip($)).toBe(circle)
     }
+  })
+
+  test('from the second score, a line of Braille dots sits ahead of the chip, red to green', async ($, on) => {
+    const scores = [0, 100, 50, 50, 100]
+    const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))
+    const cells = async (surface: 'terminal' | 'desktop') => {
+      const ui = await $.ui.mount({ plugin: 'specificity', surface, component: 'SessionMode', props: FOOTER_PROPS })
+      const found = await sparkBars(ui)
+      const chipStill = await ui.find({ key: 'chip' })
+      await ui.unmount()
+      expect(chipStill).toBeDefined()
+      return found
+    }
+
+    await scored($, w, 'first prompt')
+    expect(await cells('desktop')).toEqual([])
+
+    for (const text of ['second', 'third', 'fourth', 'fifth']) await scored($, w, text)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      expect(await cells(surface)).toEqual([
+        // 0 low on the left, 100 high on the right: the mean is 50, yellow.
+        { glyph: '\u2848', color: '#c3c322' },
+        // 50 rounds to the third of four heights in both columns.
+        { glyph: '\u2812', color: '#c3c322' },
+        // An odd score out: the last cell has only its left dot, at the top.
+        { glyph: '\u2801', color: '#22c322' },
+      ])
+    }
+  })
+
+  test('the line keeps the last 40 scores, two to a cell', async ($, on) => {
+    const scores = Array.from({ length: 44 }, (_, i) => (i % 2) * 100)
+    const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))
+    for (const score of scores) await scored($, w, `prompt scored ${score}`)
+    const ui = await $.ui.mount({ plugin: 'specificity', surface: 'desktop', component: 'SessionMode', props: FOOTER_PROPS })
+    const found = await sparkBars(ui)
+    await ui.unmount()
+    expect(found).toHaveLength(20)
   })
 })
 
