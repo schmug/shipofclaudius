@@ -1,6 +1,6 @@
 // The specificity mod: scores each prompt the person submits for how specific it
 // is given the session so far, and shows the score as a chip beside the model
-// in the prompt footer; the chip opens a panel with the breakdown, as does /spec.
+// in the prompt footer; the chip opens a panel with the breakdown, as does /specificity.
 //
 // THE INVARIANT: the prompt is never blocked, delayed, rewritten or dropped. The
 // `prompt.submit` hook passes `e` to `next` untouched and returns its result; the
@@ -78,7 +78,7 @@ function debug($: EngineInterface, line: string): void {
 }
 
 /**
- * Opens the breakdown panel; the chip's press and `/spec` are both the person
+ * Opens the breakdown panel; the chip's press and `/specificity` are both the person
  * asking. A Clef score has no words yet, so opening it asks Haiku for them on a
  * timer of its own: the panel opens at once and fills in when Haiku answers.
  */
@@ -147,7 +147,7 @@ async function suggest($: EngineInterface, contextMessages: number): Promise<voi
 /**
  * The newest prompt got no score: hide the chip so it doesn't show the previous
  * prompt's score as if it were this one's. `last` and `history` keep the
- * previous result, which the panel and `/spec` name by its excerpt.
+ * previous result, which the panel and `/specificity` name by its excerpt.
  */
 async function quiet($: EngineInterface, isStale: () => boolean, why: string): Promise<void> {
   $.ui.log(`specificity: no score (${why})`, { to: 'debug' })
@@ -296,7 +296,7 @@ export const register: Register = (on, options) => {
     epoch += 1
     if (mode === 'clef' && clefSetting !== '' && clefUrl !== clefSetting) debug($, `clefUrl is not on this machine; using ${CLEF_URL}`)
     await $.command.register({
-      name: 'spec',
+      name: 'specificity',
       description: 'Show the last prompt specificity breakdown, turn its chip on or off, or hide its panel',
       argumentHint: '[on|off|hide]',
       immediate: true,
@@ -342,7 +342,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'spec' }, async ($, e) => {
+  on('command.run', { command: 'specificity' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'on') {
       // isHidden is not cleared: it means the newest prompt has no score, and
@@ -352,13 +352,13 @@ export const register: Register = (on, options) => {
     }
     if (arg === 'off') {
       await update($, isChipOff, () => true)
-      return { text: 'Specificity chip off. /spec on brings it back.' }
+      return { text: 'Specificity chip off. /specificity on brings it back.' }
     }
     if (arg === 'hide') {
       await closePanel($)
-      return { text: 'Specificity panel closed. The chip or /spec opens it.' }
+      return { text: 'Specificity panel closed. The chip or /specificity opens it.' }
     }
-    if (arg !== '') return { text: 'Usage: /spec [on|off|hide]' }
+    if (arg !== '') return { text: 'Usage: /specificity [on|off|hide]' }
     const current = await read($, last)
     if (mode !== 'off' && current !== null) await openPanel($, contextMessages)
     return { text: breakdown(current, mode) }
