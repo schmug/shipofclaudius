@@ -9,10 +9,11 @@
     "mode": {
       "type": "string",
       "title": "Judge",
-      "description": "haiku: a cheap Haiku call over the last few messages. fork: a tool-less fork of this session's own transcript (most accurate; bills the cached prefix against your usage). off: no model calls, no chip.",
+      "description": "haiku: a cheap Haiku call over the last few messages. fork: a tool-less fork of this session's own transcript (most accurate; bills the cached prefix against your usage). clef: a local Clef-flash server (packages/specificity/clef/server.py) scores the four dimensions with no API call, and writes no notes; haiku stands in when the server is not reachable. off: no model calls, no chip.",
       "options": [
         "haiku",
         "fork",
+        "clef",
         "off"
       ],
       "default": "haiku"
@@ -22,6 +23,12 @@
       "title": "Context messages",
       "description": "How many recent messages the haiku judge reads (fork mode reads the whole transcript).",
       "default": 8
+    },
+    "clefUrl": {
+      "type": "string",
+      "title": "Clef server URL",
+      "description": "Where mode clef posts its Jev/SystemOne request.",
+      "default": "http://127.0.0.1:8765/v1/systemone"
     }
   }
 }

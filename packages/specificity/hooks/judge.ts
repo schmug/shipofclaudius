@@ -5,9 +5,9 @@ import type { PromptOrigin, SessionMessage } from 'claude-code'
 
 import type { SpecificityDimension, SpecificityDimensions, SpecificityNote, SpecificityResult } from '../types'
 
-export type Mode = 'haiku' | 'fork' | 'off'
+export type Mode = 'haiku' | 'fork' | 'clef' | 'off'
 
-export const MODES: readonly Mode[] = ['haiku', 'fork', 'off']
+export const MODES: readonly Mode[] = ['haiku', 'fork', 'clef', 'off']
 
 export const HISTORY_CAP = 50
 export const SPARK_WIDTH = 10
@@ -296,7 +296,7 @@ export function noteLine(note: SpecificityNote, index: number): string {
 
 /** `/spec`'s full breakdown of the last result. */
 export function breakdown(last: SpecificityResult | null, mode: Mode): string {
-  if (mode === 'off') return 'The specificity scorer is off (mode: off). Set mode to haiku or fork in /config.'
+  if (mode === 'off') return 'The specificity scorer is off (mode: off). Set mode to haiku, fork or clef in /config.'
   if (last === null) return 'No prompt scored yet this session.'
   const d = last.dimensions
   return [
@@ -309,4 +309,67 @@ export function breakdown(last: SpecificityResult | null, mode: Mode): string {
 
 export function excerpt(prompt: string): string {
   return clip(prompt, 80)
+}
+
+/** Where `mode: clef` posts by default: the local server in `clef/server.py`, bound to loopback. */
+export const CLEF_URL = 'http://127.0.0.1:8765/v1/systemone'
+
+const CLEF_LEVELS = ['0: unspecified', '1: vague', '2: mostly pinned down', '3: fully pinned down by prompt plus context']
+const CLEF_FRAME = "Judge the user's prompt to a coding assistant relative to the conversation before it. "
+
+/**
+ * A Jev/SystemOne request for Clef-flash: one `score` question per rubric
+ * dimension. Measured 2026-10-04 against Schmug's hand labels on 28 real
+ * prompts, this plain wording ranked with Haiku (Spearman 0.56 vs 0.53); a
+ * wording that told Clef to credit context replies fell to -0.10, so keep it
+ * plain. Clef answers only typed scores: no gap, notes or rewrite.
+ */
+export function clefRequest(context: string, prompt: string): string {
+  const q = (instructions: string) => ({ type: 'score', instructions: CLEF_FRAME + instructions, criteria: CLEF_LEVELS })
+  return JSON.stringify({
+    model: 'clef-flash',
+    state: { conversation: context === '' ? '(no earlier messages: first prompt of the session)' : context, prompt },
+    questions: {
+      target: q('How well is WHAT/WHERE to act pinned down (file, function, option, thing)?'),
+      outcome: q('How well are the done-criteria pinned down, i.e. how success is recognised?'),
+      constraints: q('How well are limits pinned down: what must not change, style, tools?'),
+      scope: q('How well is it pinned down how far the change may reach?'),
+    },
+  })
+}
+
+/**
+ * Clef's reply as a judgement, or null when any dimension is missing or out of
+ * 0-3. The overall score is the dimensions' mean on 0-100 (Clef answers no
+ * overall); each dimension is shown rounded.
+ */
+export function parseClef(
+  text: string,
+  prompt: string,
+): Omit<SpecificityResult, 'mode' | 'excerpt' | 'at' | 'ms'> | null {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const answers = (raw as { answers?: Record<string, { score?: unknown }> } | null)?.answers
+  if (answers === undefined || answers === null || typeof answers !== 'object') return null
+  const names: SpecificityDimension[] = ['target', 'outcome', 'constraints', 'scope']
+  const raws: number[] = []
+  for (const name of names) {
+    const v = answers[name]?.score
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 3) return null
+    raws.push(v)
+  }
+  const [target, outcome, constraints, scope] = raws.map(v => Math.round(v)) as [number, number, number, number]
+  return {
+    score: Math.round((raws.reduce((a, b) => a + b, 0) / 12) * 100),
+    dimensions: { target, outcome, constraints, scope },
+    gap: null,
+    rationale: 'Scored by local Clef-flash, which rates the four dimensions and writes no notes.',
+    prompt: prompt.slice(0, PROMPT_CHARS),
+    notes: [],
+    improved: null,
+  }
 }

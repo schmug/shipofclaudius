@@ -14,6 +14,8 @@ import type { SpecificityResult } from '../types'
 import {
   breakdown,
   buildContext,
+  CLEF_URL,
+  clefRequest,
   completePrompt,
   excerpt,
   forkPrompt,
@@ -25,6 +27,7 @@ import {
   noteLine,
   panelLines,
   slashName,
+  parseClef,
   parseJudgement,
   readCount,
   readMode,
@@ -116,14 +119,15 @@ async function score(
   prompt: string,
   order: number,
   born: number,
-  mode: 'haiku' | 'fork',
+  mode: 'haiku' | 'fork' | 'clef',
   contextMessages: number,
+  clefUrl: string,
 ): Promise<void> {
   // Superseded by a newer prompt, or by a /clear, resume or exit. A `/name`
   // candidate not yet confirmed is not stale on that account alone.
   const isStale = () => latest > order || born !== epoch
   try {
-    await judgeAndWrite($, prompt, order, isStale, mode, contextMessages)
+    await judgeAndWrite($, prompt, order, isStale, mode, contextMessages, clefUrl)
   } catch (err: unknown) {
     await quiet($, isStale, err instanceof Error ? err.name : 'error')
   } finally {
@@ -137,8 +141,9 @@ async function judgeAndWrite(
   prompt: string,
   order: number,
   isStale: () => boolean,
-  mode: 'haiku' | 'fork',
+  mode: 'haiku' | 'fork' | 'clef',
   contextMessages: number,
+  clefUrl: string,
 ): Promise<void> {
   const name = slashName(prompt)
   if (name !== null) {
@@ -153,12 +158,29 @@ async function judgeAndWrite(
   const startedAt = await $.clock.now()
   let judge = mode
   let reply: Awaited<ReturnType<typeof $.model.fork>> | null = null
+  let judged: ReturnType<typeof parseJudgement> = null
+  // Clef answers only when its local server is up; anything else (refused,
+  // an error status, a malformed reply) falls through to the haiku judge.
+  if (mode === 'clef' && !isStale()) {
+    const messages = await $.session.messages()
+    try {
+      const res = await $.http.fetch(clefUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: clefRequest(buildContext(messages, prompt, contextMessages), prompt),
+      })
+      judged = res.ok ? parseClef(res.text, prompt) : null
+      if (judged === null) $.ui.log(`specificity: clef reply unusable (status ${res.status}); judging with haiku`, { to: 'debug' })
+    } catch (err: unknown) {
+      $.ui.log(`specificity: clef unreachable (${err instanceof Error ? err.name : 'error'}); judging with haiku`, { to: 'debug' })
+    }
+  }
   // The fork is the transcript as the main thread last sent it, so once Claude's
   // answer to this prompt has started it may carry that answer. Checked before
   // forking and again once the fork answers: if the answer may be in it, the
   // fork's score is dropped and the haiku judge, whose context is cut at the
   // prompt, rates it instead.
-  if (mode === 'fork' && !isAnswerUnderway(await $.session.messages(), prompt) && !isStale()) {
+  if (judged === null && mode === 'fork' && !isAnswerUnderway(await $.session.messages(), prompt) && !isStale()) {
     reply = await $.model.fork({ prompt: forkPrompt(prompt) })
     if (reply.isAnswered && isAnswerUnderway(await $.session.messages(), prompt)) {
       $.ui.log('specificity: fork dropped, the answer may be in it; judging with haiku', { to: 'debug' })
@@ -167,7 +189,7 @@ async function judgeAndWrite(
   }
   // A session's first prompt has no response to fork yet (and none right after
   // /clear); the context is empty then anyway, so the cheap judge stands in.
-  if (reply === null || (!reply.isAnswered && reply.reason === 'nothing-to-fork')) {
+  if (judged === null && (reply === null || (!reply.isAnswered && reply.reason === 'nothing-to-fork'))) {
     judge = 'haiku'
     const messages = await $.session.messages()
     // Checked before each model call, not only after: a judge already
@@ -184,14 +206,17 @@ async function judgeAndWrite(
     })
   }
 
-  if (!reply.isAnswered) {
-    await quiet($, isStale, `${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? '-'} ${reply.error}` : ''}`)
-    return
-  }
-  const judged = parseJudgement(reply.text, prompt)
   if (judged === null) {
-    await quiet($, isStale, `unparseable reply, ${reply.text.length} chars`)
-    return
+    if (reply === null) return
+    if (!reply.isAnswered) {
+      await quiet($, isStale, `${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? '-'} ${reply.error}` : ''}`)
+      return
+    }
+    judged = parseJudgement(reply.text, prompt)
+    if (judged === null) {
+      await quiet($, isStale, `unparseable reply, ${reply.text.length} chars`)
+      return
+    }
   }
 
   const now = await $.clock.now()
@@ -211,6 +236,7 @@ async function judgeAndWrite(
 export const register: Register = (on, options) => {
   const mode = readMode(options['mode'])
   const contextMessages = readCount(options['contextMessages'], 8, 40)
+  const clefUrl = typeof options['clefUrl'] === 'string' && options['clefUrl'].trim() !== '' ? options['clefUrl'].trim() : CLEF_URL
 
   on('session.start', async ($, e, next) => {
     epoch += 1
@@ -253,7 +279,7 @@ export const register: Register = (on, options) => {
       if (slashName(prompt) === null) confirm(order)
       else candidates.add(order)
       $.clock.after(0, () => {
-        score($, prompt, order, born, judge, contextMessages).catch((err: unknown) =>
+        score($, prompt, order, born, judge, contextMessages, clefUrl).catch((err: unknown) =>
           debug($, `no score (${err instanceof Error ? err.name : 'error'})`),
         )
       })

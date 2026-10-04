@@ -500,6 +500,58 @@ describe('prompt.submit', () => {
   })
 })
 
+describe('clef mode', () => {
+  const CLEF_URL = 'http://127.0.0.1:8765/v1/systemone'
+  const clefReply = (scores: Record<string, number>) =>
+    JSON.stringify({
+      model: 'clef-flash',
+      answers: Object.fromEntries(Object.entries(scores).map(([id, score]) => [id, { type: 'score', score }])),
+      usage: { input_tokens: 900, output_tokens: 0 },
+    })
+  /** Stubs the local Clef server: `reply` is the body, or an Error to throw. */
+  function clefServer(on: On, reply: string | Error, status = 200) {
+    const seen: { url: string; body: string }[] = []
+    on('http.fetch', ($, e) => {
+      seen.push({ url: e.url, body: e.init?.body ?? '' })
+      if (reply instanceof Error) throw reply
+      return { value: { status, ok: status >= 200 && status < 300, headers: {}, text: reply } }
+    })
+    return seen
+  }
+
+  test('scores the four dimensions through the local Clef server, with no model call', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    const seen = clefServer(on, clefReply({ target: 2.6, outcome: 1.2, constraints: 0.4, scope: 1.8 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+
+    expect(w.modelCalls).toBe(0)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.url).toBe(CLEF_URL)
+    const body = JSON.parse(seen[0]?.body ?? '{}')
+    expect(Object.keys(body.questions).sort()).toEqual(['constraints', 'outcome', 'scope', 'target'])
+    expect(body.state.prompt).toBe('fix the bug in src/a.ts')
+    const out = await spec($)
+    expect(out).toContain('spec 50/100 (clef,')
+    expect(out).toContain('target 3/3 · outcome 1/3 · constraints 0/3 · scope 2/3')
+  })
+
+  test('falls back to haiku when the Clef server is unreachable', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, new Error('connect ECONNREFUSED'))
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(w.modelCalls).toBe(1)
+    expect(await spec($)).toContain('(haiku,')
+  })
+
+  test('falls back to haiku when the Clef reply is malformed or an error status', { options: { mode: 'clef' } }, async ($, on) => {
+    const w = world(on, GOOD)
+    clefServer(on, clefReply({ target: 2, outcome: 9, constraints: 1, scope: 1 }))
+    await scored($, w, 'fix the bug in src/a.ts')
+    expect(w.modelCalls).toBe(1)
+    expect(await spec($)).toContain('(haiku,')
+  })
+})
+
 describe('chip', () => {
   test('is one colored circle, no number, on terminal and desktop', async ($, on) => {
     const w = world(on, GOOD)

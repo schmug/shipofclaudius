@@ -36,7 +36,7 @@ export type SpecificityResult = {
   /** One sentence. */
   rationale: string
   /** Which judge produced it. */
-  mode: 'haiku' | 'fork'
+  mode: 'haiku' | 'fork' | 'clef'
   /** The prompt's first 80 characters, so `/spec` can say which prompt it was. */
   excerpt: string
   /** The prompt itself, cut to 2,000 characters, so the panel can mark it up. */
