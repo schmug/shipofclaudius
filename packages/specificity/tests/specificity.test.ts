@@ -533,6 +533,7 @@ describe('clef mode', () => {
     const out = await spec($)
     expect(out).toContain('spec 50/100 (clef,')
     expect(out).toContain('target 3/3 · outcome 1/3 · constraints 0/3 · scope 2/3')
+    expect(out).toContain('gap: not written')
   })
 
   test('falls back to haiku when the Clef server is unreachable', { options: { mode: 'clef' } }, async ($, on) => {

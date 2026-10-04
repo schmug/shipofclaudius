@@ -304,7 +304,9 @@ export function breakdown(last: SpecificityResult | null, mode: Mode): string {
   return [
     `spec ${last.score}/100 (${last.mode}, ${(last.ms / 1000).toFixed(1)}s) for "${last.excerpt}"`,
     `target ${d.target}/3 · outcome ${d.outcome}/3 · constraints ${d.constraints}/3 · scope ${d.scope}/3`,
-    `gap: ${last.gap ?? 'none'}`,
+    last.mode === 'clef' && last.gap === null && last.notes.length === 0 && last.improved === null
+      ? 'gap: not written (Clef only scores; Get suggestions in the panel asks Haiku)'
+      : `gap: ${last.gap ?? 'none'}`,
     `why: ${last.rationale}`,
   ].join('\n')
 }
