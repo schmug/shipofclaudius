@@ -735,7 +735,7 @@ describe('chip', () => {
     }
   })
 
-  test('from the second score, a line of Braille dots sits ahead of the chip, red to green', async ($, on) => {
+  test('from the first score, a line of Braille dots sits ahead of the chip, red to green', async ($, on) => {
     const scores = [0, 100, 50, 50, 100]
     const w = world(on, scores.map(score => JSON.stringify({ ...JSON.parse(GOOD), score })))
     const cells = async (surface: 'terminal' | 'desktop') => {
@@ -748,7 +748,7 @@ describe('chip', () => {
     }
 
     await scored($, w, 'first prompt')
-    expect(await cells('desktop')).toEqual([])
+    expect(await cells('desktop')).toEqual([{ glyph: '\u2840', color: '#c32222' }])
 
     for (const text of ['second', 'third', 'fourth', 'fifth']) await scored($, w, text)
     for (const surface of ['terminal', 'desktop'] as const) {
