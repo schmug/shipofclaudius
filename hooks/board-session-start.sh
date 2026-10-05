@@ -32,18 +32,35 @@ state=unavailable age=
 if [ "$rc" -eq 0 ]; then
   state=live
   case "$CACHE" in */*) mkdir -p "${CACHE%/*}";; esac  # parent dir only; a bare name needs none
-  # Write the cache atomically (temp sibling, then rename). Write errors are
-  # ignored on purpose: a read-only HOME must not fail the hook.
-  jq -nc --arg q "$q" --argjson t "$(date +%s)" '{fetched_at:$t,q:$q}' > "$CACHE.tmp.$$" \
-    && mv "$CACHE.tmp.$$" "$CACHE"
+  # Write the cache atomically. The temp file is mktemp'd in the cache's directory
+  # (same filesystem, so mv is a plain rename) under umask 077 — a predictable
+  # sibling like "$CACHE.tmp.$$" would follow a symlink planted at that path, so
+  # neither the temp name nor its mode may be attacker-influenced. Write errors
+  # are ignored on purpose: a read-only HOME must not fail the hook; if mktemp
+  # fails the cache write is skipped entirely (the live text is still emitted).
+  umask 077
+  tmp=$(mktemp "${CACHE}.XXXXXX" 2>/dev/null) || tmp=
+  if [ -n "$tmp" ]; then
+    jq -nc --arg q "$q" --argjson t "$(date +%s)" '{fetched_at:$t,q:$q}' > "$tmp" \
+      && mv -f "$tmp" "$CACHE" || rm -f "$tmp"
+  fi
 elif [ -s "$CACHE" ]; then
-  # Serve from cache only if it parses and is no older than TTL.
-  fa=$(jq -r 'if (.fetched_at|type)=="number" then .fetched_at else empty end' "$CACHE" 2>/dev/null)
-  cq=$(jq -r 'if (.q|type)=="string" then .q else empty end' "$CACHE" 2>/dev/null)
-  if [ -n "$fa" ] && [ -n "$cq" ] && [ $(( $(date +%s) - fa )) -le "$TTL" ]; then
-    state=cached
-    age=$(( ( $(date +%s) - fa ) / 60 ))
-    q="$cq"
+  # Serve from cache only if it parses and is no older than TTL. Validity is
+  # checked with a sentinel while the value is read separately, because a cache
+  # whose q is the EMPTY string is valid — the board can legitimately have had
+  # no open questions when it was written — and a non-emptiness check would
+  # reject it. fetched_at must be a whole number of seconds, and its age must be
+  # non-negative: a timestamp in the future (a negative age) is bogus and is not
+  # served.
+  fa=$(jq -r 'if (.fetched_at|type)=="number" and .fetched_at==(.fetched_at|floor) then .fetched_at else empty end' "$CACHE" 2>/dev/null)
+  cq_ok=$(jq -r 'if (.q|type)=="string" then "ok" else empty end' "$CACHE" 2>/dev/null)
+  if [ -n "$fa" ] && [ "$cq_ok" = ok ]; then
+    age=$(( $(date +%s) - fa ))
+    if [ "$age" -ge 0 ] && [ "$age" -le "$TTL" ]; then
+      state=cached
+      q=$(jq -r '.q' "$CACHE" 2>/dev/null)
+      age=$(( age / 60 ))
+    fi
   fi
 fi
 
