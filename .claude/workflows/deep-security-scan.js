@@ -625,6 +625,16 @@ You are ONE of several independent workers with different lenses; do not try to 
   if (round === MAX_ROUNDS) { terminalState = 'capped'; break }
 }
 
+// Issue #249: state in CODE whether the counts are converged. A run that stops on the round
+// cap or the budget floor — NOT on saturation — produced floor counts (recall was still
+// climbing when it ended), so the return and the report must say so where the counts are
+// presented, not only in a journal line.
+const COUNTS_ARE_FLOOR = terminalState !== 'saturated'
+const DISCOVERY_CAVEAT = terminalState === 'saturated' ? ''
+  : terminalState === 'capped'
+    ? `Discovery stopped at the round cap (${roundsRun} of ${MAX_ROUNDS} rounds) before saturating; candidate/confirmed/reportable counts are a floor, not a converged total.`
+    : `Discovery stopped at the budget floor (${roundsRun} of up to ${MAX_ROUNDS} rounds) before saturating; candidate/confirmed/reportable counts are a floor, not a converged total.`
+
 // ---- Semantic merge complete (plain JS; the justified barrier) ----
 const unique = [...new Set(seen.values())]
 log(`Discovery merged: ${roundsRun} round(s) (${terminalState}), ${clean.length} worker passes, ~${filesReviewed} file-reviews, ${toolCandidates.length} tool candidates -> ${unique.length} unique after cumulative dedup.`)
@@ -647,6 +657,7 @@ if (unique.length === 0) {
   return {
     target: TARGET, scope: SCOPE, rounds: WORKERS.length,
     rounds_run: roundsRun, terminal_state: terminalState,
+    counts_are_floor: COUNTS_ARE_FLOOR, discovery_caveat: DISCOVERY_CAVEAT,
     files_reviewed: filesReviewed, candidates: 0, reportable: [],
     tool_coverage: TOOL_COVERAGE,
     note: `No candidate vulnerabilities surfaced across ${roundsRun} discovery round(s) (terminal state: ${terminalState}). Treat as "covered these lenses, found nothing" — see workers' threat models for coverage.`,
@@ -909,6 +920,11 @@ const DISCLOSURE_WARNING = (TARGET_VISIBILITY === 'PRIVATE' || TARGET_VISIBILITY
 if (DISCLOSURE_WARNING) log(DISCLOSURE_WARNING)
 const reportHtml = (reportResult && reportResult.report_html_path) || null
 const reportMd = (reportResult && reportResult.report_md) || null
+// Issue #249: put the caveat where the counts are presented — a markdown blockquote leading
+// report.md — computed in code, not left to the report agent's prose.
+const CAVEAT_PREFIX = DISCOVERY_CAVEAT ? `> ${DISCOVERY_CAVEAT}\n\n` : ''
+const REPORT_MD = reportMd ? CAVEAT_PREFIX + reportMd : reportMd
+if (DISCOVERY_CAVEAT) log(DISCOVERY_CAVEAT)
 if (reportMd) log(`report.html at ${reportDir}. report.md content is in the return's report_md field — the CALLER must write it to ${reportDir || '<output_dir>'}/report.md (workflow subagents cannot write .md). Also embedded (escaped JSON, not base64) in report.html ("Download report.md").`)
 
 return {
@@ -917,6 +933,8 @@ return {
   rounds: WORKERS.length,
   rounds_run: roundsRun,
   terminal_state: terminalState,
+  counts_are_floor: COUNTS_ARE_FLOOR,
+  discovery_caveat: DISCOVERY_CAVEAT,
   files_reviewed: filesReviewed,
   tool_coverage: TOOL_COVERAGE,
   candidates: unique.length,
@@ -932,7 +950,7 @@ return {
   target_visibility: TARGET_VISIBILITY,
   disclosure_warning: DISCLOSURE_WARNING,
   report_html: reportHtml,
-  report_md: reportMd,
+  report_md: REPORT_MD,
   report: reportResult,
   // Sealed, fingerprinted findings + coverage bundle (issue #21) — additive. The caller persists
   // bundle.json / results.sarif; new_findings is the incremental "what's new vs priorBundle" view
