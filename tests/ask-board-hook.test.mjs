@@ -15,7 +15,7 @@
 // always a fresh path under a suite-local temp dir, so a run can never touch the real
 // ~/.claude/board-cache.json.
 import { readFile, writeFile, chmod } from 'node:fs/promises'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readdirSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -215,6 +215,52 @@ test('a hung gh is killed at the alarm and the hook falls back to the cache with
   const ctx = contextOf(run)
   assert.match(ctx, /live fetch failed; served from cache/, 'the fallback served from cache')
   assert.ok(ctx.includes(q), 'the cached question is in the injected text')
+})
+
+// ---- hardening follow-up (fixes 1-3 of the codex security review) ----
+
+test('a live fetch leaves no temp sibling next to the cache and the cache file mode is 0600', async () => {
+  if (SKIP) return skipNote()
+  // Fix 1: the temp file used to be `"$CACHE.tmp.$$"`, a predictable path that a
+  // symlink could redirect (the hook runs with the session's privileges). It is now
+  // mktemp in the cache's directory under umask 077, renamed into place — so the
+  // cache file itself lands 0600 and no temp sibling survives a successful write.
+  const q = '#14 Does the cache write leave a temp sibling behind?'
+  const { cacheFile } = runHook({ out: q })
+  const left = readdirSync(TMP).filter((n) => n !== 'gh' && !/^cache-\d+\.json$/.test(n))
+  assert.deepEqual(left, [], 'no *.tmp*/.XXXXXX sibling files remain next to the cache')
+  const mode = statSync(cacheFile).mode & 0o777
+  assert.equal(mode, 0o600, `cache file mode is 0600 (got ${mode.toString(8)})`)
+})
+
+test('a failed gh call with a fresh cache whose q is the empty string serves the cached no-open-questions text', async () => {
+  if (SKIP) return skipNote()
+  // Fix 2: the board can legitimately have had no open questions when the cache was
+  // written, so a cache with q:"" is VALID. The old check demanded a non-empty cq,
+  // which turned that cache into an honest gap — an outage that hid a real
+  // "no open questions" answer behind an unreachable message.
+  const cache = freshCache()
+  await writeFile(cache, JSON.stringify({ fetched_at: Math.floor(Date.now() / 1000), q: '' }))
+  const ctx = contextOf(runHook({ out: '', rc: 127, cache }))
+  assert.match(ctx, /live fetch failed; served from cache/, 'names the cached state')
+  assert.match(ctx, /min old/, 'carries the cache age label')
+  assert.match(ctx, /no open questions/i, 'serves the cached empty board, plainly')
+  assert.doesNotMatch(ctx, /unreachable this session/, 'does not claim an honest gap when it served')
+})
+
+test('a cache whose fetched_at is in the future does not serve and does not resurrect', async () => {
+  if (SKIP) return skipNote()
+  // Fix 3: fetched_at = now+3600 used to pass the TTL check because its age was
+  // negative. A future timestamp is a bogus or clock-skewed cache; refusing it is
+  // the honest gap.
+  const q = '#15 Does a future fetched_at pass the TTL check?'
+  const cache = freshCache()
+  await writeFile(cache, JSON.stringify({ fetched_at: Math.floor(Date.now() / 1000) + 3600, q }))
+  const ctx = contextOf(runHook({ out: '', rc: 127, cache }))
+  assert.match(ctx, /unreachable this session/, 'falls through to the honest gap')
+  assert.match(ctx, /no fresh cache/, 'says why the cached list was not served')
+  assert.ok(!ctx.includes(q), 'does not resurrect the future-dated cache')
+  assert.doesNotMatch(ctx, /served from cache/, 'does not claim it served from cache')
 })
 
 // ---- runner ----
