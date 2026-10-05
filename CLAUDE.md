@@ -24,6 +24,12 @@ node tests/dss-sim.test.mjs       # run one suite directly (each is standalone, 
 
 There is no build, no lint, no typecheck, and no dependency install — `package.json` has zero dependencies and there is **intentionally no lockfile**. CI (`.github/workflows/ci.yml`) runs `npm test` on Node 20 and 22 with **no install step** (`npm ci` would fail without a lockfile). Keep it that way: tests may use **only Node built-ins** (`node:fs/promises`, `node:assert/strict`). If you need a validator (e.g. SARIF conformance), vendor a built-ins-only one under `tests/lib/` — do not add an npm dependency.
 
+## CI checks and merge gates
+
+- The only **required** checks on `main` are `test (Node 20)` and `test (Node 22)`; CodeQL `Analyze (*)` runs are informational and not gates.
+- GitHub injects a `github-advanced-security` check ("Code scanning AI findings", run event `dynamic`, not in `.github/workflows/`). It used to fail on PRs touching `.md` files with `CAPIError` / `SessionModelError: 400 The requested model is not supported` (the requested model name drifts between releases; the licensing failure does not). As of 2026-10-04 it no longer appears on such PRs (#266). If it reappears it is advisory and **not** a gate: do not try to fix it in the repo and do not re-investigate. The remedy is the repo's code-scanning "AI findings" setting, which is a repo-settings change only Schmug makes.
+- **Gotcha:** `gh api repos/schmug/shipofclaudius/commits/<sha>/status --jq .state` returns **`pending`** on a commit whose checks all passed and whose PR is `CLEAN`. Gate on `mergeStateStatus` plus the required-check rollup (`statusCheckRollup`), never on the combined status. `merge-pr-with-gate` and `stacked-merge-walk` already do.
+
 ## How to validate a workflow script
 
 The `.claude/workflows/*.js` scripts use **top-level `return` and `await`** because the Workflow runtime wraps each script body in an async function. Consequences:
