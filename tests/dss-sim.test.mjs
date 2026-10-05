@@ -1108,6 +1108,17 @@ test("models: both are overridable, and a caller that collapses them is rejected
   )
 })
 
+test("effort: the validate + severity judge stages run at effort 'high' (#186)", async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { calls } = await runScript({ args: { target: "/tmp/fake", rounds: 2 }, stubs: stubsFor(map) })
+  for (const v of byLabel(calls, "validate:")) {
+    assert.equal(v.opts.effort, "high", "the disprove-first validator carries an explicit effort tier")
+  }
+  const sEfforts = (map.severityOpts || []).map((o) => o.effort)
+  assert.equal(sEfforts.length, 2, "one severity call per confirmed candidate")
+  assert.ok(sEfforts.every((e) => e === "high"), "the severity-calibration stage carries an explicit effort tier")
+})
+
 // ===================== SCAN OUTPUT LOCATION (#58) =====================
 // A report written into ${TARGET}/.security-scans/ is one `git add -A` + push away from publicly
 // disclosing unpatched findings — how PhishSOC#565 leaked 12 findings (9 High) on a public repo.

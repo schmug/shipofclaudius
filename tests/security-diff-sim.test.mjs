@@ -1056,6 +1056,18 @@ test("models: the read-only agentType is preserved alongside the model pin", asy
   }
 })
 
+test("effort: the validate + severity judge stages run at effort 'high' (#186)", async () => {
+  const { calls } = await runScript({ args: { target: "/tmp/fake" }, map: {} })
+  for (const v of byLabel(calls, "validate:")) {
+    assert.equal(v.opts.effort, "high", "the disprove-first validator carries an explicit effort tier")
+  }
+  const map = { discovery: () => discoveryTwo }
+  await runScript({ args: { target: "/tmp/fake", rounds: 1 }, map })
+  const sEfforts = (map.severityOpts || []).map((o) => o.effort)
+  assert.ok(sEfforts.length >= 1, "the severity stage ran")
+  assert.ok(sEfforts.every((e) => e === "high"), "the severity-calibration stage carries an explicit effort tier")
+})
+
 // ===================== SCAN OUTPUT LOCATION (#58) =====================
 // A report written into ${TARGET}/.security-scans/ is one `git add -A` + push away from publicly
 // disclosing unpatched findings — how PhishSOC#565 leaked 12 findings (9 High) on a public repo.

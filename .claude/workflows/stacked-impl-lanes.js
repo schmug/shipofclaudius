@@ -587,7 +587,7 @@ async function runLane(lane, base, laneMode, stackedOn) {
   let adv = null
   if (impl && impl.status === 'PR_OPENED' && ADVERSARIAL_MODE !== 'off' && (ADVERSARIAL_MODE === 'opened' || lane.invariant)) {
     adv = await runAgent(ADVERSARIAL_PROMPT(lane, impl, base, DEFECT_CLASSES), {
-      label: `adversarial:${lane.key}`, phase: 'Review', agentType: READONLY_AGENT, schema: ADVERSARIAL_SCHEMA,
+      label: `adversarial:${lane.key}`, phase: 'Review', agentType: READONLY_AGENT, effort: 'high', schema: ADVERSARIAL_SCHEMA,
     })
   }
 
