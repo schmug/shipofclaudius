@@ -896,11 +896,82 @@ test('#178 the RESEARCH_SCHEMA free-text fields named in the issue carry a maxLe
   const { calls } = await runScript({ args: { numbers: [12] } })
   const r = byPrefix(calls, 'research:#')[0]
   const props = r.opts.schema.properties
-  assert.equal(props.title.maxLength, 300, 'title is capped at 300 chars')
-  assert.equal(props.rationale.maxLength, 600, 'rationale is capped at 600 chars')
-  assert.equal(props.spec.maxLength, 8000, 'spec (long-form) is capped at 8000 chars')
-  assert.equal(props.next_question.maxLength, 500, 'next_question is capped at 500 chars')
+  // #236: the schema's own maxLength is the INTENDED cap plus a tolerance margin (so a
+  // near-miss research response is schema-valid on the first try); the intended cap is
+  // still enforced by script-side clamping, asserted separately below.
+  assert.equal(props.title.maxLength, 330, 'title is capped at 300 + 10% margin')
+  assert.equal(props.rationale.maxLength, 660, 'rationale is capped at 600 + 10% margin')
+  assert.equal(props.spec.maxLength, 8000, 'spec (long-form) is capped at 8000 chars (bare, unchanged by #236)')
+  assert.equal(props.next_question.maxLength, 550, 'next_question is capped at 500 + 10% margin')
   assert.ok(props.spec.maxLength > props.rationale.maxLength, 'the long-form spec field gets a more generous cap than the short rationale')
+  assert.ok(props.research_comment.maxLength == null, 'research_comment stays uncapped (out of scope for #236)')
+})
+
+// ===================== FREE-TEXT CAP TOLERANCE (issue #236) =====================
+// Same failure shape as #233 (issue-triage-fanout): a research response a few chars over a
+// bare maxLength cap is a schema violation that exhausts the StructuredOutput retry budget
+// (5) and drops the issue to missing[] with no verdict at all. The schema now gives a 10%
+// margin over the intended cap, and script code clamps the response back down to the
+// intended cap so nothing unbounded reaches the checkpoint, green_lanes, or a lane brief.
+
+test('#236 a near-miss overshoot (a few chars over the intended cap) is accepted and truncated, not dropped to missing[]', async () => {
+  const overTitle = 't'.repeat(303)
+  const overRationale = 'r'.repeat(602)
+  const overNext = 'q'.repeat(503)
+  const { result, calls } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), verdict: 'STILL_RESEARCH', title: overTitle, rationale: overRationale, next_question: overNext }),
+  })
+  assert.deepEqual(result.missing, [], 'a near-miss overshoot must never be dropped to missing[]')
+  assert.equal(result.researched.length, 1, 'the issue is still assessed')
+  const r = result.researched[0]
+  assert.equal(r.title.length, 300, 'title is clamped back to the intended 300-char cap')
+  assert.equal(r.rationale.length, 600, 'rationale is clamped back to the intended 600-char cap')
+  assert.equal(r.next_question.length, 500, 'next_question is clamped back to the intended 500-char cap')
+  assert.ok(overTitle.startsWith(r.title), 'the clamp truncates from the end, keeping the leading content')
+  assert.ok(overRationale.startsWith(r.rationale), 'the clamp truncates from the end, keeping the leading content')
+  assert.ok(overNext.startsWith(r.next_question), 'the clamp truncates from the end, keeping the leading content')
+  assert.ok(calls.written && calls.written.entries['12'].result.rationale.length === 600,
+    'the clamped (not margined) text is what the checkpoint write-back carries')
+})
+
+test('#236 an overshoot beyond even the schema margin still fails through to missing[] (the margin is not unlimited)', async () => {
+  // Simulates the StructuredOutput layer this sim cannot itself run: a response so far over
+  // the (margined) schema cap that real schema validation would still reject it and the
+  // retry budget would exhaust, so the fetch/research chain never resolves for this issue.
+  const { result } = await runScript({ args: { numbers: [12, 14] }, research: (n) => (n === 14 ? null : greenResearch(n)) })
+  assert.deepEqual(result.missing, [14], 'an unresolvable research still lands in missing[] — the margin bounds retries, it does not eliminate them')
+})
+
+test('#236 truncation is logged, never silent (no-silent-caps)', async () => {
+  const { calls } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), verdict: 'STILL_RESEARCH', rationale: 'r'.repeat(602), next_question: 'q'.repeat(503) }),
+  })
+  const truncLog = calls.logs.find((m) => /truncat/i.test(m) && /#12\b/.test(m))
+  assert.ok(truncLog, 'a log line names the truncated issue')
+  assert.ok(/rationale/.test(truncLog) && /next_question/.test(truncLog), 'the log names which fields were truncated')
+})
+
+test('#236 a response within cap (no overshoot) is left byte-for-byte unchanged', async () => {
+  const { result } = await runScript({
+    args: { numbers: [12] },
+    research: (n) => ({ ...greenResearch(n), verdict: 'STILL_RESEARCH', rationale: 'short and fine', next_question: 'also fine' }),
+  })
+  assert.equal(result.researched[0].rationale, 'short and fine', 'no truncation applied when already within cap')
+  assert.equal(result.researched[0].next_question, 'also fine', 'no truncation applied when already within cap')
+})
+
+test('#236 the convention is defined once near the schema and the out-of-scope mechanisms are untouched', async () => {
+  const src = await readFile(SRC_PATH, 'utf8')
+  assert.ok(/RESEARCH_CAPS/.test(src) && /CAP_MARGIN_PCT/.test(src), 'a named tolerance convention exists')
+  assert.ok(/#236/.test(src) && /#233/.test(src), 'the comment names the issues (this fix + the convention it follows)')
+  assert.ok(/return r \? clampToResearchCaps\(r\) : r/.test(src), 'the clamp is applied to each fresh research response, in script code')
+  // Out of scope (issue #236), untouched: spec keeps its bare schema cap + the post-hoc
+  // spec_at_cap/SPEC_CAP flag; research_comment has no maxLength at all.
+  assert.ok(/\{ type: 'string', maxLength: 8000, description/.test(src), 'spec keeps its bare 8000-char schema cap (no margin)')
+  assert.ok(/research_comment: \{ type: 'string', description/.test(src), 'research_comment stays uncapped')
+  assert.ok(/const SPEC_CAP = RESEARCH_SCHEMA\.properties\.spec\.maxLength/.test(src), 'SPEC_CAP still derives from the schema, untouched')
 })
 
 test('#178 the worked example reaches EVERY research prompt in a wave, not just the first', async () => {
