@@ -775,7 +775,7 @@ if (stopped('verify')) {
 phase('Verify')
 if (runs('verify')) {
   verification = await agent(VERIFY_PROMPT(ISSUE, FENCED, repro, diag), {
-    label: 'verify', phase: 'Verify', agentType: READONLY_AGENT, model: VERIFY_MODEL, schema: VERIFY_SCHEMA,
+    label: 'verify', phase: 'Verify', agentType: READONLY_AGENT, model: VERIFY_MODEL, effort: 'high', schema: VERIFY_SCHEMA,
   })
   parts.verify = verification
   log(`Verify (${VERIFY_MODEL}, independent of ${DIAGNOSE_MODEL}): ${(verification && verification.verdict) || 'UNKNOWN'}.`)

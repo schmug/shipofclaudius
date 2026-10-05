@@ -353,6 +353,7 @@ test('models: Verify runs on a DIFFERENT model family from Fix', async () => {
   assert.ok(f.opts.model, 'the fix agent is pinned to an explicit model')
   assert.ok(r.opts.model, 'the review agent is pinned to an explicit model')
   assert.notEqual(r.opts.model, f.opts.model, 'a same-model reviewer agrees with itself — the models must differ')
+  assert.equal(r.opts.effort, 'high', "the adversarial security reviewer runs at effort 'high' (#186)")
 })
 
 test('models: both are overridable, and a caller that collapses them is rejected', async () => {

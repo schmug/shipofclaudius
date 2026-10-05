@@ -365,6 +365,7 @@ test('Verify runs on a DIFFERENT model family from Diagnose', async () => {
   assert.notEqual(v.opts.model, d.opts.model, 'a same-model verifier agrees with itself — the models must differ')
   assert.equal(result.models.diagnose, d.opts.model, 'the diagnose model is reported')
   assert.equal(result.models.verify, v.opts.model, 'the verify model is reported')
+  assert.equal(v.opts.effort, 'high', "the independent verifier runs at effort 'high' (#186)")
 })
 
 test('both models are overridable, and a caller that collapses them is rejected', async () => {

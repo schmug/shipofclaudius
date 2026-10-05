@@ -593,6 +593,7 @@ test('N6: the adversarial critic is read-only, on the EXISTING Review phase, dis
   assert.ok(a, 'the adversarial critic ran')
   assert.equal(a.opts.phase, 'Review', 'mounted on the existing Review phase (no new meta.phases title)')
   assert.equal(a.opts.agentType, 'Explore', 'critic is read-only by default')
+  assert.equal(a.opts.effort, 'high', "the adversarial defect-class critic runs at effort 'high' (#186)")
   const implLabel = byPrefix(calls, 'impl:')[0].opts.label
   assert.notEqual(a.opts.label, implLabel, 'the critic label is distinct from the impl agent label')
   // Mirrors the DOCCHECK critic byte-for-byte, including its `impl.branch || lane.branch`

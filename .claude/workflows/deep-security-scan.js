@@ -697,7 +697,7 @@ Try hard to DISPROVE it:
 5. If confirmed, give the attacker story, the evidence, and a concrete fix. Do NOT assign severity here — a dedicated severity / attack-path stage calibrates severity downstream from an attacker-path facts record. Your job is EXPLOITABILITY, not rating.
 
 Return the structured object.`,
-        { label: `validate:${c.id}`, phase: 'Validate', model: VALIDATE_MODEL, schema: VALIDATION_SCHEMA }
+        { label: `validate:${c.id}`, phase: 'Validate', model: VALIDATE_MODEL, effort: 'high', schema: VALIDATION_SCHEMA }
       ).then((v) => (v ? { ...c, ...v } : null))
     )
   )
@@ -809,7 +809,7 @@ if (verified.length) {
     const chunk = verified.slice(i, i + SEVERITY_CHUNK)
     const results = await parallel(
       chunk.map((c) => () =>
-        agent(severityPrompt(c), { label: `severity:${c.id}`, phase: 'Severity', schema: SEVERITY_SCHEMA })
+        agent(severityPrompt(c), { label: `severity:${c.id}`, phase: 'Severity', effort: 'high', schema: SEVERITY_SCHEMA })
           .then((s) => mergeSeverity(c, s))
       )
     )
