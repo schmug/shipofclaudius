@@ -612,19 +612,34 @@ if (NUMBERS.length === 0) {
 // <=BATCH instead of merely warning, so large RESEARCH sets stay under the cliff and a
 // partial result is still re-runnable via the missing[] list.
 
+// Free-text caps (issue #236, same shape as issue #233 in issue-triage-fanout). RESEARCH_CAPS
+// is the INTENDED bound — still enforced by clampToResearchCaps() below, right after each
+// research response comes back — but the schema's own maxLength gives the model a
+// CAP_MARGIN_PCT tolerance on top of it. Without that margin the classifier reliably
+// overshoots a bare cap by a handful of characters, the StructuredOutput retry cap (5)
+// exhausts on the same near-miss every time, and the issue is dropped to missing[] with no
+// verdict at all. A schema-valid near-miss is now accepted on the first try and clamped in
+// script code to the same intended bound, so the downstream (checkpoint, green_lanes, lane
+// briefs) text is never unbounded. `spec` keeps its bare maxLength + the existing post-hoc
+// spec_at_cap flag (SPEC_CAP below), and `research_comment` stays uncapped — neither gets
+// this treatment (issue #236, out of scope).
+const RESEARCH_CAPS = { title: 300, rationale: 600, next_question: 500 }
+const CAP_MARGIN_PCT = 0.10
+const capWithMargin = (n) => Math.ceil(n * (1 + CAP_MARGIN_PCT))
+
 const RESEARCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['number', 'verdict', 'rationale', 'confidence', 'research_comment'],
   properties: {
     number: { type: 'integer' },
-    title: { type: 'string', maxLength: 300 },
+    title: { type: 'string', maxLength: capWithMargin(RESEARCH_CAPS.title) },
     verdict: {
       type: 'string',
       enum: ['GREEN', 'DECISION', 'BLOCKED', 'STILL_RESEARCH'],
       description: 'GREEN=research resolved EVERY open question; a competent implementer could build it now from `spec` with no further investigation. DECISION=research surfaced a genuine product/architecture choice with no defensible default — needs a human. BLOCKED=an unavoidable external dependency (secret/API key/repo-admin/paid service/upstream-not-ready) confirmed by research. STILL_RESEARCH=bounded effort did not resolve it — give a NARROWER next_question for a follow-up run.',
     },
-    rationale: { type: 'string', maxLength: 600, description: '2-4 sentences citing concrete evidence (files that do/do not exist, doc/source facts, acceptance criteria now met or not).' },
+    rationale: { type: 'string', maxLength: capWithMargin(RESEARCH_CAPS.rationale), description: '2-4 sentences citing concrete evidence (files that do/do not exist, doc/source facts, acceptance criteria now met or not).' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'Confidence the verdict is right and (for GREEN) the spec is actually implementable as written.' },
     open_questions: { type: 'array', items: { type: 'string' }, description: 'The questions that blocked this from being implementable — each answered (for GREEN) or carried forward (otherwise).' },
 
@@ -647,11 +662,31 @@ const RESEARCH_SCHEMA = {
     blocker: { type: 'string', description: 'For BLOCKED: the exact external dependency confirmed by research. Empty otherwise.' },
 
     // STILL_RESEARCH payload.
-    next_question: { type: 'string', maxLength: 500, description: 'For STILL_RESEARCH: the NARROWER question a follow-up run should answer (research made progress but did not finish). Empty otherwise.' },
+    next_question: { type: 'string', maxLength: capWithMargin(RESEARCH_CAPS.next_question), description: 'For STILL_RESEARCH: the NARROWER question a follow-up run should answer (research made progress but did not finish). Empty otherwise.' },
 
     // Always.
     research_comment: { type: 'string', description: 'Markdown findings — the investigation, sources, and conclusion — ready for the orchestrator to post as an issue comment (with the user\'s confirmation). Self-contained.' },
   },
+}
+
+// Script-side clamp back down to the INTENDED cap (RESEARCH_CAPS), applied to every fresh
+// research result before it is folded into the checkpoint or returned — so the schema margin
+// above never lets an unbounded (or merely over-intended-cap) string reach a downstream
+// consumer (checkpoint write-back, green_lanes, the lane brief stacked-impl-lanes builds).
+// Truncation is logged (no-silent-caps), never silent.
+function clampToResearchCaps(r) {
+  const truncatedFields = []
+  for (const field of Object.keys(RESEARCH_CAPS)) {
+    const cap = RESEARCH_CAPS[field]
+    if (typeof r[field] === 'string' && r[field].length > cap) {
+      r[field] = r[field].slice(0, cap)
+      truncatedFields.push(field)
+    }
+  }
+  if (truncatedFields.length) {
+    log(`⚠️ #${r.number}: truncated ${truncatedFields.join(', ')} to the ${truncatedFields.map((f) => `${RESEARCH_CAPS[f]}-char`).join('/')} intended cap (schema allowed a ${Math.round(CAP_MARGIN_PCT * 100)}% margin over it).`)
+  }
+  return r
 }
 
 const EXAMPLE =
@@ -759,7 +794,7 @@ const results = await runWaves(toRun, async (n) => {
     log(`⚠️ research:#${n} exceeded ${WEB_TIMEOUT_MS}ms (likely a web stall) — dropping to missing[] for re-run.`)
     return null
   }
-  return r
+  return r ? clampToResearchCaps(r) : r
 }, BATCH)
 
 // Fold the freshly-computed results and the reused (checkpoint-hit) results into one set.
