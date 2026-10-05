@@ -410,6 +410,23 @@ test('#181: the Return line lists followups', async () => {
   assert.ok(/Return:.*followups/.test(f.prompt.replace(/\n/g, ' ')), 'the Return line names followups')
 })
 
+// ---------- #193: followups round-trip (the write actor's structured extras reach the result) ----------
+
+test('#193: a stubbed fix agent returning two followups reaches the workflow result unchanged', async () => {
+  const two = [
+    { title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' },
+    { title: 'Stale TODO in download.js', pointer: 'src/download.js:77', why: 'Comment predates the confine-under-root change; worth a look.' },
+  ]
+  const { result, calls } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: two }) })
+  const f = byPrefix(calls, 'fix')[0]
+  const fu = f.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'the fix agent still returns followups under an array schema')
+  assert.equal(fu.maxItems, 10, 'the followups array is capped at 10 items')
+  assert.deepEqual(result.impl.followups, two,
+    'the two follow-ups arrive in the result verbatim, in order, under impl')
+  assert.equal(result.outcome, 'fixed', 'the round-trip does not disturb the fixed outcome')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

@@ -771,6 +771,61 @@ test('#181: report.md renders no Follow-ups section when the fix returns none', 
   assert.ok(!/Follow-ups \(not fixed here\):/.test(result.report), 'an empty followups array renders no heading')
 })
 
+// ---------- #193: followups round-trip + renderReport fallback branches ----------
+
+test('#193: a stubbed fix agent returning two followups reaches the result and report.md unchanged apart from neutralization', async () => {
+  const two = [
+    { title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' },
+    { title: 'Stale TODO in download.js', pointer: 'src/download.js:77', why: 'Comment predates the confine-under-root change; worth a look.' },
+  ]
+  const { result, calls } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: two }) })
+  const f = byPrefix(calls, 'fix')[0]
+  const fu = f.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'the fix agent still returns followups under an array schema')
+  assert.equal(fu.maxItems, 10, 'the followups array is capped at 10 items')
+  assert.deepEqual(result.fix.followups, two,
+    'the two follow-ups arrive in the result verbatim, in order, under fix')
+  assert.equal(result.outcome, 'fix_proposed', 'the round-trip does not disturb the outcome')
+  const lines = result.report.split('\n')
+  const heading = lines.findIndex((l) => l === '**Follow-ups (not fixed here):**')
+  assert.ok(heading >= 0, 'the Follow-ups heading is rendered')
+  const items = lines.slice(heading + 2).filter((l) => l.startsWith('- **'))
+  assert.equal(items.length, 2, 'each follow-up lands on its own list line')
+  assert.ok(items[0].includes('Dead branch in scoring.ts') && items[0].includes('src/shared/scoring.ts:120')
+    && items[0].includes('Unreachable since the multiplier fix'), 'the first follow-up renders verbatim (metachar-free text needs no escaping)')
+  assert.ok(items[1].includes('Stale TODO in download.js') && items[1].includes('src/download.js:77')
+    && items[1].includes('Comment predates the confine-under-root change'), 'the second follow-up renders verbatim, in order')
+})
+
+test('#193: renderReport renders no Follow-ups block when the fix result carries no followups field at all', async () => {
+  const { result } = await runScript({ args: baseArgs(), fix: () => fixOpened({ followups: undefined }) })
+  assert.ok(!/Follow-ups \(not fixed here\):/.test(result.report), 'an ABSENT followups array renders no heading either')
+  assert.equal(result.fix.followups, undefined, 'the absent field stays absent in the result, not coerced to an empty array')
+})
+
+test('#193: renderReport fallbacks — missing title renders (untitled), missing pointer renders ?, missing why renders no undefined', async () => {
+  const { result } = await runScript({
+    args: baseArgs(),
+    fix: () => fixOpened({ followups: [
+      { pointer: 'src/a.js:1', why: 'worth a look' },
+      { title: 'Only a title here', why: 'and a rationale' },
+      { title: 't3', pointer: 'src/b.js:2' },
+    ] }),
+  })
+  const lines = result.report.split('\n')
+  const heading = lines.findIndex((l) => l === '**Follow-ups (not fixed here):**')
+  assert.ok(heading >= 0, 'a followup list with partial items still renders the heading')
+  const items = lines.slice(heading + 2).filter((l) => l.startsWith('- **'))
+  assert.equal(items.length, 3, 'each partial follow-up still gets its own list line')
+  assert.equal(items[0], '- **(untitled)** (src/a.js:1): worth a look',
+    'a missing title renders the (untitled) default')
+  assert.equal(items[1], '- **Only a title here** (?): and a rationale',
+    'a missing pointer renders the ? default')
+  assert.equal(items[2], '- **t3** (src/b.js:2): ',
+    'a missing why renders an empty tail, never the string undefined')
+  assert.ok(!result.report.includes('undefined'), 'no report line carries a literal undefined')
+})
+
 // ---------- #188: followups[] is tainted text (model-generated, may echo the issue body) and lands in report.md ----------
 // A value must never be able to start a new line — that is what would let it forge a heading, a
 // checklist/status line, a table row, or a fence — nor open inline markup. However hostile, it is

@@ -1099,6 +1099,28 @@ test('#181: the Return line lists followups', async () => {
   assert.ok(/Return:.*followups/.test(im.prompt.replace(/\n/g, ' ')), 'the Return line names followups')
 })
 
+// ---------- #193: followups round-trip (the write actor's structured extras reach the result) ----------
+
+test('#193: a stubbed impl agent returning two followups reaches the workflow result unchanged', async () => {
+  const two = [
+    { title: 'Dead branch in scoring.ts', pointer: 'src/shared/scoring.ts:120', why: 'Unreachable since the multiplier fix; worth deleting separately.' },
+    { title: 'Stale TODO in download.js', pointer: 'src/download.js:77', why: 'Comment predates the confine-under-root change; worth a look.' },
+  ]
+  const { result, calls } = await runScript({
+    args: { lanes: [lane()] },
+    impl: (key, lane) => ({ ...implOpened(key, lane.issues), followups: two }),
+  })
+  const im = byPrefix(calls, 'impl:')[0]
+  const fu = im.opts.schema.properties.followups
+  assert.equal(fu.type, 'array', 'the impl agent still returns followups under an array schema')
+  assert.equal(fu.maxItems, 10, 'the followups array is capped at 10 items')
+  const r = laneResult(result, 'lane-a')
+  assert.ok(r && r.impl, 'the lane result carries its impl result')
+  assert.deepEqual(r.impl.followups, two,
+    'the two follow-ups arrive in the workflow result verbatim, in order, under the lane impl')
+  assert.equal(r.impl.status, 'PR_OPENED', 'the round-trip does not disturb the impl status')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {
