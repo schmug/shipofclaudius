@@ -877,6 +877,53 @@ test('saturation: no budget target => measured floor is inert (loop bounded only
   assert.equal(result.rounds_run, 3, 'ran to the round cap, unaffected by any budget floor')
 })
 
+// ================= DISCOVERY CAVEAT (issue #249) =================
+// A run that stops on the round cap or the budget floor — not on saturation — produces FLOOR
+// counts (recall was still climbing). The workflow must say so in code: counts_are_floor +
+// discovery_caveat ride the return, and the caveat prefixes report_md so it lands where the
+// counts are presented, not only in a journal line.
+
+const alwaysNew = (_p, opts) => {
+  const r = roundOf(opts)
+  return { threat_model: 'tm', files_reviewed: 1, candidates: [{ title: `f${r}`, file: `src/r${r}.ts`, line: 1, vuln_class: 'xss', source: 's', sink: 'k', why: 'w' }] }
+}
+
+test('caveat #249: a capped run sets counts_are_floor=true, a non-empty discovery_caveat, and prefixes report_md with the caveat', async () => {
+  const map = { tool: toolMissing, discovery: alwaysNew }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 3 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'capped', 'never dry => capped')
+  assert.equal(result.counts_are_floor, true, "terminal_state 'capped' => the counts are a floor")
+  assert.ok(typeof result.discovery_caveat === 'string' && result.discovery_caveat.length > 0, 'discovery_caveat is a non-empty string')
+  assert.ok(result.discovery_caveat.includes('capped') || result.discovery_caveat.includes('cap'), 'caveat names the round cap')
+  assert.ok(result.discovery_caveat.includes('3 of 3'), 'caveat names the actual rounds (3 of 3)')
+  assert.ok(result.report_md.startsWith('> '), 'report_md leads with a blockquote line carrying the caveat')
+  assert.ok(result.report_md.includes(result.discovery_caveat), 'report_md carries the exact caveat text')
+  assert.ok(result.report_md.indexOf(result.discovery_caveat) < result.report_md.indexOf('# Deep Security Audit'), 'caveat sits before the report body (where counts are presented)')
+  const logged = calls.logs.filter((m) => m.includes(result.discovery_caveat))
+  assert.equal(logged.length, 1, 'the caveat is logged exactly once')
+})
+
+test('caveat #249: a budget run also sets counts_are_floor=true and a non-empty discovery_caveat naming the budget floor', async () => {
+  const budget = { total: 2_000_000, spent: spentStub(500_000), remaining: () => 800_000 }
+  const map = { tool: toolMissing, discovery: alwaysNew }
+  const { result } = await runScript({ args: { target: '/tmp/fake', rounds: 1, maxRounds: 6 }, stubs: stubsFor(map), budget })
+  assert.equal(result.terminal_state, 'budget', 'measured floor stops the loop => budget')
+  assert.equal(result.counts_are_floor, true, "terminal_state 'budget' => the counts are a floor")
+  assert.ok(typeof result.discovery_caveat === 'string' && result.discovery_caveat.length > 0, 'discovery_caveat is a non-empty string')
+  assert.ok(result.discovery_caveat.includes('budget'), 'caveat names the budget floor')
+  assert.ok(result.report_md.startsWith('> ') && result.report_md.includes(result.discovery_caveat), 'report_md leads with the caveat')
+})
+
+test('caveat #249: a saturated run sets counts_are_floor=false and an empty discovery_caveat (report_md untouched)', async () => {
+  const map = { tool: toolMissing, discovery: () => discoveryTwo }
+  const { result, calls } = await runScript({ args: { target: '/tmp/fake', rounds: 2, maxRounds: 6 }, stubs: stubsFor(map) })
+  assert.equal(result.terminal_state, 'saturated', 'a zero-new round => saturated')
+  assert.equal(result.counts_are_floor, false, "terminal_state 'saturated' => the counts are converged, not a floor")
+  assert.equal(result.discovery_caveat, '', 'no caveat when discovery saturated')
+  assert.ok(!result.report_md.startsWith('> '), 'no caveat prefix on a saturated run')
+  assert.equal(calls.logs.filter((m) => m.includes('Discovery stopped')).length, 0, 'no caveat logged')
+})
+
 // ================= SEVERITY / ATTACK-PATH STAGE (issue #22) =================
 // Severity is split OUT of the validator into a dedicated post-validation stage that
 // derives an attacker-path FACTS record, calibrates severity, then runs a mechanical
