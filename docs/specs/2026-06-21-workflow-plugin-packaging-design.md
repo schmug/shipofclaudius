@@ -26,10 +26,12 @@ marketplace-shaped so it *can* be shared later).
 
 ## 2. Approach: the repo IS a zero-copy wrapper-skill plugin
 
-Package the repo itself as a Claude Code **plugin**. Because a plugin cannot register Workflow
-scripts as a first-class component type, we bridge with thin **wrapper skills**: each skill tells
+Package the repo itself as a Claude Code **plugin**. ~~Because a plugin cannot register Workflow
+scripts as a first-class component type,~~ we bridge with thin **wrapper skills**: each skill tells
 the model to run its workflow **in place** from the plugin directory via the Workflow tool's
 `scriptPath`, referenced through `${CLAUDE_PLUGIN_ROOT}`.
+
+**CORRECTED 2026-10-04 (resolves [#258](https://github.com/schmug/shipofclaudius/issues/258); evidence in [#254](https://github.com/schmug/shipofclaudius/issues/254)):** as of Claude Code 2.1.278/2.1.281 a plugin **can** register workflows as first-class plugin components — a `workflows` key in `.claude-plugin/plugin.json` (or a root `workflows/` directory) registers each `.js` by its `meta.name`. Installed sessions run them directly as `Workflow({ name: 'shipofclaudius:<name>' })` and get a generated `/shipofclaudius:<name>` command; nested `workflow()` calls must use the plugin-qualified name. #254 shipped this (`"workflows": "./.claude/workflows"`) and deleted the wrapper skills, so the wrapper-bridge design in the rest of §2 and in §4.2 is historical.
 
 ```
 claude plugin install shipofclaudius   # once
@@ -122,6 +124,8 @@ is treated as inert bundled files (not re-scanned as nested project config). If 
 the fallback is a top-level `workflows/` directory populated from `.claude/workflows/` at release
 time (a copy step in a release script or a checked-in symlink) — still single-authored, the copy
 is build-time not user-time. Decided during §7's smoke test; does not change the user-facing design.
+
+**NOTED 2026-10-04 (resolves [#258](https://github.com/schmug/shipofclaudius/issues/258); evidence in [#254](https://github.com/schmug/shipofclaudius/issues/254)):** the top-level `workflows/` fallback above was never needed, and the wrapper-path question became moot with it: a `workflows` manifest key in `.claude-plugin/plugin.json` pointing at the existing `.claude/workflows/` (`"workflows": "./.claude/workflows"`, shipped in #254) was viable and simpler. That keeps the canonical location unchanged, so the 24 `new URL('../.claude/workflows/…')` references in `tests/` needed no change.
 
 ---
 
