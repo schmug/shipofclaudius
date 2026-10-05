@@ -211,6 +211,7 @@ const FIX_SCHEMA = {
     summary: { type: 'string' }, blocker: { type: 'string' },
     followups: {
       type: 'array',
+      maxItems: 10,
       description: 'Pre-existing bugs, performance concerns, or finding-adjacent behavior you noticed but did NOT fix, extend, or add tests for. Empty array if you found nothing.',
       items: FOLLOWUP_ITEM_SCHEMA,
     },

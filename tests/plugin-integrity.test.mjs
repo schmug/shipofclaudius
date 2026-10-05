@@ -834,6 +834,63 @@ test('every effort: value in a workflow source is a known tier (a typo silently 
     "the scan pattern fails to capture the typo'd value 'lo' from an inline source")
 })
 
+// #193: FOLLOWUP_ITEM_SCHEMA is triplicated across the three write actors (workflow scripts
+// cannot import, so no shared module is possible), and the `followups[]` parent array is capped
+// at maxItems: 10 at every site. One test guards BOTH invariants: the three literal copies stay
+// byte-identical, and no site loses the cap.
+
+const FOLLOWUP_FILES = [
+  '.claude/workflows/factory-issue-fix.js',
+  '.claude/workflows/fix-finding.js',
+  '.claude/workflows/stacked-impl-lanes.js',
+]
+
+// The text from `const FOLLOWUP_ITEM_SCHEMA = {` through the first following line that is
+// exactly `}` — the item-schema literal itself, not its surrounding comments.
+const followupSchemaBlock = (src, file) => {
+  const lines = src.split('\n')
+  const start = lines.findIndex((l) => l.startsWith('const FOLLOWUP_ITEM_SCHEMA = {'))
+  assert.ok(start >= 0, `${file}: the FOLLOWUP_ITEM_SCHEMA literal is present`)
+  const end = lines.indexOf('}', start + 1)
+  assert.ok(end > start, `${file}: the schema block closes at column 0 on its own line`)
+  return lines.slice(start, end + 1).join('\n')
+}
+
+// The `followups: {` array declaration, from that line through its first `},` closer.
+const followupCap = (src, file) => {
+  const lines = src.split('\n')
+  const start = lines.findIndex((l) => l.trim() === 'followups: {')
+  assert.ok(start >= 0, `${file}: a followups array declaration is present`)
+  const end = lines.findIndex((l, i) => i > start && /^\s*\},\s*$/.test(l))
+  assert.ok(end > start, `${file}: the followups declaration closes on its own line`)
+  return lines.slice(start, end + 1).join('\n')
+}
+
+const followupGuard = (blocks, caps) => {
+  assert.equal(blocks[0], blocks[1], 'the factory-issue-fix and fix-finding item schemas are byte-identical')
+  assert.equal(blocks[1], blocks[2], 'the fix-finding and stacked-impl-lanes item schemas are byte-identical')
+  for (const cap of caps) {
+    assert.ok(/maxItems:\s*10,/.test(cap), 'every followups array declaration caps the parent array at maxItems: 10')
+  }
+}
+
+test('#193: the three FOLLOWUP_ITEM_SCHEMA copies are identical and every followups[] array carries maxItems: 10', async () => {
+  const srcs = await Promise.all(FOLLOWUP_FILES.map((f) => read(f)))
+  const blocks = srcs.map((s, i) => followupSchemaBlock(s, FOLLOWUP_FILES[i]))
+  const caps = srcs.map((s, i) => followupCap(s, FOLLOWUP_FILES[i]))
+  followupGuard(blocks, caps)
+
+  // Proof it bites: mutating ONE copy in memory must fail the guard, both ways.
+  const driftedBlock = blocks.slice()
+  driftedBlock[1] = driftedBlock[1].replace('maxLength: 100', 'maxLength: 101')
+  assert.throws(() => followupGuard(driftedBlock, caps), /byte-identical/,
+    'a drifted item-schema copy is caught by the identity check')
+  const lostCap = caps.slice()
+  lostCap[2] = lostCap[2].replace('maxItems: 10', 'maxItems: 11')
+  assert.throws(() => followupGuard(blocks, lostCap), /maxItems: 10/,
+    'a lost or raised cap is caught by the cap check')
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

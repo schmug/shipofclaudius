@@ -283,6 +283,7 @@ const RESULT_SCHEMA = {
     summary: { type: 'string' }, files_changed: { type: 'array', items: { type: 'string' } },
     followups: {
       type: 'array',
+      maxItems: 10,
       description: 'Pre-existing bugs, performance concerns, or lane-adjacent behavior you noticed but did NOT fix, extend, or add tests for. Empty array if you found nothing.',
       items: FOLLOWUP_ITEM_SCHEMA,
     },
