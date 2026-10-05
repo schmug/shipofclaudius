@@ -648,7 +648,7 @@ const shell = (over) => ({
 
 // State-derived write idempotency: has a previous run already shipped a PR for this issue?
 if (!FRESH) {
-  const pre = await agent(PREFLIGHT_PROMPT(BRANCH), { label: 'preflight-existing-pr', phase: 'Reproduce', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA })
+  const pre = await agent(PREFLIGHT_PROMPT(BRANCH), { label: 'preflight-existing-pr', phase: 'Reproduce', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA, effort: 'low' })
   const hit = (pre && Array.isArray(pre.existing) ? pre.existing : []).find((e) => e && e.branch === BRANCH)
   if (hit) {
     log(`Idempotency: ${BRANCH} already has an open PR (${hit.pr_url || ''}) — skipped, no duplicate write. Pass args.fresh:true to force a re-run.`)
@@ -662,7 +662,7 @@ if (!FRESH) {
 
 // The untrusted issue text, fetched ONCE by a read-only relay behind a fresh random nonce, then
 // fenced. No reasoning agent below ever fetches it itself.
-const fetched = await agent(RELAY_PROMPT(ISSUE), { label: 'relay-issue', phase: 'Reproduce', agentType: READONLY_AGENT, schema: RELAY_SCHEMA })
+const fetched = await agent(RELAY_PROMPT(ISSUE), { label: 'relay-issue', phase: 'Reproduce', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const FENCED = fencedIssue(ISSUE, fetched)
 
 // Resume: recover the prior report.md so a run that starts mid-pipeline has its predecessors' work.

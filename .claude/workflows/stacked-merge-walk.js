@@ -379,7 +379,7 @@ phase('Verify')
 // LIVE per step by the verify agent during the walk, so the stable fenced text only feeds
 // human-context/advisory holds — a slightly stale comment cannot drive a bad merge.
 const fencedTexts = await runWaves(STACK, async (item) => {
-  const fetched = await agent(FETCH_PROMPT(item.ref), { label: `fetch:#${item.ref}`, phase: 'Verify', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
+  const fetched = await agent(FETCH_PROMPT(item.ref), { label: `fetch:#${item.ref}`, phase: 'Verify', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
   return fencedText(item.ref, fetched)
 }, BATCH)
 

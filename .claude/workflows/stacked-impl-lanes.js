@@ -489,7 +489,7 @@ const RESOLVE_REPO_PROMPT =
 phase('Implement')
 
 if (A.repo) {
-  const resolved = await runAgent(RESOLVE_REPO_PROMPT, { label: 'resolve-session-repo', phase: 'Implement', agentType: READONLY_AGENT, schema: REPO_RESOLVE_SCHEMA })
+  const resolved = await runAgent(RESOLVE_REPO_PROMPT, { label: 'resolve-session-repo', phase: 'Implement', agentType: READONLY_AGENT, schema: REPO_RESOLVE_SCHEMA, effort: 'low' })
   const sessionRepo = (resolved && typeof resolved.repo === 'string') ? resolved.repo.trim() : ''
   if (sessionRepo && sessionRepo.toLowerCase() !== A.repo.trim().toLowerCase()) {
     throw new Error(
@@ -514,7 +514,7 @@ let preexisting = {}
 if (!FRESH) {
   const branches = LANES.map((l) => l.branch).filter(Boolean)
   if (branches.length) {
-    const pre = await runAgent(PREFLIGHT_PROMPT(branches), { label: 'preflight-existing-prs', phase: 'Implement', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA })
+    const pre = await runAgent(PREFLIGHT_PROMPT(branches), { label: 'preflight-existing-prs', phase: 'Implement', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA, effort: 'low' })
     for (const e of (pre && Array.isArray(pre.existing) ? pre.existing : [])) {
       if (e && e.branch) preexisting[e.branch] = e
     }
@@ -558,7 +558,7 @@ async function runLane(lane, base, laneMode, stackedOn) {
   const issueNums = Array.isArray(lane.issues) ? lane.issues : []
   const fenced = await parallel(
     issueNums.map((n) => async () => {
-      const fetched = await runAgent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Implement', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
+      const fetched = await runAgent(FETCH_PROMPT(n), { label: `fetch:#${n}`, phase: 'Implement', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
       return fencedIssue(n, fetched)
     })
   )

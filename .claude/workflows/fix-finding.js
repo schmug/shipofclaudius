@@ -336,7 +336,7 @@ phase('Triage')
 // fix branch already have an open PR (a prior run shipped it)? If so, skip (no duplicate write).
 // args.fresh bypasses.
 if (!FRESH) {
-  const pre = await agent(PREFLIGHT_PROMPT, { label: 'preflight-existing-pr', phase: 'Triage', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA })
+  const pre = await agent(PREFLIGHT_PROMPT, { label: 'preflight-existing-pr', phase: 'Triage', agentType: READONLY_AGENT, schema: PREFLIGHT_SCHEMA, effort: 'low' })
   const hit = (pre && Array.isArray(pre.existing) ? pre.existing : []).find((e) => e && e.branch === BRANCH)
   if (hit) {
     log(`Idempotency: ${BRANCH} already has an open PR (${hit.pr_url || ''}) — skipped (no duplicate write). Pass args.fresh:true to force a re-fix.`)

@@ -232,7 +232,7 @@ Return { ref, status, merged_sha, mergeability, ci_status, escalation, detail }.
 // ── The gate: fetch untrusted text (read-only) → verify (read-only) → (optionally) merge ──
 phase('Verify')
 
-const fetched = await agent(FETCH_PROMPT(TARGET.ref), { label: `fetch:#${TARGET.ref}`, phase: 'Verify', agentType: READONLY_AGENT, schema: FETCH_SCHEMA })
+const fetched = await agent(FETCH_PROMPT(TARGET.ref), { label: `fetch:#${TARGET.ref}`, phase: 'Verify', agentType: READONLY_AGENT, schema: FETCH_SCHEMA, effort: 'low' })
 const fenced = fencedText(TARGET.ref, fetched)
 
 const verify = await agent(VERIFY_PROMPT(TARGET, fenced), { label: `verify:#${TARGET.ref}`, phase: 'Verify', agentType: READONLY_AGENT, schema: VERIFY_SCHEMA })
