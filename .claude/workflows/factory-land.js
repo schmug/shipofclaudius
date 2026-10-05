@@ -691,7 +691,7 @@ const CONFIG_CMD = `git fetch origin ${GATE_FROM_REF} 2>/dev/null; git show orig
 // ── Phase: Gather (read-only relays; the script parses the raw bytes in code) ──
 phase('Gather')
 
-const prRelay = await agent(relayPrompt('the PR metadata', PR_CMD), { label: `relay-pr:#${PR}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA })
+const prRelay = await agent(relayPrompt('the PR metadata', PR_CMD), { label: `relay-pr:#${PR}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 
 // Parsed IN SCRIPT CODE. A model never summarizes this into the gate input — that is the point.
 function parseJsonOr(raw, what, problems) {
@@ -721,10 +721,10 @@ const ISSUE_NUM = Number.isInteger(Number(A.issue)) && Number(A.issue) > 0
 // be assembled until all of them are in hand.
 const [issueRelay, requiredRelay, configRelay] = await parallel([
   () => (ISSUE_NUM
-    ? agent(relayPrompt('the linked issue', issueCmd(ISSUE_NUM)), { label: `relay-issue:#${ISSUE_NUM}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA })
+    ? agent(relayPrompt('the linked issue', issueCmd(ISSUE_NUM)), { label: `relay-issue:#${ISSUE_NUM}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
     : Promise.resolve(null)),
-  () => agent(relayPrompt('the base branch required-check contexts', requiredCmd(BASE_REF)), { label: `relay-required:${BASE_REF}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA }),
-  () => agent(relayPrompt(`the repo gate config READ FROM \`${GATE_FROM_REF}\` (never from the PR)`, CONFIG_CMD), { label: `relay-config:${GATE_FROM_REF}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA }),
+  () => agent(relayPrompt('the base branch required-check contexts', requiredCmd(BASE_REF)), { label: `relay-required:${BASE_REF}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' }),
+  () => agent(relayPrompt(`the repo gate config READ FROM \`${GATE_FROM_REF}\` (never from the PR)`, CONFIG_CMD), { label: `relay-config:${GATE_FROM_REF}`, phase: 'Gather', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' }),
 ])
 
 const issueData = ISSUE_NUM ? parseJsonOr(issueRelay && issueRelay.raw, `issue #${ISSUE_NUM}`, problems) : null

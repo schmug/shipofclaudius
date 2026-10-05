@@ -811,6 +811,29 @@ test('.mcp.json registers the vent server, plugin-root-templated, pointing at a 
   }
 })
 
+test('every effort: value in a workflow source is a known tier (a typo silently falls back at runtime)', async () => {
+  // The Workflow runtime accepts `effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'`;
+  // anything else falls back to the model's default with no error and no sim to catch it
+  // (the sims stub agent(), so the value is never validated there). Scan every shipped
+  // workflow source for `effort: '<x>'` literals and assert each is a real tier.
+  const EFFORT_TIERS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+  const wfDir = new URL('.claude/workflows/', ROOT)
+  for (const f of (await readdir(wfDir)).filter((f) => f.endsWith('.js'))) {
+    const src = await read(`.claude/workflows/${f}`)
+    const re = /effort:\s*['"]([^'"]+)['"]/g
+    for (const m of src.matchAll(re)) {
+      assert.ok(EFFORT_TIERS.has(m[1]),
+        `${f}: effort: '${m[1]}' is not one of low|medium|high|xhigh|max — the runtime silently falls back on unknown values`)
+    }
+  }
+
+  // Proof the scan bites: an inline source with a typo'd tier must be caught.
+  const badSrc = "agent(P, { label: 'x', effort: 'lo' })"
+  const badMatch = badSrc.match(/effort:\s*['"]([^'"]+)['"]/)
+  assert.ok(badMatch && !EFFORT_TIERS.has(badMatch[1]),
+    "the scan pattern fails to capture the typo'd value 'lo' from an inline source")
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

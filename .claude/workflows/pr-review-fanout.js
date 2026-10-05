@@ -303,7 +303,7 @@ const resolved = await parallel(
   PRS.map((n) => async () => {
     const [text, diff] = await Promise.all([
       agent(TEXT_RELAY_PROMPT(n), { label: `text:#${n}`, phase: 'Review', agentType: READONLY_AGENT, schema: RELAY_SCHEMA }),
-      agent(DIFF_RELAY_PROMPT(n), { label: `diff:#${n}`, phase: 'Review', agentType: READONLY_AGENT, schema: RELAY_SCHEMA }),
+      agent(DIFF_RELAY_PROMPT(n), { label: `diff:#${n}`, phase: 'Review', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' }),
     ])
     if (!text || !diff) return null
     // Spec relay: only when the spec lens is active AND an issue actually resolves. A PR with
