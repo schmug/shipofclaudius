@@ -220,6 +220,42 @@ test('layer 1 coverage omits the tally (no undefined) when severity_policy is ab
   assert.ok(!/undefined/.test(cov1), 'no undefined leaks into the coverage line')
 })
 
+test('layer 1 coverage surfaces the counts_are_floor caveat when present', async () => {
+  const l1Floor = { ...L1_RESULT, counts_are_floor: true, discovery_caveat: 'Discovery stopped at the round cap (4 of 4 rounds) before saturating; candidate/confirmed/reportable counts are a floor, not a converged total.' }
+  const map = { l1: l1Floor }
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(/COUNTS ARE A FLOOR/.test(cov1), 'floor clause present in the coverage line')
+  assert.ok(/floor, not a converged total/.test(cov1), 'caveat text surfaced verbatim')
+  assert.ok(/round cap \(4 of 4 rounds\)/.test(cov1), 'discovery_caveat content surfaced')
+})
+
+test('layer 1 coverage omits the floor clause when counts_are_floor is false (saturated normally)', async () => {
+  const l1Saturated = { ...L1_RESULT, counts_are_floor: false, discovery_caveat: '' }
+  const map = { l1: l1Saturated }
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(!/COUNTS ARE A FLOOR/.test(cov1), 'no floor clause when discovery saturated')
+})
+
+test('layer 1 coverage omits the floor clause when counts_are_floor is absent (older output)', async () => {
+  const map = {}   // L1_RESULT as is — no counts_are_floor field
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(!/COUNTS ARE A FLOOR/.test(cov1), 'no floor clause when the field is absent')
+  assert.ok(!/undefined/.test(cov1), 'no undefined leaks into the coverage line')
+})
+
+test('layer 1 zero-candidate coverage line still surfaces the floor clause when capped', async () => {
+  const l1EmptyCapped = { ...L1_EMPTY, counts_are_floor: true, discovery_caveat: 'Discovery stopped at the round cap (2 of 4 rounds) before saturating; candidate/confirmed/reportable counts are a floor, not a converged total.' }
+  const map = { l1: l1EmptyCapped }
+  await runScript({ args: { target: '/tmp/fake' }, map })
+  const cov1 = map.reportPrompt.split('\n').find((l) => /Layer 1 \(code-at-rest/.test(l)) || map.reportPrompt
+  assert.ok(/0 reportable findings/.test(cov1), 'zero-candidate branch taken')
+  assert.ok(/COUNTS ARE A FLOOR/.test(cov1), 'floor clause present on the zero-candidate line')
+  assert.ok(/floor, not a converged total/.test(cov1), 'caveat text surfaced')
+})
+
 test('layer 1 error is fail-open: report still emitted, coverage records the error', async () => {
   const map = { l1Throws: true }
   const { result } = await runScript({ args: { target: '/tmp/fake' }, map })

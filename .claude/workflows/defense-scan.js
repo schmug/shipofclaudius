@@ -306,6 +306,16 @@ const l1SeverityPolicy = (sp && typeof sp === 'object'
 const l1SeverityPolicyNote = l1SeverityPolicy
   ? ` (severity policy: kept ${l1SeverityPolicy.kept} / downgraded ${l1SeverityPolicy.downgraded} / dropped ${l1SeverityPolicy.dropped})`
   : ''
+// counts_are_floor / discovery_caveat from deep-security-scan (issue #256, fields added by #249):
+// a discovery loop that stops on the round cap or the budget floor — NOT on saturation — produced
+// floor counts, so defense-scan's own Layer 1 coverage line must not read them as converged.
+// Additive + fail-open — absent on older Layer-1 output or when Layer 1 errored, so guard hard
+// (exactly boolean true) and surface the note only when the field is actually there.
+const l1FloorCaveat = (l1 && typeof l1.discovery_caveat === 'string' && l1.discovery_caveat) ? l1.discovery_caveat : ''
+const l1TerminalState = (l1 && typeof l1.terminal_state === 'string' && l1.terminal_state) ? l1.terminal_state : 'unknown'
+const l1FloorNote = l1 && l1.counts_are_floor === true
+  ? ` — COUNTS ARE A FLOOR: ${l1FloorCaveat || `discovery stopped before saturating (terminal state: ${l1TerminalState}), so these counts are a floor, not a converged total`}`
+  : ''
 // Prefer the hardened sub-report path; distinguish "found nothing" from "report agent died"
 // (an infra failure must never masquerade as a clean "no candidates" coverage line).
 const l1SubHtml = l1 && (l1.report_html || (l1.report && l1.report.report_html_path) || (typeof l1.report === 'string' ? l1.report : null))
@@ -538,8 +548,8 @@ const cov6 = (() => {
 const cov1 = l1Error
   ? `Layer 1 (code-at-rest · deep-security-scan): ERROR — ${l1Error} (fail-open: orchestrator continued with remaining layers).`
   : l1Reportable.length === 0
-    ? `Layer 1 (code-at-rest · deep-security-scan): RAN — 0 reportable findings (no candidates surfaced across discovery lenses; this is "looked, found nothing", NOT "clean" — see the layer report). Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
-    : `Layer 1 (code-at-rest · deep-security-scan): RAN — ${l1Reportable.length} reportable finding(s), ${l1AppendixCount} reviewed-not-reported${l1SeverityPolicyNote}. Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
+    ? `Layer 1 (code-at-rest · deep-security-scan): RAN — 0 reportable findings (no candidates surfaced across discovery lenses; this is "looked, found nothing", NOT "clean" — see the layer report)${l1FloorNote}. Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
+    : `Layer 1 (code-at-rest · deep-security-scan): RAN — ${l1Reportable.length} reportable finding(s), ${l1AppendixCount} reviewed-not-reported${l1SeverityPolicyNote}${l1FloorNote}. Prefilter: ${l1ToolCoverage}. Sub-report: ${l1ReportRef}.`
 const coverage = [cov1, cov2, cov3, cov4, cov5, cov6]
 
 const inventoryAll = (l2 && Array.isArray(l2.inventory)) ? l2.inventory : []
