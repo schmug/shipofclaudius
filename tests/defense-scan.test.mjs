@@ -658,6 +658,75 @@ test('report prompt carries the bundle + SARIF for embedding', async () => {
   assert.ok(/fingerprint/i.test(map.reportPrompt))
 })
 
+// ---- vuln_class-independent fingerprints (issue #240) — mirrors dss-sim's V3 suite ----
+// defense-scan composes layers whose lenses routinely name the same defect differently (the
+// bake-off repro: one $GITHUB_OUTPUT newline-injection bug framed as supply-chain by bumblebee,
+// injection by deep-security-scan, ci-workflow-injection by a third lens). Its own fingerprintOf
+// keys the content address on rootCause (sink/source/title) instead of vuln_class (scf2, matching
+// #238's fixes to its two sibling scanners), so a renamed class across composed layers or re-runs
+// no longer defeats args.priorBundle dedup; genuinely distinct defects at the same file:line stay
+// apart via their differing sink/source.
+
+const CLASS_MISMATCH_REPORTABLE = [
+  { id: 'f1', title: 'GITHUB_OUTPUT newline injection (supply-chain framing)', file: 'scripts/mythos/run.ts', line: 151, vuln_class: 'supply-chain', severity: 'high', source: 'GITHUB_OUTPUT', sink: 'echo >> $GITHUB_OUTPUT', why: 'unescaped newline lets attacker-controlled output inject extra keys', fix: 'strip CR' },
+  { id: 'f2', title: 'workflow output injection', file: 'scripts/mythos/run.ts', line: 151, vuln_class: 'injection', severity: 'high', source: 'GITHUB_OUTPUT', sink: 'echo >> $GITHUB_OUTPUT', why: 'unescaped newline lets attacker-controlled output inject extra keys', fix: 'strip CR' },
+  { id: 'f3', title: 'CI workflow output injection', file: 'scripts/mythos/run.ts', line: 151, vuln_class: 'ci-workflow-injection', severity: 'high', source: 'GITHUB_OUTPUT', sink: 'echo >> $GITHUB_OUTPUT', why: 'unescaped newline lets attacker-controlled output inject extra keys', fix: 'strip CR' },
+]
+
+const l1BundleFingerprints = (result) => result.bundle.findings.filter((f) => f.layer === 'L1: code-at-rest').map((f) => f.fingerprint)
+
+const classMismatchMap = () => ({ l1: { ...L1_RESULT, reportable: CLASS_MISMATCH_REPORTABLE } })
+
+test('v3: same file + same rootCause but different vuln_class share ONE scf2: fingerprint', async () => {
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map: classMismatchMap() })
+  const fps = l1BundleFingerprints(result)
+  assert.equal(fps.length, 3, 'defense-scan emits the merged findings as given (no candidate dedup here)')
+  assert.equal(new Set(fps).size, 1, `3 lenses naming the same defect 3 different classes must share one content address, got ${new Set(fps).size}`)
+  assert.ok(fps[0].startsWith('scf2:'), 'fingerprint prefix bumped to scf2 (compatibility break, matching #238)')
+})
+
+test('v3: a class rename across runs is carried over vs priorBundle, not re-surfaced as new', async () => {
+  // Prior run saw the defect only under the supply-chain framing; this run sees the SAME defect
+  // re-named by three lenses. All three must count as carried over (scf1 would have counted the
+  // two renames as brand-new findings).
+  const prior = await runScript({ args: { target: '/tmp/fake' }, map: { l1: { ...L1_RESULT, reportable: [CLASS_MISMATCH_REPORTABLE[0]] } } })
+  const { result } = await runScript({ args: { target: '/tmp/fake', priorBundle: prior.result.bundle }, map: classMismatchMap() })
+  assert.equal(result.bundle.coverage.delta.new, 0, 'the renamed framings are carried over, not new')
+  assert.equal(result.bundle.coverage.delta.carried_over, 3)
+  assert.ok(result.bundle.findings.every((f) => f.is_new === false), 'every framing carries over')
+  assert.equal(result.new_findings.length, 0)
+})
+
+const DISTINCT_SINKS_REPORTABLE = [
+  { id: 'f1', title: 'missing owner check before delete', file: 'src/api.ts', line: 88, vuln_class: 'missing-authz', severity: 'high', source: 'req.user', sink: 'checkOwnership', why: 'no owner check on this line', fix: 'add the check' },
+  { id: 'f2', title: 'raw query on the same line', file: 'src/api.ts', line: 88, vuln_class: 'sql-injection', severity: 'high', source: 'req.body', sink: 'db.raw', why: 'a second, separate sink on the same line', fix: 'parameterize' },
+]
+
+test('v3: two genuinely distinct defects at the same file:line do NOT over-collapse', async () => {
+  const map = { l1: { ...L1_RESULT, reportable: DISTINCT_SINKS_REPORTABLE } }
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  const fps = l1BundleFingerprints(result)
+  assert.equal(new Set(fps).size, 2, 'a missing-authz check and a separate injection sink on one line stay separate')
+})
+
+test('v3: buildBundle prefers a sub-layer\'s already-computed scf2: fingerprint over re-minting', async () => {
+  // defense-scan composes other scanners' bundles rather than discovering findings itself, so a
+  // finding that arrives with its own scf2: content address is carried through verbatim.
+  const SUB_FP = 'scf2:0123456789abcdef'
+  const map = { l1: { ...L1_RESULT, reportable: [{ ...CLASS_MISMATCH_REPORTABLE[0], fingerprint: SUB_FP }] } }
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  const fps = l1BundleFingerprints(result)
+  assert.equal(fps[0], SUB_FP, 'the sub-layer fingerprint is carried through instead of re-minted')
+})
+
+test('v3: buildBundle re-mints a stale scf1: sub-layer fingerprint under the current formula', async () => {
+  const map = { l1: { ...L1_RESULT, reportable: [{ ...CLASS_MISMATCH_REPORTABLE[0], fingerprint: 'scf1:00112233' }] } }
+  const { result } = await runScript({ args: { target: '/tmp/fake' }, map })
+  const fp = l1BundleFingerprints(result)[0]
+  assert.ok(fp.startsWith('scf2:'), 'a stale scf1: id is re-minted, not carried through')
+  assert.notEqual(fp, 'scf1:00112233')
+})
+
 // ---------- model independence forwarding (#94 criterion 4) ----------
 // Once #92 gave deep-security-scan discoveryModel/validateModel, defense-scan's Layer 1
 // composition call had to forward them or Layer 1 silently keeps the old inherit-everything

@@ -171,7 +171,14 @@ const fnv1a32 = (str, seed) => {
 }
 const contentHash = (str) => fnv1a32(str, 0x811c9dc5).toString(16).padStart(8, '0') + fnv1a32('scf ' + str, 0x811c9dc5).toString(16).padStart(8, '0')
 const rootCause = (f) => normPart(f.sink) || normPart(f.source) || normPart(f.title)
-const fingerprintOf = (f) => 'scf1:' + contentHash([normPart(stripLine(f.file || f.location || '')), normPart(f.vuln_class), rootCause(f)].join(''))
+// scf2 (bumped from scf1, issue #240 — matching #238's fixes to deep-security-scan.js and
+// security-diff-scan.js): dropped vuln_class from the content address. Composed layers
+// routinely name the same defect differently (the bake-off repro: one $GITHUB_OUTPUT
+// newline-injection bug came back under supply-chain, injection, and ci-workflow-injection),
+// so a class-keyed fingerprint let a renamed class across layers/re-runs re-surface as a
+// brand-new finding against args.priorBundle. rootCause (sink/source/title) is the stable
+// non-line signal that already does the identity work. All three scanners stay in sync here.
+const fingerprintOf = (f) => 'scf2:' + contentHash([normPart(stripLine(f.file || f.location || '')), rootCause(f)].join(''))
 const ruleIdOf = (f) => normPart(f.vuln_class).replace(/ /g, '-') || 'finding'
 const SARIF_SEV = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' }
 function buildSarif(toolName, findings) {
@@ -244,7 +251,13 @@ const PRIOR = await loadPrior()
 // NOT scanned). Distinct fields so a quiet layer never reads like one that never ran.
 function buildBundle(confirmed, ctx) {
   const findings = confirmed.map((f) => {
-    const fp = fingerprintOf(f)
+    // defense-scan composes other scanners' bundles rather than discovering findings itself, so
+    // when a sub-layer already stamped a finding with an scf2: fingerprint, carry it through
+    // verbatim instead of re-minting — a re-mint could diverge from the sub-scanner's content
+    // address (e.g. if its file/location normalization differs). Only an scf2: prefix is
+    // trusted: a stale scf1: fingerprint from an old sub-bundle is re-minted under the current
+    // formula so every emitted id matches the #238 cross-scanner contract.
+    const fp = (typeof f.fingerprint === 'string' && f.fingerprint.startsWith('scf2:')) ? f.fingerprint : fingerprintOf(f)
     const e = {
       fingerprint: fp, layer: f.layer || '', title: f.title, severity: (f.severity || 'info'),
       location: f.location || '', vuln_class: f.vuln_class || '', source: f.source || '', why: f.why || '', fix: f.fix || '',
@@ -473,6 +486,9 @@ const l1Findings = l1Reportable.map((f) => ({
   vuln_class: f.vuln_class || 'unknown',
   source: f.source || 'deep-security-scan',
   sink: f.sink || '', // carried so the bundle fingerprint matches a standalone deep-security-scan bundle
+  // Forward a sub-layer fingerprint if the composed scanner emitted one — buildBundle prefers it
+  // over re-minting (see the comment there). Absent on today's deep-security-scan reportable.
+  ...(typeof f.fingerprint === 'string' && f.fingerprint ? { fingerprint: f.fingerprint } : {}),
   why: f.why || f.rationale || '',
   attacker_story: f.attacker_story || '',
   evidence: f.evidence || '',
