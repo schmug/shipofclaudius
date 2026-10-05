@@ -2,7 +2,7 @@
 // Model-free, built-ins only. The scaffold is copied into every project the factory creates,
 // so a drift here ships into every new repo — pin the load-bearing properties.
 // Run:  node tests/factory-intake.test.mjs
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 
 const ROOT = new URL('../', import.meta.url)
@@ -371,6 +371,32 @@ test('factory-intake: passes the run nonce to factory-build as fenceNonce on bot
   assert.ok(!md.includes('run nonce from Phase 0'), 'no invocation reuses the Phase 0 nonce')
   const p0 = md.slice(md.indexOf('## Phase 0'), md.indexOf('## Phase 1'))
   assert.ok(/research fence only/.test(p0), 'Phase 0 scopes its nonce to the research fence')
+})
+
+// Issue #269, option 2: the scaffold does NOT ship the factory Action — adoption is a human
+// post-ship step, so Phase 11 must make the merge-path gap visible and hand over the steps.
+test('factory-intake: Phase 11 reports the missing factory merge path with the human adoption steps, and the scaffold ships no factory.yml', async () => {
+  const md = await read('skills/factory-intake/SKILL.md')
+  const p11 = md.slice(md.indexOf('## Phase 11'))
+  for (const t of ['.factory/templates/README.md', 'factory.yml', 'FACTORY_GH_TOKEN', 'merge-pr-with-gate'])
+    assert.ok(p11.includes(t), `Phase 11 names ${t}`)
+  assert.ok(/no factory merge path/i.test(p11) && p11.includes('.github/workflows/ci.yml'), 'the report states the gap and names the only workflow the scaffold ships')
+  assert.ok(p11.includes('setup-labels.sh') && p11.includes('allowlistAuthors: []') && /required scope field/.test(p11), 'the adoption steps follow the templates README order')
+  assert.ok(/workflow_dispatch/.test(p11) && p11.includes('stop_after: reproduce'), 'factory.yml first runs via workflow_dispatch with stop_after: reproduce')
+  assert.ok(/ANTHROPIC_API_KEY/.test(p11) && /never creates/.test(p11), 'the repo secrets are named and never created by this skill')
+  assert.ok(!/references\//.test(p11), 'the scaffold stays out of references/ (plugin-integrity resolves those tokens with readFile)')
+  // Option 1 was not taken: no file under the scaffold is named factory.yml.
+  const walk = async (dir) => {
+    const out = []
+    for (const e of await readdir(new URL(dir, ROOT), { withFileTypes: true })) {
+      if (e.isFile()) out.push(dir + e.name)
+      else if (e.isDirectory()) out.push(...(await walk(dir + e.name + '/')))
+    }
+    return out
+  }
+  const files = await walk('skills/factory-intake/scaffold/')
+  assert.ok(files.length > 0, 'the scaffold directory was found')
+  assert.ok(!files.some((f) => f.endsWith('factory.yml')), `no scaffold file is named factory.yml (found ${files.length} files)`)
 })
 
 // ---- runner ----
