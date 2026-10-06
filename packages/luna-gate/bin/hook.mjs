@@ -35,7 +35,9 @@ function readStdin() {
 }
 
 // Returns the stdout payload (string) or null for "say nothing".
-export async function main(raw, { env = process.env, fetchImpl } = {}) {
+// `parse` is a seam so a test can make the parser throw.
+const PARSER = { findPrCreates, commandCount, hasRiskyExpansion, hasAmbiguousGh }
+export async function main(raw, { env = process.env, fetchImpl, parse = PARSER } = {}) {
   let event
   try { event = JSON.parse(raw) } catch { return null }
   if (!event || event.tool_name !== 'Bash') return null
@@ -46,11 +48,11 @@ export async function main(raw, { env = process.env, fetchImpl } = {}) {
   // block mode), never a silent exit that lets the call through.
   let prs, ambiguous, risky, count, parseError = null
   try {
-    prs = findPrCreates(command)
+    prs = parse.findPrCreates(command)
     // A gh call whose subcommand the shell computes might be `gh pr create` in disguise;
     // check that before treating the command as unrelated.
-    ambiguous = !prs.length && hasAmbiguousGh(command)
-    if (prs.length) { risky = hasRiskyExpansion(command); count = commandCount(command) }
+    ambiguous = !prs.length && parse.hasAmbiguousGh(command)
+    if (prs.length) { risky = parse.hasRiskyExpansion(command); count = parse.commandCount(command) }
   } catch (e) { parseError = e?.message || String(e) }
   if (!parseError && !prs.length && !ambiguous) return null
   let outcome
