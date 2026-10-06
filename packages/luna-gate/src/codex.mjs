@@ -28,6 +28,32 @@ export const DISABLED_FEATURES = Object.freeze([
 
 const LOG_CAP = 256 * 1024
 
+// gpt-6-luna on a ChatGPT login is rejected (HTTP 400) by codex-cli older than this.
+export const MIN_CODEX_VERSION = [0, 159, 0]
+
+export function parseCodexVersion(text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(text))
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+
+export function versionLess(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i]
+  return false
+}
+
+// Runs `<bin> --version`. Resolves the stdout text, or null when it hangs; rejects like
+// spawn does when the binary cannot start.
+function codexVersionText(bin) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(null) }, 10_000)
+    child.stdout.on('data', (c) => { if (out.length < 4096) out += c })
+    child.on('error', (e) => { clearTimeout(timer); reject(e) })
+    child.on('close', () => { clearTimeout(timer); resolve(out) })
+  })
+}
+
 export function codexArgs(cfg, work) {
   return [
     'exec', '-C', work, '--skip-git-repo-check', '-s', 'read-only',
@@ -61,6 +87,17 @@ function run(bin, args, prompt, cwd, timeoutMs) {
 }
 
 export async function callCodex(prompt, cfg) {
+  const notFound = (e) => new Error(e?.code === 'ENOENT'
+    ? `codex CLI not found at "${cfg.codexBin}" (install it, or set LUNA_GATE_CODEX_BIN)`
+    : `could not start codex: ${e?.code || 'spawn failed'}`)
+  // A stale default `codex` would otherwise get an HTTP 400 for the model and fail open or
+  // deny every PR with no hint why. An unreadable version is not blocked: it may be a wrapper.
+  let vtext
+  try { vtext = await codexVersionText(cfg.codexBin) } catch (e) { throw notFound(e) }
+  const v = parseCodexVersion(vtext)
+  if (v && versionLess(v, MIN_CODEX_VERSION)) {
+    throw new Error(`codex CLI ${v.join('.')} at "${cfg.codexBin}" is too old for ${cfg.model} (needs >= ${MIN_CODEX_VERSION.join('.')}); point LUNA_GATE_CODEX_BIN at a newer codex`)
+  }
   const work = await mkdtemp(join(tmpdir(), 'luna-gate-codex-'))
   try {
     await writeFile(join(work, 'schema.json'), JSON.stringify(SCHEMA))
@@ -68,9 +105,7 @@ export async function callCodex(prompt, cfg) {
     try {
       r = await run(cfg.codexBin, codexArgs(cfg, work), prompt, work, cfg.timeoutMs)
     } catch (e) {
-      throw new Error(e?.code === 'ENOENT'
-        ? `codex CLI not found at "${cfg.codexBin}" (install it, or set LUNA_GATE_CODEX_BIN)`
-        : `could not start codex: ${e?.code || 'spawn failed'}`)
+      throw notFound(e)
     }
     if (r.timedOut) throw new Error(`timed out after ${Math.round(cfg.timeoutMs / 1000)}s`)
     if (r.code !== 0) {

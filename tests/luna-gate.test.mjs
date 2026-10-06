@@ -719,6 +719,7 @@ async function fakeCodex(b = {}) {
 const fs = require('node:fs')
 const argv = process.argv.slice(2)
 const at = (f) => argv[argv.indexOf(f) + 1]
+if (argv[0] === '--version') { console.log(${JSON.stringify(b.version ?? 'codex-cli 0.159.0')}); process.exit(0) }
 const stdin = fs.readFileSync(0, 'utf8')
 fs.writeFileSync(${JSON.stringify(rec)}, JSON.stringify({ argv, stdin, cwd: process.cwd(), schema: fs.readFileSync(at('--output-schema'), 'utf8') }))
 const B = ${JSON.stringify(b)}
@@ -788,6 +789,32 @@ test('codex: missing binary, empty output, non-JSON and timeout all fail open wi
   const t0 = Date.now()
   assert.match(await msg(await codexEnv((await fakeCodex({ hang: true })).bin, { LUNA_GATE_TIMEOUT_MS: '300' })), /timed out/)
   assert.ok(Date.now() - t0 < 10_000, 'a hung codex is killed at the timeout')
+})
+
+test('codex: a CLI too old for the model fails with its version and LUNA_GATE_CODEX_BIN, before any review', async () => {
+  const dir = await makeRepo()
+  const old = await fakeCodex({ version: 'codex-cli 0.153.4', out: JSON.stringify({ summary: '', findings: [F()] }) })
+  const env = await codexEnv(old.bin)
+  const open = JSON.parse(await hookMain(PR(dir), { env }))
+  assert.match(open.systemMessage, /codex CLI 0\.153\.4 .*too old for gpt-6-luna \(needs >= 0\.159\.0\).*LUNA_GATE_CODEX_BIN/)
+  assert.equal(open.hookSpecificOutput, undefined, 'on_error=open still lets the PR through, but says why')
+  await assert.rejects(old.record(), 'codex exec never ran')
+  const closed = JSON.parse(await hookMain(PR(dir), { env: { ...env, LUNA_GATE_ON_ERROR: 'closed' } }))
+  assert.equal(closed.hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(closed.hookSpecificOutput.permissionDecisionReason, /too old/)
+  const exact = await fakeCodex({ version: 'codex-cli 0.159.0-alpha.12.1', out: JSON.stringify({ summary: '', findings: [] }) })
+  assert.doesNotMatch(JSON.parse(await hookMain(PR(dir), { env: await codexEnv(exact.bin) })).systemMessage, /too old/)
+})
+
+test('hook: a parser crash is a rejection — deny in block mode, a note in advisory, never a silent pass', async () => {
+  const boom = { findPrCreates() { throw new Error('parser exploded') }, commandCount() { return 1 }, hasRiskyExpansion() { return false }, hasAmbiguousGh() { return false } }
+  const raw = JSON.stringify({ tool_name: 'Bash', cwd: tmpdir(), tool_input: { command: 'gh pr create --fill' } })
+  const blocked = JSON.parse(await hookMain(raw, { env: { LUNA_GATE: 'block' }, parse: boom }))
+  assert.equal(blocked.hookSpecificOutput.permissionDecision, 'deny')
+  assert.match(blocked.hookSpecificOutput.permissionDecisionReason, /could not parse this command/)
+  const advisory = JSON.parse(await hookMain(raw, { env: { LUNA_GATE: 'advisory' }, parse: boom }))
+  assert.equal(advisory.hookSpecificOutput?.permissionDecision, undefined)
+  assert.match(JSON.stringify(advisory), /could not parse this command/)
 })
 
 test('codex: findings are fenced with a fresh nonce the reviewer never saw', async () => {
