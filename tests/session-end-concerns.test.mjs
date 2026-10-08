@@ -315,7 +315,15 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 // wordings; that reads as a legitimate catch, not a regression. Offline replay is a proxy —
 // it cannot see `background_tasks`, so the in-flight exemption above still rests on the
 // 2026-09-06 live battery, not on this one.
-const PROMPT_SHA256_16 = 'c546c4f000cce547'
+//
+// 2026-10-08: #246 and #265 combined. #246's wording above, plus #265's two limits on the
+// hand-off (a check the session could have run itself, and an unattended run) and its
+// `model: claude-sonnet-5` pin. #265 measured its pieces on its own base: a 27-session live
+// battery (new wording + sonnet: 10 evaluations, 1 block, the doubt control) and a 34-evaluation
+// replay where new + sonnet passed 27 of 28 production false blocks and kept 6/6 passes. THIS
+// combined string has not been measured: like #167, the pin first ships unmeasured, and merging
+// waits on a fresh block-rate run of this exact wording.
+const PROMPT_SHA256_16 = 'f5cb4e4cb86ecdc8'
 
 test('stop hook: the condition wording is hash-pinned', () => {
   const actual = createHash('sha256').update(stopEntries[0].prompt || '').digest('hex').slice(0, 16)
@@ -439,6 +447,26 @@ test('stop hook: judges this session only, not transcripts it quotes', () => {
   // reviewing session. Any diagnosis, review, or summary of another transcript trips it.
   assert.match(p, /quoted[^.]*not unresolved work here/i,
     'quoted transcript material is evidence, not this session\'s own unresolved work')
+})
+
+test('stop hook: the hand-off exemption keeps its two limits (from #265)', () => {
+  const p = stopEntries[0].prompt || ''
+  // Without this an agent can turn a check it should run into "Want me to check it?".
+  assert.match(p, /a question that hands the user a check the session could have run itself is still unresolved/i,
+    'a question that hands the user a runnable check stays unresolved')
+  // Unattended runs have no reader, so a question left in chat there is still unresolved
+  // (global CLAUDE.md: unattended, chat is a no-op). The <scheduled-task> frame is the one
+  // marker a transcript reliably carries; TTY and env vars do not reach the evaluator.
+  assert.match(p, /the hand-off does not cover an unattended run/i, 'keeps unattended runs outside the exemption')
+  assert.ok(p.includes('<scheduled-task>'), 'names the transcript marker of an unattended run')
+})
+
+test('stop hook: the evaluator is pinned to a model that applies the exemptions', () => {
+  // Unset, a prompt hook runs on the default small fast model (CLI 2.1.278 schema: "If not
+  // specified, uses the default small fast model"). On that model 26% of 600 blocks recited
+  // an exemption ("two subagents are actively running… the session is waiting") and blocked
+  // anyway, so adding exemption text alone does not change its verdicts (#265).
+  assert.equal(stopEntries[0].model, 'claude-sonnet-5', 'sets model on the Stop entry')
 })
 
 // ---- runner ----
