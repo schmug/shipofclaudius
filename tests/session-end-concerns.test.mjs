@@ -302,7 +302,28 @@ test('stop hook: the prompt is phrased as a condition, not an instruction', () =
 // tests pass") also passed; it exercises neither clause. The never-run-check clause's
 // presence is pinned by the regression test below; its block behaviour was not part of
 // this battery.
-const PROMPT_SHA256_16 = '502aba2764499865'
+//
+// 2026-09-21 (#204 follow-up): re-measured, and the old wording FAILED the ceiling above.
+// Method differs from the 2026-09-06 battery — that one ran live `claude -p` sessions, which
+// cannot reproduce a looping session on demand. This one replays the judge offline: the system
+// prompt, user wrapper ("Based on the conversation transcript above, has the following stopping
+// condition been satisfied?") and `{ok, reason, impossible}` schema lifted verbatim from the
+// 2.1.269 binary, run on Haiku against 12 real local transcripts at 14 stop points, two clean
+// runs, 99 judge calls total. Old wording: 16/26 blocked (62%) — roughly double the ceiling.
+// New wording: 5/27 blocked (19%) plus 6 `impossible`, so 81% of evaluations end the turn.
+// One short session (a requested security review left at reconnaissance) blocks under BOTH
+// wordings; that reads as a legitimate catch, not a regression. Offline replay is a proxy —
+// it cannot see `background_tasks`, so the in-flight exemption above still rests on the
+// 2026-09-06 live battery, not on this one.
+//
+// 2026-10-08: #246 and #265 combined. #246's wording above, plus #265's two limits on the
+// hand-off (a check the session could have run itself, and an unattended run) and its
+// `model: claude-sonnet-5` pin. #265 measured its pieces on its own base: a 27-session live
+// battery (new wording + sonnet: 10 evaluations, 1 block, the doubt control) and a 34-evaluation
+// replay where new + sonnet passed 27 of 28 production false blocks and kept 6/6 passes. THIS
+// combined string has not been measured: like #167, the pin first ships unmeasured, and merging
+// waits on a fresh block-rate run of this exact wording.
+const PROMPT_SHA256_16 = 'f5cb4e4cb86ecdc8'
 
 test('stop hook: the condition wording is hash-pinned', () => {
   const actual = createHash('sha256').update(stopEntries[0].prompt || '').digest('hex').slice(0, 16)
@@ -387,6 +408,65 @@ test('spool drain: rotate survives a concurrent append; truncate-in-place destro
     rotateResult.some((line) => JSON.parse(line).concerns[0] === 'concurrent, mid-window'),
     'the concern appended during the triage window is recoverable from the rotated file'
   )
+})
+
+test('stop hook: the evaluator gets a loop break and an impossible escape', () => {
+  const p = stopEntries[0].prompt || ''
+  // Without $ARGUMENTS the evaluator never receives the hook input JSON, so it cannot
+  // see stop_hook_active and cannot tell a first evaluation from its own fifth block.
+  // Verified in the 2.1.269 binary: prompt hooks substitute $ARGUMENTS, and the Stop
+  // input schema carries stop_hook_active. Session 23a95c4f blocked nine times without
+  // it, three of them consecutively into the block-cap override.
+  assert.ok(p.includes('$ARGUMENTS'), 'passes the hook input JSON to the evaluator')
+  assert.ok(p.includes('stop_hook_active'), 'names the field that marks a repeat evaluation')
+  // Prompt hooks may answer {"ok": false, "impossible": true} to mark a condition that
+  // can never be satisfied; Claude Code then allows the stop. A decision only the user
+  // can make is exactly that, and it is the one class of item file-concerns cannot file.
+  assert.ok(p.includes('impossible'), 'names the escape the harness honours for unachievable conditions')
+})
+
+test('stop hook: a question handed to the user is not unresolved work', () => {
+  const p = stopEntries[0].prompt || ''
+  // The whole defect. `a question raised and never answered` read literally onto every
+  // turn that ends by asking Cory something — including a CLAUDE.md trigger-1 decision
+  // the guardrails require be left pending. All nine blocks in session 23a95c4f were
+  // this clause firing on correct behaviour, none were the silent scope cut it exists
+  // to catch. Pinned as an absence: re-adding the phrase restores the loop verbatim.
+  assert.doesNotMatch(p, /a question raised and never answered/i,
+    'the over-broad question clause is gone')
+  // Pinned together with its negation so an inverted rewrite ("a question put to the
+  // user IS unresolved") cannot satisfy a bare containment check.
+  assert.match(p, /put to the user[^.]*is handed off, not unresolved/i,
+    'states the carve-out un-inverted')
+})
+
+test('stop hook: judges this session only, not transcripts it quotes', () => {
+  const p = stopEntries[0].prompt || ''
+  // Second defect, found live: reviewing session 23a95c4f made THIS hook block on
+  // "(a), (b), or (c)" — text quoted from the session under review, attributed to the
+  // reviewing session. Any diagnosis, review, or summary of another transcript trips it.
+  assert.match(p, /quoted[^.]*not unresolved work here/i,
+    'quoted transcript material is evidence, not this session\'s own unresolved work')
+})
+
+test('stop hook: the hand-off exemption keeps its two limits (from #265)', () => {
+  const p = stopEntries[0].prompt || ''
+  // Without this an agent can turn a check it should run into "Want me to check it?".
+  assert.match(p, /a question that hands the user a check the session could have run itself is still unresolved/i,
+    'a question that hands the user a runnable check stays unresolved')
+  // Unattended runs have no reader, so a question left in chat there is still unresolved
+  // (global CLAUDE.md: unattended, chat is a no-op). The <scheduled-task> frame is the one
+  // marker a transcript reliably carries; TTY and env vars do not reach the evaluator.
+  assert.match(p, /the hand-off does not cover an unattended run/i, 'keeps unattended runs outside the exemption')
+  assert.ok(p.includes('<scheduled-task>'), 'names the transcript marker of an unattended run')
+})
+
+test('stop hook: the evaluator is pinned to a model that applies the exemptions', () => {
+  // Unset, a prompt hook runs on the default small fast model (CLI 2.1.278 schema: "If not
+  // specified, uses the default small fast model"). On that model 26% of 600 blocks recited
+  // an exemption ("two subagents are actively running… the session is waiting") and blocked
+  // anyway, so adding exemption text alone does not change its verdicts (#265).
+  assert.equal(stopEntries[0].model, 'claude-sonnet-5', 'sets model on the Stop entry')
 })
 
 // ---- runner ----
