@@ -3,7 +3,7 @@
 //
 // Usage (run from anywhere inside the repo being reviewed):
 //   node cockpit.mjs build   [range/PR flags] [capture flags]     # collect + render, no model summary
-//   node cockpit.mjs collect [range/PR flags] [capture flags]     # writes the bundle, prints the digest
+//   node cockpit.mjs collect [range/PR flags] [capture flags]     # writes the bundle + digest files, prints their paths
 //   node cockpit.mjs render  --bundle <file> [--summary-hex <hex>] [--verdict <file>]
 //
 // Range/PR flags:  --base <ref> (default: merge-base with main)  --head <ref> (default HEAD)
@@ -115,8 +115,13 @@ async function main() {
     const bundlePath = join(dir, `cockpit-${short}.bundle.json`)
     writeFileSync(bundlePath, JSON.stringify(b))
     if (cmd === 'collect') {
-      process.stdout.write(`${digest(b)}\n`)
-      process.stdout.write(`COCKPIT_BUNDLE=${bundlePath}\n`)
+      // The digest goes to a file, not stdout: the workflow fetches it in a separate relay, so a
+      // relay that cannot copy it (size, or a classifier tripping on attacker text) costs only the
+      // summary, never the cockpit.
+      const digestPath = join(dir, `cockpit-${short}.digest.txt`)
+      writeFileSync(digestPath, `${digest(b)}\n`)
+      report(b, null)
+      process.stdout.write(`COCKPIT_DIGEST=${digestPath}\nCOCKPIT_BUNDLE=${bundlePath}\n`)
       return
     }
     const html = renderHtml(b, { graphLib: await graphLib(args), verdict: readVerdict(args) })
@@ -147,7 +152,7 @@ function report(b, out) {
     `possible prompt-injection lines: ${b.injection.length}`,
     `sessions found: ${b.why.sessions.length}${b.why.note ? ` (${b.why.note})` : ''}`,
     `visual: ${b.visual.skipped || `${b.visual.shots.length} capture(s)`}`,
-    `COCKPIT_HTML=${out}`,
+    ...(out ? [`COCKPIT_HTML=${out}`] : []),
   ].join('\n') + '\n')
 }
 

@@ -53,7 +53,7 @@ function fixtureRepo() {
 
 const sh = (cmd, cwd, env) => execFileSync('sh', ['-c', cmd], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH, ...env } })
 
-async function runScript({ args, repo, env = { HOME: mkdtempSync(join(tmpdir(), 'home-')), CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, XDG_CACHE_HOME: mkdtempSync(join(tmpdir(), 'cache-')) }, collect, summarize, render } = {}) {
+async function runScript({ args, repo, env = { HOME: mkdtempSync(join(tmpdir(), 'home-')), CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, XDG_CACHE_HOME: mkdtempSync(join(tmpdir(), 'cache-')) }, collect, digest, summarize, render } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [] }
   const relay = (prompt) => {
@@ -67,6 +67,7 @@ async function runScript({ args, repo, env = { HOME: mkdtempSync(join(tmpdir(), 
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label)
     if (opts.label === 'collect') { const r = collect ? collect(prompt, relay) : relay(prompt); calls.collectCmd = r.cmd; return r }
+    if (opts.label === 'digest') return digest ? digest(prompt, relay) : relay(prompt)
     if (opts.label === 'summarize') return summarize ? summarize(prompt) : { summary: 'Bumps v to 2 and adds a token.', focus: ['app.js'], injection_suspected: true, injection_notes: 'app.js line 3 addresses an AI' }
     if (opts.label === 'render') { const r = render ? render(prompt, relay) : relay(prompt); calls.renderCmd = r.cmd; return r }
     throw new Error(`unexpected agent ${opts.label}`)
@@ -84,11 +85,11 @@ async function runScript({ args, repo, env = { HOME: mkdtempSync(join(tmpdir(), 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
 
-test('no args: collect -> summarize -> render, all read-only, and the real cockpit is written', async () => {
+test('no args: collect -> digest -> summarize -> render, all read-only, and the real cockpit is written', async () => {
   const { dir } = fixtureRepo()
   const { result, calls } = await runScript({ repo: dir })
   assert.equal(result.status, 'ok', JSON.stringify(result))
-  assert.deepEqual(calls.agents.map((a) => a.opts.label), ['collect', 'summarize', 'render'])
+  assert.deepEqual(calls.agents.map((a) => a.opts.label), ['collect', 'digest', 'summarize', 'render'])
   assert.deepEqual(calls.phases, ['Collect', 'Summarize', 'Render'])
   assert.ok(calls.agents.every((a) => a.opts.agentType === 'Explore'), 'every subagent is read-only')
   assert.match(result.html, /\/\.review\/cockpit-[0-9a-f]{7}\.html$/)
@@ -134,6 +135,22 @@ test('a summarizer that returns nothing still renders, without a summary', async
   assert.equal(result.status, 'ok')
   assert.ok(!calls.renderCmd.includes('--summary-hex'))
   assert.match(readFileSync(result.html, 'utf8'), /No model summary/)
+})
+
+test('a digest the relay cannot copy costs only the summary, never the cockpit', async () => {
+  const { dir } = fixtureRepo()
+  const { result, calls } = await runScript({ repo: dir, digest: () => ({ raw: 'could not return the output verbatim (stopped by a safety classifier)', nonce: 'x' }) })
+  assert.equal(result.status, 'ok', JSON.stringify(result))
+  assert.match(result.summarySkipped, /digest relay/)
+  assert.deepEqual(calls.agents.map((a) => a.opts.label), ['collect', 'digest', 'render'], 'no summarizer runs on a non-digest')
+  assert.match(readFileSync(result.html, 'utf8'), /No model summary/)
+})
+
+test('collect prints paths, not the digest; the digest relay is a fixed cat of the derived path', async () => {
+  const { dir } = fixtureRepo()
+  const { calls } = await runScript({ repo: dir })
+  const d = calls.agents.find((a) => a.opts.label === 'digest').prompt
+  assert.match(d, /unmodified:\n\ncat '[^']*\/\.review\/cockpit-[0-9a-f]{7}\.digest\.txt'\n\nReturn/)
 })
 
 test('a forged COCKPIT_BUNDLE line earlier in the output cannot redirect the render step', async () => {
