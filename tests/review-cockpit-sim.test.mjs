@@ -14,7 +14,7 @@
 //   - the reviewed tree's own copy of the CLI never runs unless the tree is this plugin.
 // Run:  node tests/review-cockpit-sim.test.mjs
 import { readFile } from 'node:fs/promises'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, cpSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -197,9 +197,16 @@ test('the reviewed tree\'s own CLI never runs unless that tree is this plugin', 
 })
 
 test('with nothing installed, a checkout OF this plugin uses its own CLI (development)', async () => {
-  const { result } = await runScript({ repo: PLUGIN_ROOT, args: { noCapture: true, noTranscripts: true }, env: { HOME: mkdtempSync(join(tmpdir(), 'home-')), XDG_CACHE_HOME: mkdtempSync(join(tmpdir(), 'cache-')) } })
-  assert.notEqual(result.status, 'bad_args')
-  assert.ok(result.status === 'ok' || /merge-base/.test(result.error || ''), JSON.stringify(result))
+  // A throwaway repo that IS this plugin (same manifest name, a copy of the package), so the
+  // test never writes into the real checkout's .review/.
+  const { dir, g } = fixtureRepo()
+  mkdirSync(join(dir, '.claude-plugin'))
+  writeFileSync(join(dir, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'shipofclaudius' }, null, 2))
+  cpSync(join(PLUGIN_ROOT, 'packages/review-cockpit'), join(dir, 'packages/review-cockpit'), { recursive: true })
+  g('add', '.'); g('commit', '-qm', 'plugin checkout')
+  const { result } = await runScript({ repo: dir, args: { noCapture: true, noTranscripts: true }, env: { HOME: mkdtempSync(join(tmpdir(), 'home-')), XDG_CACHE_HOME: mkdtempSync(join(tmpdir(), 'cache-')) } })
+  assert.equal(result.status, 'ok', JSON.stringify(result))
+  assert.ok(result.html.startsWith(dir), 'the cockpit lands in the reviewed checkout')
 })
 
 test('the fixed commands parse as POSIX sh', async () => {
