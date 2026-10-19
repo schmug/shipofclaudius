@@ -275,7 +275,7 @@ test('render: attacker text in the diff, transcripts, verdict and summary is esc
   }), { summary: { summary: evil, focus: [evil], injection_suspected: true, injection_notes: evil }, verdict: { verdict: evil } })
   assert.ok(!html.includes('<img src=x'), 'no live img tag')
   assert.ok(!html.includes('onerror=alert(1)>'), 'no live handler')
-  assert.equal((html.match(/<script>/g) || []).length, 1, 'only the cockpit\'s own script')
+  assert.equal((html.match(/<script\b/gi) || []).length, 1, 'only the cockpit\'s own script, in any case')
   assert.ok(!html.includes('javascript:alert'), 'a javascript: URL never reaches an iframe or link')
   assert.equal(esc(`<a href="x">'&`), '&lt;a href=&quot;x&quot;&gt;&#39;&amp;')
 })
