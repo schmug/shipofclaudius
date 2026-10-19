@@ -151,7 +151,7 @@ function verdictBlock(v) {
 function approve(b, summary, verdict) {
   const sum = summary
     ? `<div class="summary"><div class="sumh">MODEL-GENERATED SUMMARY. This is not evidence; check every claim against the Code tab.</div><p>${esc(summary.summary).replace(/\n/g, '<br>')}</p>${Array.isArray(summary.focus) && summary.focus.length ? `<h4>Suggested focus</h4><ul>${summary.focus.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}${summary.injection_suspected ? `<p class="warn">The summarizer also suspected prompt-injection content: ${esc(summary.injection_notes)}</p>` : ''}</div>`
-    : '<div class="summary"><div class="sumh">No model summary</div><p class="muted">Built without the summarize step (CLI <code>build</code>). Run the workflow to include one.</p></div>'
+    : '<div class="summary"><div class="sumh">No model summary</div><p class="muted">Either the CLI built this file directly (<code>build</code>), or the workflow skipped its summary step and gave the reason in its result. The tabs are complete without one.</p></div>'
   const risks = b.risks.length
     ? b.risks.map((r) => `<div class="risk"><label><input type="checkbox"> <strong>${esc(r.title)}</strong></label><p>${esc(r.ask)}</p><ul>${r.hits.slice(0, 12).map((h) => `<li>${link(h.hunk, `${h.file}${h.line ? `:${h.line}` : ''}`)} <span class="muted">${esc(h.reason)}</span></li>`).join('')}${r.hits.length > 12 ? `<li class="muted">…and ${r.hits.length - 12} more</li>` : ''}</ul></div>`).join('')
     : '<p>The diff touches none of the tracked risk categories (auth, data access, dependencies, secrets/config, CI, permissions/hooks).</p>'
