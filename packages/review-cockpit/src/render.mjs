@@ -101,6 +101,8 @@ function graphSvg(g) {
     const a = pos.get(e.from)
     const t = pos.get(e.to)
     // Importers sit to the right of what they import; draw from the target's right edge.
+    // Two changed files referencing each other share a column: bow the edge out to the right.
+    if (a.x === t.x) return `<path class="edge" d="M${t.x + 300},${t.y + 9} C${t.x + 330 + Math.abs(a.y - t.y) / 6},${t.y + 9} ${a.x + 330 + Math.abs(a.y - t.y) / 6},${a.y + 9} ${a.x + 300},${a.y + 9}"/>`
     return `<path class="edge" d="M${t.x + 300},${t.y + 9} C${t.x + 315},${t.y + 9} ${a.x - 15},${a.y + 9} ${a.x},${a.y + 9}"/>`
   }).join('')
   const nodes = g.nodes.filter((n) => pos.has(n.id)).map((n) => {
@@ -117,7 +119,7 @@ function blast(b, graphLib) {
   const label = `<p class="note"><strong>Heuristic.</strong> ${g.skipped ? esc(g.skipped) : `Built with ${esc(g.tool)} over the head working tree: a file counts as an importer when a line names a changed file's stem in an import/require/from/include/use statement, or quotes a path ending in its filename. Expect false positives on common names and misses on dynamic imports.`}${g.truncated ? ' <strong>Truncated</strong> at the node cap.' : ''}</p>`
   const legend = '<p class="legend"><span class="sw changed"></span> changed <span class="sw"></span> importer <span class="sw test"></span> test</p>'
   const graph = graphLib
-    ? `<div id="cy" class="cy"></div><script>${graphLib.replace(/<\/script/gi, '<\\/script')}</script><script>(function(){var g=${safeJson({ nodes: g.nodes, edges: g.edges })};try{cytoscape({container:document.getElementById('cy'),elements:g.nodes.map(function(n){return{data:{id:n.id,label:n.id.split('/').pop(),hop:n.hop},classes:(n.changed?'changed ':'')+(n.test?'test':'')}}).concat(g.edges.map(function(e,i){return{data:{id:'e'+i,source:e.from,target:e.to}}})),layout:{name:'breadthfirst',directed:true,spacingFactor:1.1},style:[{selector:'node',style:{label:'data(label)','font-size':10,'background-color':'#8a94a6',color:'#444'}},{selector:'.changed',style:{'background-color':'#d9480f'}},{selector:'.test',style:{'background-color':'#2f9e44',shape:'diamond'}},{selector:'edge',style:{width:1,'line-color':'#bbb','target-arrow-shape':'triangle','target-arrow-color':'#bbb','curve-style':'bezier'}}]})}catch(e){document.getElementById('cy').textContent='graph library failed: '+e.message}})()</script>`
+    ? `<div id="cy" class="cy"></div><script>${graphLib.replace(/<\/script/gi, '<\\/script')}</script><script>window.cockpitInit=window.cockpitInit||{};window.cockpitInit.blast=function(){var g=${safeJson({ nodes: g.nodes, edges: g.edges })};try{cytoscape({container:document.getElementById('cy'),elements:g.nodes.map(function(n){return{data:{id:n.id,label:n.id.split('/').pop(),hop:n.hop},classes:(n.changed?'changed ':'')+(n.test?'test':'')}}).concat(g.edges.map(function(e,i){return{data:{id:'e'+i,source:e.from,target:e.to}}})),layout:{name:'breadthfirst',directed:true,spacingFactor:1.1},style:[{selector:'node',style:{label:'data(label)','font-size':10,'background-color':'#8a94a6',color:'#444'}},{selector:'.changed',style:{'background-color':'#d9480f'}},{selector:'.test',style:{'background-color':'#2f9e44',shape:'diamond'}},{selector:'edge',style:{width:1,'line-color':'#bbb','target-arrow-shape':'triangle','target-arrow-color':'#bbb','curve-style':'bezier'}}]})}catch(e){document.getElementById('cy').textContent='graph library failed: '+e.message}}</script>`
     : graphSvg(g)
   const tests = g.tests.length
     ? `<ul>${g.tests.map((t) => `<li>${esc(t.path)} <span class="tag">${t.changed ? 'changed' : `hop ${t.hop}`}</span></li>`).join('')}</ul>`
@@ -198,7 +200,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--pan);border:1px 
 
 const JS = `(function(){
 var tabs=[].slice.call(document.querySelectorAll('nav button'));
-function show(id){tabs.forEach(function(b){b.classList.toggle('on',b.dataset.t===id)});[].forEach.call(document.querySelectorAll('section.tab'),function(s){s.classList.toggle('on',s.id==='tab-'+id)});}
+var inited={};function show(id){var ci=window.cockpitInit||{};if(ci[id]&&!inited[id]){inited[id]=1;setTimeout(ci[id],0)}tabs.forEach(function(b){b.classList.toggle('on',b.dataset.t===id)});[].forEach.call(document.querySelectorAll('section.tab'),function(s){s.classList.toggle('on',s.id==='tab-'+id)});}
 tabs.forEach(function(b){b.addEventListener('click',function(){show(b.dataset.t);history.replaceState(null,'','#tab-'+b.dataset.t)})});
 document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a[data-tab]');if(!a)return;show(a.dataset.tab);var t=document.getElementById(a.getAttribute('href').slice(1));if(t){var d=t.closest('details');if(d)d.open=true;if(t.tagName==='DETAILS')t.open=true;var dl=document.getElementById('raw');if(dl&&dl.open)dl.close();}});
 var h=location.hash.replace('#tab-','');show(tabs.some(function(b){return b.dataset.t===h})?h:'${'code'}');

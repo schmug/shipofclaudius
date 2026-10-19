@@ -104,7 +104,7 @@ export function parseTranscript(jsonl, { repoRoot, changed }) {
       }
       if (o.isMeta) continue
       const txt = stripHarness(textOf(Array.isArray(msg.content) ? msg.content.filter((c) => c && c.type !== 'tool_result') : msg.content))
-      if (txt && !/^<(command|local-command)-/.test(txt)) s.prompts.push({ ts: o.timestamp || '', text: clip(txt, 2000) })
+      if (txt && !/^<(command|local-command)-/.test(txt)) s.prompts.push({ ts: o.timestamp || '', text: clip(txt, 4000) })
       continue
     }
     if (o.type !== 'assistant' || !Array.isArray(msg.content)) continue

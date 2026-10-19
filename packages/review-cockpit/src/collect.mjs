@@ -29,7 +29,7 @@ export function originSlug(cwd) {
 function defaultBase(cwd, head) {
   for (const cand of ['origin/main', 'main', 'origin/master', 'master']) {
     const mb = tryGit(cwd, ['merge-base', head, cand])
-    if (mb) return { base: mb, baseLabel: `merge-base(${head}, ${cand})` }
+    if (mb) return { base: mb, baseLabel: `merge-base with ${cand}` }
   }
   throw new Error('could not find a merge-base with main/master; pass --base')
 }

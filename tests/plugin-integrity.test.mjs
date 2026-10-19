@@ -620,18 +620,21 @@ test('reviewer agent ships read-only on the sonnet floor with no memory (#242)',
 // A skill-prose dispatch is not a workflow `agentType:` -- the scan above never sees it -- so
 // the same two rules are applied here to the process skills' bodies: the name is namespaced
 // (`<plugin>:<name>` is what an installer registers) and the bare remainder ships. Any
-// `<plugin>:<x>` token in a skill body that is not itself a shipped skill is taken to be an
-// agent dispatch. The two sites #242 names are pinned by paragraph so that the rule cannot be
+// `<plugin>:<x>` token in a skill body that is not itself a shipped skill or workflow is taken to
+// be an agent dispatch. The two sites #242 names are pinned by paragraph so that the rule cannot be
 // satisfied by a mention somewhere else in the file.
 test('Gate A and the critic fallback dispatch the shipped reviewer by its namespaced name (#242)', async () => {
   const pluginName = (await readJSON('.claude-plugin/plugin.json')).name
   const prefix = `${pluginName}:`
   const shipped = await shippedAgentNames()
   const skills = new Set(await skillNames())
+  // A `<plugin>:<workflow>` token is a Workflow({ name }) call, the documented composition form,
+  // not an agent dispatch.
+  const workflows = new Set(await workflowNames())
   for (const name of skills) {
     const md = await read(`skills/${name}/SKILL.md`)
     for (const m of md.matchAll(new RegExp(`${pluginName}:([\\w-]+)`, 'g'))) {
-      if (skills.has(m[1])) continue
+      if (skills.has(m[1]) || workflows.has(m[1])) continue
       assert.ok(shipped.has(m[1]),
         `skills/${name}/SKILL.md dispatches "${prefix}${m[1]}" but no .claude/agents/*.md declares \`name: ${m[1]}\``)
     }

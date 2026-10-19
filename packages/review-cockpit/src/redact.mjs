@@ -5,7 +5,7 @@
 // "[REDACTED:...]" marker, a false negative leaks a key. Every hit is counted by kind and
 // source so the Approve tab can report exactly what was removed.
 
-const PLACEHOLDER = /^(\$\{|<|%|\{\{|your|example|changeme|placeholder|dummy|test|xxx|\*{3})/i
+const PLACEHOLDER = /^(\[REDACTED|\$\{|<|%|\{\{|your|example|changeme|placeholder|dummy|test|xxx|\*{3})/i
 
 // [kind, regex, replacer]. Order matters: the specific token shapes run before the generic
 // `name = "value"` assignment rule so a GitHub token is reported as one, not as "assignment".

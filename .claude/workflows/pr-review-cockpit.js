@@ -54,11 +54,14 @@ const A = (() => {
   try { return JSON.parse(args) } catch { return { notes: args } }
 })()
 
+// A bare `412` parses as JSON to a NUMBER, not an object; treat any non-object as free text.
+const AO = A && typeof A === 'object' && !Array.isArray(A) ? A : { notes: String(A) }
+
 // ---- free-text args (slash-command invocation): "412", "main..feat", "before=URL after=URL routes=/,/x"
 const FT = (() => {
   const out = {}
-  if (typeof A.notes !== 'string') return out
-  for (const tok of A.notes.trim().split(/\s+/).filter(Boolean)) {
+  if (typeof AO.notes !== 'string') return out
+  for (const tok of AO.notes.trim().split(/\s+/).filter(Boolean)) {
     let m
     if ((m = tok.match(/^#?(\d+)$/))) out.pr = Number(m[1])
     else if ((m = tok.match(/^([A-Za-z0-9._/@^~-]+)\.\.\.?([A-Za-z0-9._/@^~-]+)$/))) { out.base = m[1]; out.head = m[2] }
@@ -69,7 +72,7 @@ const FT = (() => {
   }
   return out
 })()
-const ARG = { ...FT, ...A }
+const ARG = { ...FT, ...AO }
 
 // ---- validation: everything that reaches a shell is validated AND single-quoted ----
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
@@ -118,7 +121,7 @@ if (problems.length) {
   return { status: 'bad_args', problems, hint: 'Pass { base, head } or { pr }, optional { beforeUrl, afterUrl, routes, verdict }.' }
 }
 
-const READONLY_AGENT = (typeof ARG.readonlyAgent === 'string' && ARG.readonlyAgent.trim()) ? ARG.readonlyAgent.trim() : 'Explore'
+const READONLY_AGENT = (A && typeof A.readonlyAgent === 'string' && A.readonlyAgent.trim()) ? A.readonlyAgent.trim() : 'Explore'
 
 // UTF-8 -> lowercase hex with no Buffer/TextEncoder (the runtime has neither guaranteed).
 // Lone surrogates are dropped first because encodeURIComponent throws on them.

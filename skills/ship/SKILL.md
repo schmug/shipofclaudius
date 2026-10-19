@@ -62,6 +62,31 @@ now or file a follow-up GitHub issue with rationale.**
 A branch that quietly ships only a fraction of its spec is the failure this
 step exists to prevent.
 
+## 5b. Build the review cockpit
+
+Build the human's review file for this branch, so whoever approves the PR sees the
+change in context rather than the diff alone:
+
+```text
+Workflow({ name: 'shipofclaudius:pr-review-cockpit', args: { verdict } })
+```
+
+- Pass `beforeUrl` / `afterUrl` (and `routes`) when the project has a production URL and a
+  preview, staging or localhost build of this branch; otherwise leave them out and the
+  visual tabs say so.
+- If an external second opinion ran on this branch (a `codex` critic, the
+  `shipofclaudius:reviewer` agent, or `pr-review-fanout`), save its verdict as JSON and pass
+  the path as `verdict` (or pass the object). It appears as its own section on the
+  cockpit's Approve tab. With no second opinion, omit `verdict`.
+- Without the Workflow tool, run the CLI directly:
+  `node "${CLAUDE_PLUGIN_ROOT}/packages/review-cockpit/bin/cockpit.mjs" build [--verdict <file>]`.
+
+Report the printed `.review/cockpit-<shortsha>.html` path in your step-6 output, next to
+the test results. The file is git-ignored and stays on this machine; never commit it or
+paste its contents into the PR. If the cockpit flags possible prompt-injection content or
+reports redactions, say so in the PR description, by count, without quoting the redacted
+values.
+
 ## 6. Push and open the PR
 
 ```bash
@@ -75,6 +100,7 @@ PR description must include:
 - A short summary of changes
 - Test results (e.g., "313 passing, 0 failing")
 - Any spec gaps captured as follow-up issues with links
+- The review cockpit path from step 5b, and its injection-flag and redaction counts
 
 ## 7. Never push directly to main
 

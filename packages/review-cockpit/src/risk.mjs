@@ -13,7 +13,7 @@ export const CATEGORIES = [
     key: 'auth', title: 'Authentication & authorization',
     ask: 'Does every new or changed path still check who the caller is and what they may do?',
     path: /(^|\/)(auth|authn|authz|login|logout|session|sessions|oauth|sso|jwt|passport|rbac|acl|middleware)(\/|\.|$)/i,
-    line: /\b(authenticat\w*|authori[sz]\w*|jwt|oauth|session|passw(or)?d|bcrypt|argon2|csrf|login|isAdmin|role[sd]?|permission[s]?|verifyToken|access[_-]?token)\b/i,
+    line: /\b(authenticat\w*|authori[sz]\w*|jwt|oauth|passw(or)?d|bcrypt|argon2|csrf|isAdmin|verifyToken|access[_-]?token|setCookie|session(Id|Token|Secret))\b/i,
   },
   {
     key: 'data', title: 'Data access',
