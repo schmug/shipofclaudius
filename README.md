@@ -22,6 +22,7 @@ Each workflow is a self-contained JavaScript file that begins with an `export co
 | [`issue-research-fanout.js`](.claude/workflows/issue-research-fanout.js) | `issue-research-fanout` | Web-enabled fan-out over the `RESEARCH` bucket: one agent per issue investigates (codebase + `gh` + web) and returns a verdict, aiming to move research issues to `GREEN` with an implementable spec. Read-only on GitHub. |
 | [`pr-triage-fanout.js`](.claude/workflows/pr-triage-fanout.js) | `pr-triage-fanout` | Read-only fan-out: one agent per open PR → `MERGE` / `CLOSE` / `REBASE` / `FIX_CI` / `COMMENT` / `AWAITING_HUMAN` / `ESCALATE`, with a CI verdict, mergeability, and comment state. Triages only your own PRs (the authenticated `gh` user by default). |
 | [`pr-review-fanout.js`](.claude/workflows/pr-review-fanout.js) | `pr-review-fanout` | Read-only deep review of **one** PR's diff (the canonical review pattern: fan out review dimensions → adversarially verify each finding → synthesize). One review agent per dimension (correctness, security, error-handling, tests, types/API, perf) finds findings over the resolved diff; each finding is independently verified by a skeptic (refuted/low-confidence dropped); survivors are deduped, confidence-filtered, and written to one HTML + markdown review, every finding traced to `file:line`. Sits behind pr-triage's `COMMENT` verdict — reviews and reports only, never comments/merges. |
+| [`pr-review-cockpit.js`](.claude/workflows/pr-review-cockpit.js) | `pr-review-cockpit` | Builds one self-contained, offline HTML **review cockpit** for the current branch or a PR, for a human to open before approving: before/after iframes, screenshots with a pixel diff, the highlighted diff, a heuristic blast-radius graph, provenance from the Claude Code session that made the change, and a risk checklist for only the categories the diff touches. Redacts secrets first and flags text addressed to an AI. Read-only. See [PR review cockpit](#pr-review-cockpit). |
 | [`stacked-impl-lanes.js`](.claude/workflows/stacked-impl-lanes.js) | `stacked-impl-lanes` | Implements issue-lanes into review-only PRs (parallel if disjoint, sequential + stacked if hub-coupled), then gates each opened lane: a security-hardening review on invariant-touching lanes, a doc-freshness critic, and a read-only **adversarial defect-class critic** (one agent holding the whole taxonomy, required to report verbatim command output). A gated lane is barred from becoming the branch base its dependents stack onto — so an un-signed-off lane never becomes the foundation the rest of the stack is built and reviewed against. |
 | [`stacked-merge-walk.js`](.claude/workflows/stacked-merge-walk.js) | `stacked-merge-walk` | Lands a chain of stacked PRs onto a moving base: walks base-first, re-verifies mergeability + the required-check rollup read-only, rebases each child's own commits `--onto` the base after its parent squash-merges, resolves only mechanical docs/test-type conflicts (escalates real ones), gate-verifies, squash-merges, re-verifies the merged base post-merge (`red` and `missing` stop the walk; `green`, `disabled` and `unrunnable` continue), and prunes branches only once the whole stack lands. The terminal **write** step after `stacked-impl-lanes` opens the stack and `pr-triage-fanout` classifies it. |
 | [`merge-pr-with-gate.js`](.claude/workflows/merge-pr-with-gate.js) | `merge-pr-with-gate` | Gates **one** PR and squash-merges it only if green — a standalone, single-PR slice of `stacked-merge-walk`'s landing gate with the stacking/rebasing machinery removed. Re-verifies mergeStateStatus + the required-check rollup read-only (a cold `UNKNOWN` is **must-verify**, never a pass), then squash-merges only when required checks pass, the PR is mergeable, and no review blocks it — otherwise stages/escalates and merges nothing. Does **not** rebase or resolve conflicts (a BEHIND/DIRTY/blocked PR escalates to a human, or to `stacked-merge-walk` for a stack). **Writes** — stage-by-default; `execute: true` is the explicit approval that merges. |
@@ -269,6 +270,49 @@ The specificity mod is TypeScript and is tested by the `claude` CLI rather than 
 
 `tests/factory-gate.test.mjs` is the odd one out: the merge gate is pure, model-free code, so there is nothing to simulate — those are ordinary unit tests, and for every condition there is a case proving that missing, ambiguous, or unknown input **fails closed**. The two factory sims additionally import the **real** gate and assert across the boundary: `factory-issue-fix`'s `evidence` block is fed to the real `checkFixtureEvidence`, and `factory-land`'s in-code condition list is compared against the package's `CONDITION_ORDER` — so the gate and its callers cannot drift apart silently.
 
+## PR review cockpit
+
+`pr-review-cockpit` answers "what am I approving?" in one file. It writes `.review/cockpit-<shortsha>.html` (git-ignored; if the reviewed repo does not already ignore `.review/`, the CLI drops a `.review/.gitignore`) and returns the path. The file has no external dependencies at view time: a CSP meta blocks every fetch except the Try-it frames.
+
+| Tab | What it shows |
+|-----|---------------|
+| **Try it** | Before and after iframes with a shared route picker and a desktop/mobile toggle. Sites that send `X-Frame-Options` or `frame-ancestors` refuse to frame; each pane has an open-in-new-tab link for that case. Empty state when no URLs are given. |
+| **Visual** | Per-route, per-viewport (desktop 1280, mobile 390) before/after screenshots and a pixel diff with the changed-pixel percentage, all embedded as data URIs. Needs Playwright (resolved from the repo, then the global npm root) and both URLs; otherwise it shows why it skipped. |
+| **Code** | The diff, collapsible per file, line-numbered and lightly highlighted. **Raw diff** in the header opens the full unified diff (with a download link) from every tab. |
+| **Blast radius** | Changed files, files that reference them (1–2 hops, ripgrep or grep), and touched tests. Rendered with cytoscape inlined into the file when it can be fetched from cdnjs and matches the pinned SHA-256; otherwise a built-in SVG. Labelled heuristic. |
+| **Why** | The Claude Code sessions that edited the changed files, found under `~/.claude/projects/<repo slug>*` (or `CLAUDE_CONFIG_DIR`): user prompts, plan/checklist calls, each edit mapped to the diff hunks it produced, files read but not changed, and the test/build/lint commands run with pass/fail. |
+| **Approve** | A risk checklist generated only for categories the diff touches (auth, data access, dependencies/lockfiles, secrets/config, CI, permissions/hooks), each item linking to its hunks; the possible-prompt-injection flag; an external reviewer verdict when given; the session's last checks; the redaction report; and a model summary boxed and labelled as **not evidence**. |
+
+**Invocation.**
+
+```text
+/shipofclaudius:pr-review-cockpit                      # HEAD vs merge-base with main
+/shipofclaudius:pr-review-cockpit 412                  # a PR, via `gh api` REST (works where GraphQL is blocked)
+/shipofclaudius:pr-review-cockpit main..feat/x before=https://example.com after=http://localhost:8787 routes=/,/pricing
+```
+
+```js
+Workflow({ name: 'shipofclaudius:pr-review-cockpit', args: {
+  base, head,            // git refs; default merge-base(HEAD, origin/main|main) .. HEAD
+  pr, repo,              // or a PR number (repo defaults to the origin remote)
+  beforeUrl, afterUrl,   // optional, http(s) only; skip both and the visual tabs say so
+  routes: ['/', '/pricing'],
+  verdict,               // optional external reviewer verdict: a JSON file path, or an object
+  transcripts,           // optional transcript directory override
+  noCapture, noTranscripts, readonlyAgent,
+} })
+```
+
+Without a model, the CLI builds the same file minus the summary: `node packages/review-cockpit/bin/cockpit.mjs build [--base …] [--pr …] [--before-url … --after-url … --routes /,/x] [--verdict file.json]`.
+
+**How it is put together.** All deterministic work is [`packages/review-cockpit`](packages/review-cockpit/) (Node built-ins, unit-tested by `tests/review-cockpit.test.mjs`). The workflow adds the summary only: a read-only relay runs the fixed `collect` command, which writes the redacted bundle and digest; a second relay returns the digest verbatim with a fresh nonce, and one read-only agent summarizes it inside the nonce fence behind the anti-injection preamble (if the digest cannot be relayed, for example because a safety classifier trips on attacker text, the cockpit renders without a summary); a second relay runs the fixed `render` command, receiving the summary as hex so it never reads the untrusted text. Every interpolated argument is validated and single-quoted. The CLI is located in the *installed* plugin first; a reviewed tree's own `packages/review-cockpit` runs only when that tree is this plugin, so a PR cannot swap in its own cockpit.
+
+**Guardrails.** Redaction runs once, at collect time, over the diff, commit subjects and every transcript string, before anything is written: private keys, AWS/GitHub/Slack/Google/Stripe/`sk-` keys, JWTs, bearer tokens, URL credentials, `secret = "…"`-style assignments, `*_TOKEN=…` env lines and non-noreply emails. The Approve tab and the CLI's output report what was removed by kind and source. Added lines that read as text addressed to an AI ("ignore previous instructions", "note to the AI reviewer", chat-template tokens) raise the possible-prompt-injection flag, independently of the model.
+
+**Known limitations.** The graph is grep-based and over-reports common stems. Transcript provenance misses edits made through shell commands, and transcripts exist only on the machine that ran the session (run the cockpit there). The iframes share a route, not scroll or clicks. Visual capture is viewport-sized, not full-page. Risk categories are path and keyword heuristics. A PR whose head is not fetched locally gets its diff from the API but no graph. Redaction is pattern-based and can miss a bespoke secret format.
+
+**Toward production-grade.** A hosted cockpit per PR (an Access-gated Worker that renders the bundle) instead of a local file; a same-origin proxy so the before/after panes can sync scroll, clicks and navigation; real import graphs per language (TypeScript's resolver, Python's `ast`, `go list -deps`) plus coverage-based test impact; Cloudflare Browser Rendering for captures so no local Chromium is needed, with full-page and per-component shots; a structured provenance index written by a hook at session end instead of parsing transcripts after the fact; and an entropy-plus-verifier secret scanner in place of regexes.
+
 ## The software factory
 
 `factory-issue-fix` + the factory Action ([`.factory/templates/factory.yml`](.factory/templates/factory.yml)) + [`packages/factory-gate`](packages/factory-gate) are one pipeline: an autonomous loop that takes a GitHub issue, **reproduces** it, **diagnoses** the root cause, independently **verifies** it is a real defect rather than intended behaviour, **fixes** it behind a failing-test-first discipline, and merges only when a deterministic, model-free gate says every safety condition holds. `factory-land` runs the same gate from a session as an advisory preview; it never merges. The contract is [`docs/specs/2026-08-05-software-factory-design.md`](docs/specs/2026-08-05-software-factory-design.md).
@@ -375,6 +419,7 @@ shipofclaudius/
 │       ├── issue-research-fanout.js
 │       ├── issue-triage-fanout.js
 │       ├── merge-pr-with-gate.js
+│       ├── pr-review-cockpit.js
 │       ├── pr-review-fanout.js
 │       ├── pr-triage-fanout.js
 │       ├── routine-anti-noise.js
@@ -388,7 +433,7 @@ shipofclaudius/
 │       ├── factory.yml            #   → .github/workflows/factory.yml
 │       ├── gate.example.json      #   → .factory/gate.json
 │       └── setup-labels.sh        #   → .factory/setup-labels.sh
-├── skills/                        # `workflow: none` process skills only — the 18 workflows are
+├── skills/                        # `workflow: none` process skills only — the 19 workflows are
 │   │                              #   registered plugin commands, so no skill wraps one; some bundle references/
 │   └── factory-intake/            # the process skill that also carries a project template set
 │       ├── THREAT_MODEL.md        #   scaffold + skill-half invariants (sits beside scaffold/, so it is never copied)
@@ -399,6 +444,9 @@ shipofclaudius/
 │   │   ├── bin/gate.mjs           #   CLI — exit 0 merge / 2 escalate / 1 the gate broke
 │   │   ├── bin/build-input.mjs    #   CLI — fetches a PR's gate facts with `gh`
 │   │   └── src/                   #   glob, extract, config, build-input, gate-core
+│   ├── review-cockpit/            # PR review cockpit: diff, graph, transcripts, redaction, capture, HTML (no dependencies)
+│   │   ├── bin/cockpit.mjs        #   CLI — build | collect | render
+│   │   └── src/                   #   diff, redact, risk, graph, transcripts, capture, collect, render
 │   └── specificity/               # a separate plugin: the prompt-specificity mod (TypeScript, function hooks)
 │       ├── .claude-plugin/plugin.json # manifest + userConfig (mode, contextMessages)
 │       ├── hooks/register.tsx     #   prompt.submit, ui.render (SessionMode chip, Pane), /specificity
@@ -420,6 +468,8 @@ shipofclaudius/
     ├── issue-research-sim.test.mjs # simulates issue-research-fanout.js
     ├── merge-pr-with-gate.test.mjs # simulates merge-pr-with-gate.js
     ├── pr-review-sim.test.mjs      # simulates pr-review-fanout.js
+    ├── review-cockpit.test.mjs     # UNIT-tests packages/review-cockpit
+    ├── review-cockpit-sim.test.mjs # simulates pr-review-cockpit.js (relays run the real CLI)
     ├── pr-triage-sim.test.mjs      # simulates pr-triage-fanout.js
     ├── routine-anti-noise.test.mjs # simulates routine-anti-noise.js
     ├── security-diff-sim.test.mjs  # simulates security-diff-scan.js
