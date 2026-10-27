@@ -99,6 +99,12 @@ test('the child works in its own worktree, off the default branch', async () => 
     'the worktree must be cut from the default branch, not the current one')
 })
 
+// #314: a branch cut from origin/$BASE tracks it by default, so a bare `git push` would hit the base.
+test('the issue branch is created with no upstream', async () => {
+  const md = await skill()
+  assert.match(md, /worktree add --no-track -b "issue-\$N"/, 'worktree add must pass --no-track')
+})
+
 // OBSERVED (/insights, 2026-09-23): at least 4 sessions fully re-implemented an issue a peer
 // session had already merged (e.g. schmug/clodcast #179/#180 for #174). The only PR lookup ran
 // after the child exited. The dedupe has to run before the launch, against a fresh fetch.

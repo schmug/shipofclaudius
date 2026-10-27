@@ -101,8 +101,12 @@ not launch; report the PR to the user and stop. A commit on `origin/$BASE` that 
 `#$N` is the same signal for a PR merged without the issue number in its title.
 
 ```bash
-git -C "$REPO" worktree add -b "issue-$N" "$WT" "origin/$BASE"
+git -C "$REPO" worktree add --no-track -b "issue-$N" "$WT" "origin/$BASE"
 ```
+
+`--no-track` matters: git's default `branch.autoSetupMerge` makes a branch cut from a
+remote-tracking ref track it, so a bare `git push` from the child would target `$BASE`.
+The child pushes with `git push -u origin issue-$N`, naming the branch explicitly.
 
 If the branch or worktree already exists, the issue is probably already being worked.
 Say so and stop rather than clobbering it.
