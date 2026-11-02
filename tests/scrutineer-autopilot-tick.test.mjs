@@ -253,8 +253,8 @@ test('own fix PR merged -> status fixed + note, stage marked_fixed, repo lastSca
   })
   await writeFile(join(W.stateDir, 'ledger.json'), JSON.stringify({ findings: { 10: { stage: 'awaiting_ci', pr: 5, repo: 'o/app' }, 11: { stage: 'awaiting_ci', pr: 6, repo: 'o/app' } }, repos: {}, budgetSamples: [] }))
   const exec = stubExec({
-    'pr view 5': JSON.stringify({ state: 'MERGED', mergeCommit: { oid: 'm5' } }),
-    'pr view 6': JSON.stringify({ state: 'OPEN', mergeCommit: null }),
+    'head=o:scrutineer/finding-10': branchPr(10, 5, { state: 'closed', mergedAt: '2026-10-31T00:00:00Z', sha: 'm5' }),
+    'head=o:scrutineer/finding-11': branchPr(11, 6),
     'api repos/o/app/commits/main': 'm5\n',
   })
   const r = await tick(W, { exec })
@@ -295,6 +295,8 @@ test('paused -> status paused, zero POSTs, no ledger written', async () => {
 })
 
 const triagedViable = (id, o = {}) => finding(id, { status: 'triaged', production_viability: 'VIABLE', ...o })
+// gh api pulls?head=o:scrutineer/finding-<id> answer: one same-repo PR on the finding's own branch.
+const branchPr = (id, number, { state = 'open', mergedAt = null, sha = null } = {}) => JSON.stringify([{ number, state, merged_at: mergedAt, merge_commit_sha: sha, head: { ref: `scrutineer/finding-${id}`, repo: { full_name: 'o/app' } } }])
 const L0 = (findings, repos = {}) => JSON.stringify({ findings, repos, budgetSamples: [] })
 
 test('paused: no agentItems at all; fix and regate candidates recorded skipped: paused', async () => {
@@ -311,7 +313,7 @@ test('paused: no agentItems at all; fix and regate candidates recorded skipped: 
   }
   assert.deepEqual(await run([triagedViable(7)], verifiedSecure(7)), [[7, 'fix']])
   assert.deepEqual(await run([triagedViable(11)], verifiedSecure(11), { 11: { stage: 'awaiting_ci', pr: 6, repo: 'o/app' } },
-    { 'pr view 6': JSON.stringify({ state: 'OPEN', mergeCommit: null }) }), [[11, 'regate']])
+    { 'head=o:scrutineer/finding-11': branchPr(11, 6) }), [[11, 'regate']])
 })
 
 test('dry run: agent items are kept and marked would:true', async () => {
@@ -325,7 +327,7 @@ test('dry run: agent items are kept and marked would:true', async () => {
 test('a failed prepare on a PR-stage entry still marks the repo busy: no second fix item', async () => {
   const W = await world({ findings: [triagedViable(10), triagedViable(11)], scans: [deepDive(), ...verifiedSecure(10), ...verifiedSecure(11)] })
   await writeFile(join(W.stateDir, 'ledger.json'), L0({ 10: { stage: 'awaiting_ci', pr: 5, repo: 'o/app' } }))
-  const r = await tick(W, { exec: stubExec({ 'pr view 5': new Error('gh: HTTP 502') }) })
+  const r = await tick(W, { exec: stubExec({ 'head=o:scrutineer/finding-10': new Error('gh: HTTP 502') }) })
   await W.stub.close()
   assert.equal(r.actions.find((a) => a.findingId === 10).result, 'failed')
   assert.equal(r.agentItems.filter((i) => i.kind === 'fix').length, 0)
@@ -386,6 +388,66 @@ test('carry 3: a skipped entry without a PR number is resolved through prForBran
   assert.ok(ex.calls.some((c) => c.includes('repos/o/app/pulls -f head=o:scrutineer/finding-13')), ex.calls.join('\n'))
   assert.equal(W.posts().find((p) => p.path === '/findings/13/status').body.status, 'fixed')
   assert.equal((await ledgerOf(W)).findings['13'].pr, 31)
+})
+
+test('Ruling 18: an entry whose ledger pr points at a different PR is resolved by branch, and the ledger pr is corrected', async () => {
+  const W = await world({ findings: [triagedViable(14)], scans: [deepDive(), ...verifiedSecure(14)] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 14: { stage: 'awaiting_ci', pr: 99, repo: 'o/app' } }))
+  const ex = stubExec({ 'head=o:scrutineer/finding-14': branchPr(14, 41, { state: 'closed', mergedAt: '2026-10-31T00:00:00Z', sha: 'm41' }) })
+  await tick(W, { exec: ex })
+  await W.stub.close()
+  assert.ok(!ex.calls.some((c) => c.includes('pr view')), ex.calls.join('\n'))
+  const note = W.posts().find((p) => p.path === '/findings/14/notes')
+  assert.match(note.body.body, /pull\/41.*m41/)
+  assert.equal((await ledgerOf(W)).findings['14'].pr, 41)
+})
+
+const recordCli = (W, ...args) => promisify(execFile)('node', [join(ROOT, 'packages/scrutineer-autopilot/bin/tick.mjs'), '--state-dir', W.stateDir, '--config', join(W.stateDir, 'none.json'), ...args]).then((r) => ({ code: 0, ...r }), (e) => ({ code: e.code, stdout: e.stdout, stderr: e.stderr }))
+
+test('--record 5 {"outcome":"merged"} sets findings[5].stage = merged', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  const r = await recordCli(W, '--record', '5', '{"outcome":"merged"}')
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal((await ledgerOf(W)).findings['5'].stage, 'merged')
+})
+
+test('--record stores stop_rule, reason and a computed held_path, and never a PR number or url from the outcome JSON', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 6: { stage: 'patching', repo: 'o/app', pr: 3 } }))
+  const out = JSON.stringify({ outcome: 'held', stop_rule: 'breaking_change', reason: 'line one\nline two', held_path: '/etc/passwd', pr: 77, pr_url: 'https://evil.example/pull/77', test_output: 'x' })
+  const r = await recordCli(W, '--record', '6', out)
+  assert.equal(r.code, 0, r.stderr)
+  const e = (await ledgerOf(W)).findings['6']
+  assert.equal(e.stage, 'held')
+  assert.equal(e.stop_rule, 'breaking_change')
+  assert.equal(e.reason, 'line one')
+  assert.equal(e.held_path, join(W.stateDir, 'held', '6'))
+  assert.equal(e.pr, 3)
+  assert.equal(JSON.stringify(e).includes('evil.example'), false)
+  assert.equal(JSON.stringify(e).includes('77'), false)
+})
+
+test('--record rejects a bad finding id, outcome, stop_rule or JSON with exit 2 and no ledger write', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  for (const args of [['x1', '{"outcome":"merged"}'], ['5', '{"outcome":"opened"}'], ['5', '{"outcome":"stopped","stop_rule":"nope"}'], ['5', 'not json'], ['5', '[]']]) {
+    const r = await recordCli(W, '--record', ...args)
+    assert.equal(r.code, 2, `${args.join(' ')} -> ${r.code}`)
+  }
+  assert.equal(await exists(join(W.stateDir, 'ledger.json')), false)
+})
+
+test('--digest-sent writes lastDigestAt and keeps the rest of the ledger', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 6: { stage: 'held' } }))
+  const r = await recordCli(W, '--digest-sent')
+  assert.equal(r.code, 0, r.stderr)
+  const L = await ledgerOf(W)
+  assert.match(L.lastDigestAt, /^\d{4}-\d\d-\d\dT/)
+  assert.equal(L.findings['6'].stage, 'held')
 })
 
 test('carry 8: one finding POST fails, the tick records it and continues to the next finding', async () => {

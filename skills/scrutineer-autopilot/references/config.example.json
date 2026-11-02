@@ -1,0 +1,9 @@
+{
+  "owner": "your-gh-login",
+  "baseUrl": "http://127.0.0.1:8080",
+  "allowlist": ["your-gh-login/example-app", "your-gh-login/example-site"],
+  "repoPolicy": {
+    "your-gh-login/example-site": "stop"
+  },
+  "budget": {}
+}

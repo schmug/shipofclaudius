@@ -16,7 +16,7 @@ import { verifyOutcome, latestPatch, patchAttemptCount, reattackStatus, skillAtt
 import { readUsage, estimate, calibrate, canStart } from './budget.mjs'
 import { nextAction } from './lifecycle.mjs'
 import { openLedger, acquireLock, isPaused, writeRun } from './ledger.mjs'
-import { pollRepo, requiredChecks, prState, prForBranch } from './github.mjs'
+import { pollRepo, requiredChecks, prForBranch } from './github.mjs'
 import { chooseTiers, dueScan } from './tiers.mjs'
 
 const DAY = 86400e3
@@ -37,6 +37,8 @@ const CADENCE_MS = { weekly: 7 * DAY, monthly: 30 * DAY }
 const NOTE_PUBLISHED = 'autopilot: fix PR is the record; no advisory'
 const POST_METHODS = ['runFindingSkill', 'setStatus', 'addNote', 'scanRepo']
 export const RELAY_FIELDS = Object.freeze(['title', 'severity', 'location', 'cwe', 'suggested_fix', 'suggested_fix_commit', 'breaking_change', 'breaking_change_rationale'])
+export const OUTCOMES = Object.freeze(['merged', 'awaiting_ci', 'held', 'stopped', 'failed', 'skipped'])
+export const STOP_RULES = Object.freeze(['security_review', 'breaking_change', 'behaviour', 'no_gate', 'merge_escalated', 'policy_stop'])
 export const EXIT = Object.freeze({ ok: 0, paused: 0, locked: 0, 'scrutineer-too-old': 2, 'scrutineer-down': 2, 'budget-unavailable': 2 })
 
 const toMs = (now) => (typeof now === 'function' ? now() : now instanceof Date ? now.getTime() : now ?? Date.now())
@@ -47,6 +49,53 @@ const ownBranch = (id) => `scrutineer/finding-${id}`
 
 export function relayFields(f) {
   return Object.fromEntries(RELAY_FIELDS.map((k) => [k, f[k] ?? '']))
+}
+
+// `tick.mjs --record <findingId> <outcome-json>` (Ruling 18): store a scrutineer-fix-pr outcome as the entry's stage.
+// Only the outcome enum, the stop_rule enum, the first line of reason (capped) and a held_path computed from stateDir
+// are kept. A PR number or URL in the outcome JSON is never stored: the tick resolves the PR by branch. Invalid input
+// throws RecordError and writes nothing.
+export class RecordError extends Error {}
+export async function recordOutcome(stateDir, findingId, outcomeJson, { now = Date.now() } = {}) {
+  const id = String(findingId)
+  if (!/^\d+$/.test(id)) throw new RecordError(`finding id must be digits, got ${JSON.stringify(id).slice(0, 40)}`)
+  let o
+  try { o = typeof outcomeJson === 'string' ? JSON.parse(outcomeJson) : outcomeJson } catch { throw new RecordError('outcome is not valid JSON') }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new RecordError('outcome must be a JSON object')
+  if (!OUTCOMES.includes(o.outcome)) throw new RecordError(`outcome must be one of ${OUTCOMES.join(', ')}`)
+  if (o.stop_rule != null && !STOP_RULES.includes(o.stop_rule)) throw new RecordError(`stop_rule must be one of ${STOP_RULES.join(', ')}`)
+  const lock = await acquireLock(stateDir, { now: toMs(now) })
+  if (!lock.ok) throw new Error('a tick is running (locked); retry after it finishes')
+  try {
+    const ledger = await openLedger(stateDir)
+    const e = (ledger.data.findings[id] ??= {})
+    e.stage = o.outcome
+    for (const k of ['stop_rule', 'reason', 'held_path']) delete e[k]
+    if (o.stop_rule) e.stop_rule = o.stop_rule
+    // eslint-disable-next-line no-control-regex
+    const reason = typeof o.reason === 'string' ? o.reason.split('\n')[0].replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200) : ''
+    if (reason) e.reason = reason
+    if (o.outcome === 'held') e.held_path = join(stateDir, 'held', id)
+    e.recordedAt = isoOf(toMs(now))
+    await ledger.save()
+    return e
+  } finally {
+    await lock.release()
+  }
+}
+
+// `tick.mjs --digest-sent`: the skill sends at most one waiting-items digest per day, tracked here.
+export async function markDigestSent(stateDir, { now = Date.now() } = {}) {
+  const lock = await acquireLock(stateDir, { now: toMs(now) })
+  if (!lock.ok) throw new Error('a tick is running (locked); retry after it finishes')
+  try {
+    const ledger = await openLedger(stateDir)
+    ledger.data.lastDigestAt = isoOf(toMs(now))
+    await ledger.save()
+    return ledger.data.lastDigestAt
+  } finally {
+    await lock.release()
+  }
 }
 
 // Backstop for dry runs: every POST method throws instead of reaching Scrutineer.
@@ -232,11 +281,13 @@ function pendingEnqueue(entry, mine, t) {
 }
 
 async function prContext(tk, f, entry, repo) {
-  const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: entry.pr ?? null, heldBranchExists: false, now: tk.iso }
+  const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: null, heldBranchExists: false, now: tk.iso }
   if (PR_STAGES.has(entry.stage)) {
-    const p = entry.pr ? await prState(repo.key, entry.pr, { exec: tk.exec })
-      : (entry.stage === 'skipped' || entry.stage === 'held') ? await prForBranch(repo.key, ownBranch(f.id), { exec: tk.exec }) : null
-    if (p) { ctx.prState = p.state; ctx.mergeSha = p.mergeSha ?? ctx.mergeSha; ctx.pr = p.number ?? ctx.pr }
+    // Ruling 18: the PR is always resolved by branch (same-repo, server-filtered), never from a ledger number that
+    // `--record` or a hand edit could have pointed elsewhere. The resolved number is written back for the regate item.
+    const p = await prForBranch(repo.key, ownBranch(f.id), { exec: tk.exec })
+    if (p) { ctx.prState = p.state; ctx.mergeSha = p.mergeSha ?? ctx.mergeSha; ctx.pr = p.number; entry.pr = p.number }
+    else delete entry.pr
   }
   if (entry.stage === 'held') ctx.heldBranchExists = await exists(join(tk.config.stateDir, 'held', String(f.id)))
   return ctx

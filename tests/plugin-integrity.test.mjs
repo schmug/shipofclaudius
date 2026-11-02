@@ -628,10 +628,12 @@ test('Gate A and the critic fallback dispatch the shipped reviewer by its namesp
   const prefix = `${pluginName}:`
   const shipped = await shippedAgentNames()
   const skills = new Set(await skillNames())
+  const workflows = new Set(await workflowNames())
   for (const name of skills) {
     const md = await read(`skills/${name}/SKILL.md`)
     for (const m of md.matchAll(new RegExp(`${pluginName}:([\\w-]+)`, 'g'))) {
       if (skills.has(m[1])) continue
+      if (workflows.has(m[1])) continue // a Workflow({ name: '<plugin>:<workflow>' }) call, not an agent dispatch
       assert.ok(shipped.has(m[1]),
         `skills/${name}/SKILL.md dispatches "${prefix}${m[1]}" but no .claude/agents/*.md declares \`name: ${m[1]}\``)
     }
