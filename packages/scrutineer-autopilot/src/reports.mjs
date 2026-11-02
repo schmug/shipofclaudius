@@ -39,6 +39,20 @@ export function latestPatch(scans, findingId) {
   return latest ? { scanId: latest.id, finishedAt: latest.finished_at } : null
 }
 
+// Counts scans of one skill for a finding by outcome. 'done' is done; 'failed' is failed or cancelled (queued/running
+// scans count as neither). since: ISO time; only scans created strictly after it count.
+export function skillAttempts(scans, findingId, skill, { since } = {}) {
+  const cutoff = since === undefined ? null : time(since)
+  const out = { done: 0, failed: 0 }
+  for (const s of scans ?? []) {
+    if (!s || s.skill_name !== skill || s.finding_id !== findingId) continue
+    if (cutoff !== null) { const created = time(s.created_at); if (created === null || created <= cutoff) continue }
+    if (s.status === 'done') out.done++
+    else if (s.status === 'failed' || s.status === 'cancelled') out.failed++
+  }
+  return out
+}
+
 export function patchAttemptCount(scans, findingId) {
   return done(scans, 'patch', findingId).length
 }

@@ -6,7 +6,7 @@
 // park actions always carry a note starting "autopilot: ".
 
 const OUT_OF_SCOPE = new Set(['rejected', 'duplicate', 'published'])
-const PR_STAGES = new Set(['stopped', 'opened', 'awaiting_ci'])
+const PR_STAGES = new Set(['stopped', 'opened', 'awaiting_ci', 'skipped'])
 const BAD_VIABILITY = new Set(['NON_VIABLE', 'SAMPLE_OR_TEST'])
 const GOOD_VIABILITY = new Set(['VIABLE', 'CONDITIONAL_VIABLE'])
 const BAD_REVALIDATE = new Set(['false_positive', 'uncertain', 'inconclusive'])
@@ -32,6 +32,19 @@ function parkedUnchanged(f, entry) {
   return updated <= parkedAt
 }
 
+// Enqueue guard (Ruling 13): a skill whose scans failed twice is parked; a critic that finished but left
+// production_viability empty is parked. snap.attempts may be absent (all zeros).
+const MAX_FAILED_SCANS = 2
+const attemptsOf = (s, skill) => ({ done: 0, failed: 0, ...(s.attempts?.[skill] ?? {}) })
+function enqueue(skill) {
+  return (s) => {
+    const a = attemptsOf(s, skill)
+    if (skill === 'critic' && a.done >= 1) return park('critic finished without a production_viability verdict')
+    if (a.failed >= MAX_FAILED_SCANS) return park(`${skill} scan failed ${a.failed} times`)
+    return act(skill)
+  }
+}
+
 const isHigh = (f) => f.severity === 'High' || f.severity === 'Critical'
 const isNew = (f) => f.status === 'new' || f.status === 'enriched'
 
@@ -47,7 +60,7 @@ const RULES = [
   // ---- post-fix stages (no enqueue) ----
   ['fix PR merged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'MERGED', () => act('mark_fixed')],
   ['fix PR closed unmerged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'CLOSED', () => park('fix PR closed unmerged')],
-  ['held fix discarded', (s, e, c) => e.stage === 'held' && !c.heldBranchExists, () => park('held fix discarded')],
+  ['held fix discarded', (s, e, c) => e.stage === 'held' && !c.heldBranchExists && c.prState !== 'OPEN', () => park('held fix discarded')],
   ['fix PR open or held, waiting for Schmug', (s, e) => PR_STAGES.has(e.stage) || e.stage === 'held', () => act('wait', { reason: 'fix PR awaiting human' })],
   ['stage merged', (s, e) => e.stage === 'merged', () => act('mark_fixed')],
   ['fixed and marked', (s, e) => s.finding.status === 'fixed' && e.stage === 'marked_fixed', () => act('mark_published')],
@@ -63,7 +76,7 @@ const RULES = [
   // ---- new / enriched ----
   ['new: already fixed', (s) => isNew(s.finding) && (s.verify === 'fixed' || s.finding.last_revalidate_verdict === 'already_fixed'),
     (s) => park(`already fixed (${verdicts(s.finding, s.verify)})`)],
-  ['new: not verified yet', (s) => isNew(s.finding) && s.verify === null, () => act('verify')],
+  ['new: not verified yet', (s) => isNew(s.finding) && s.verify === null, enqueue('verify')],
   ['new: verify not confirmed', (s) => isNew(s.finding) && s.verify !== 'confirmed',
     (s) => park(`verify did not confirm (${verdicts(s.finding, s.verify)})`)],
   ['new: revalidate bad', (s) => isNew(s.finding) && BAD_REVALIDATE.has(s.finding.last_revalidate_verdict),
@@ -74,31 +87,29 @@ const RULES = [
     () => act('triage', { note: NOTE_AGREE })],
   ['new High: disagree', (s) => isNew(s.finding) && isHigh(s.finding),
     (s) => park(`verdicts disagree (${verdicts(s.finding, s.verify)})`)],
-  ['new Medium/Low: critic first', (s) => isNew(s.finding) && !s.finding.production_viability, () => act('critic')],
+  ['new Medium/Low: critic first', (s) => isNew(s.finding) && !s.finding.production_viability, enqueue('critic')],
   ['new Medium/Low: viable', (s) => isNew(s.finding) && GOOD_VIABILITY.has(s.finding.production_viability),
     () => act('triage', { note: NOTE_NO_REVALIDATE })],
   ['new Medium/Low: unknown viability', (s) => isNew(s.finding),
     (s) => park(`unrecognised production viability ${s.finding.production_viability}`)],
 
   // ---- triaged ----
-  ['triaged: critic first', (s) => s.finding.status === 'triaged' && !s.finding.production_viability, () => act('critic')],
+  ['triaged: critic first', (s) => s.finding.status === 'triaged' && !s.finding.production_viability, enqueue('critic')],
   ['triaged: unknown viability', (s) => s.finding.status === 'triaged' && !GOOD_VIABILITY.has(s.finding.production_viability),
     (s) => park(`unrecognised production viability ${s.finding.production_viability}`)],
-  ['triaged: no patch', (s) => s.finding.status === 'triaged' && s.patchAttempts === 0, () => act('patch')],
-  ['triaged: no reattack', (s) => s.finding.status === 'triaged' && s.reattack === null, () => act('reattack')],
-  ['triaged: verified_secure, fix PR exists', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && e.stage === 'skipped',
-    () => act('wait', { reason: 'fix workflow skipped: PR exists for the branch' })],
+  ['triaged: no patch', (s) => s.finding.status === 'triaged' && s.patchAttempts === 0, enqueue('patch')],
+  ['triaged: no reattack', (s) => s.finding.status === 'triaged' && s.reattack === null, enqueue('reattack')],
   ['triaged: verified_secure, fix workflow ended', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && !FIXABLE_STAGES.has(e.stage),
     (s, e) => park(`fix workflow ended '${e.stage}'`)],
   ['triaged: verified_secure, repo busy', (s, e, c) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && c.repoHasOpenFixPr,
     () => act('wait', { reason: 'repo already has an open fix PR' })],
   ['triaged: verified_secure', (s) => s.finding.status === 'triaged' && s.reattack === 'verified_secure', () => act('fix')],
   ['triaged: bypassed, retry patch', (s) => s.finding.status === 'triaged' && s.reattack === 'bypassed_patch' && s.patchAttempts < MAX_PATCH_ATTEMPTS,
-    () => act('patch')],
+    enqueue('patch')],
   ['triaged: bypassed, out of attempts', (s) => s.finding.status === 'triaged' && s.reattack === 'bypassed_patch',
     (s) => park(`patch bypassed after ${s.patchAttempts} attempts`)],
   ['triaged: incomplete, retry reattack', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verification_incomplete' && (e.reattackRetries ?? 0) < MAX_REATTACK_RETRIES,
-    () => act('reattack')],
+    enqueue('reattack')],
   ['triaged: incomplete, out of retries', (s) => s.finding.status === 'triaged' && s.reattack === 'verification_incomplete',
     () => park('reattack verification incomplete after retry')],
 ]

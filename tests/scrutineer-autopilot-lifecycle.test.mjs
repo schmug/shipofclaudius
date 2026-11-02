@@ -34,6 +34,7 @@ test('verified_secure with workflow-outcome stage: failed/unknown -> park verbat
   assert.deepEqual(run(s, { stage: 'failed' }), { type: 'park', note: "autopilot: fix workflow ended 'failed'" })
   assert.deepEqual(run(s, { stage: 'weird' }), { type: 'park', note: "autopilot: fix workflow ended 'weird'" })
   assert.equal(run(s, { stage: 'skipped' }).type, 'wait')
+  assert.equal(run(s, { stage: 'skipped' }, { prState: 'OPEN' }).type, 'wait')
   for (const stage of [undefined, 'triaged', 'patching', 'reattacking']) assert.equal(run(s, { stage }).type, 'fix')
 })
 test('Medium confirmed with empty viability -> critic; VIABLE -> triage with exact note', () => {
@@ -130,6 +131,34 @@ test('rejected/duplicate/published status -> skip', () => {
 test('verify fixed or already_fixed -> park with autopilot note', () => {
   const a = run(snap({}, { verify: 'fixed' }))
   assert.equal(a.type, 'park'); assert.ok(a.note.startsWith('autopilot: '))
+})
+test('skipped + MERGED -> mark_fixed; skipped + CLOSED -> park', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  assert.equal(run(s, { stage: 'skipped' }, { prState: 'MERGED' }).type, 'mark_fixed')
+  assert.deepEqual(run(s, { stage: 'skipped' }, { prState: 'CLOSED' }), { type: 'park', note: 'autopilot: fix PR closed unmerged' })
+})
+test('held + OPEN PR + branch missing -> wait; held + MERGED + branch missing -> mark_fixed', () => {
+  const s = snap({ status: 'triaged' })
+  assert.equal(run(s, { stage: 'held' }, { heldBranchExists: false, prState: 'OPEN' }).type, 'wait')
+  assert.equal(run(s, { stage: 'held' }, { heldBranchExists: false, prState: 'MERGED' }).type, 'mark_fixed')
+})
+const att = (skill, failed, done = 0) => ({ attempts: { verify: { done: 0, failed: 0 }, critic: { done: 0, failed: 0 }, patch: { done: 0, failed: 0 }, reattack: { done: 0, failed: 0 }, [skill]: { done, failed } } })
+test('verify failed twice -> park; once -> still verify', () => {
+  assert.deepEqual(run(snap({}, att('verify', 2))), { type: 'park', note: 'autopilot: verify scan failed 2 times' })
+  assert.equal(run(snap({}, att('verify', 1))).type, 'verify')
+})
+test('patch failed twice -> park', () => {
+  const f = { status: 'triaged', production_viability: 'VIABLE' }
+  assert.deepEqual(run(snap(f, att('patch', 2))), { type: 'park', note: 'autopilot: patch scan failed 2 times' })
+})
+test('critic done but viability still empty -> park; critic failed twice -> park', () => {
+  assert.deepEqual(run(snap({ severity: 'Medium' }, { verify: 'confirmed', ...att('critic', 0, 1) })),
+    { type: 'park', note: 'autopilot: critic finished without a production_viability verdict' })
+  assert.equal(run(snap({ status: 'triaged' }, att('critic', 2))).type, 'park')
+})
+test('reattack failed once -> still reattack', () => {
+  const f = { status: 'triaged', production_viability: 'VIABLE' }
+  assert.equal(run(snap(f, { patchAttempts: 1, ...att('reattack', 1) })).type, 'reattack')
 })
 
 let failed = 0

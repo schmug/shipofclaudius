@@ -2,7 +2,7 @@
 // Mirrors Scrutineer internal/db/remediation.go RemediationPatchStatus.
 // Run:  node tests/scrutineer-autopilot-reports.test.mjs
 import assert from 'node:assert/strict'
-import { verifyOutcome, latestPatch, patchAttemptCount, reattackStatus } from '../packages/scrutineer-autopilot/src/reports.mjs'
+import { skillAttempts, verifyOutcome, latestPatch, patchAttemptCount, reattackStatus } from '../packages/scrutineer-autopilot/src/reports.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -109,6 +109,18 @@ test('reattackStatus: newest report inconclusive with an older clean report is v
   const older = reattack(clean(), { created_at: '2026-10-03T00:00:00Z', finished_at: '2026-10-03T00:30:00Z' })
   const newer = reattack(clean({ outcome: 'inconclusive' }), { created_at: '2026-10-04T00:00:00Z', finished_at: '2026-10-04T00:30:00Z' })
   assert.equal(reattackStatus([patch, older, newer], 7), 'verification_incomplete')
+})
+
+test('skillAttempts: counts done vs failed/cancelled for the finding and skill only', () => {
+  const s = [scan('verify'), scan('verify', { status: 'failed' }), scan('verify', { status: 'cancelled' }), scan('verify', { status: 'running' }),
+    scan('verify', { finding_id: 8, status: 'failed' }), scan('patch', { status: 'failed' })]
+  assert.deepEqual(skillAttempts(s, 7, 'verify'), { done: 1, failed: 2 })
+  assert.deepEqual(skillAttempts([], 7, 'verify'), { done: 0, failed: 0 })
+})
+test('skillAttempts: since keeps only scans created after it', () => {
+  const s = [scan('reattack', { status: 'failed', created_at: '2026-10-01T00:00:00Z' }), scan('reattack', { status: 'failed', created_at: '2026-10-05T00:00:00Z' }),
+    scan('reattack', { created_at: '2026-10-06T00:00:00Z' })]
+  assert.deepEqual(skillAttempts(s, 7, 'reattack', { since: '2026-10-02T00:00:00Z' }), { done: 1, failed: 1 })
 })
 
 // ---- runner ----
