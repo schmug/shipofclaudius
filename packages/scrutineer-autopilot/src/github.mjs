@@ -13,6 +13,13 @@ const isNotFound = (e) => /HTTP 404|Not Found/i.test(errText(e))
 
 const ms = (iso) => (iso ? Date.parse(iso) : -Infinity)
 
+// An autopilot fix PR is a scrutineer/finding-* branch in the repo itself. Anyone can open a fork PR with that
+// branch name on a public repo, so the name alone is never trusted: a fork PR must neither suppress a rescan
+// nor stand in for the autopilot's PR (merged -> fixed/published, closed -> park).
+const ownerOf = (key) => String(key).split('/')[0].toLowerCase()
+const isOwnFixPr = (key, p) => String(p.head?.ref ?? '').startsWith(OWN_PR_PREFIX)
+  && String(p.head?.repo?.full_name ?? '').toLowerCase() === String(key).toLowerCase()
+
 export async function pollRepo(key, since = {}, { exec }) {
   const repo = await ghJson(exec, ['api', `repos/${key}`])
   const defaultBranch = repo.default_branch
@@ -21,7 +28,7 @@ export async function pollRepo(key, since = {}, { exec }) {
 
   const pulls = await ghJson(exec, ['api', `repos/${key}/pulls?state=closed&sort=updated&direction=desc&per_page=20`])
   const mergedPrs = pulls
-    .filter((p) => p.merged_at && !String(p.head?.ref ?? '').startsWith(OWN_PR_PREFIX))
+    .filter((p) => p.merged_at && !isOwnFixPr(key, p))
     .filter((p) => ms(p.merged_at) > ms(since.prMergedAt))
     .map((p) => ({ number: p.number, mergedAt: p.merged_at, headRef: p.head?.ref ?? '' }))
 
@@ -60,8 +67,8 @@ export async function prState(key, pr, { exec }) {
 }
 
 export async function prForBranch(key, branch, { exec }) {
-  const list = await ghJson(exec, ['pr', 'list', '-R', key, '--head', branch, '--state', 'all', '--json', 'number,state,mergeCommit', '--limit', '1'])
-  if (!list.length) return null
-  const p = list[0]
+  const list = await ghJson(exec, ['pr', 'list', '-R', key, '--head', branch, '--state', 'all', '--json', 'number,state,mergeCommit,isCrossRepository,headRepositoryOwner', '--limit', '20'])
+  const p = list.find((x) => x.isCrossRepository === false && String(x.headRepositoryOwner?.login ?? '').toLowerCase() === ownerOf(key))
+  if (!p) return null
   return { number: p.number, state: p.state, mergeSha: p.mergeCommit?.oid ?? null }
 }

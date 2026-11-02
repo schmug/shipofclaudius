@@ -36,7 +36,7 @@ const repoRoutes = (visibility = 'public', pulls = [], rels = []) => ({
 
 test('pollRepo excludes autopilot finding PRs, keeps others', async () => {
   const { exec } = stub(repoRoutes('public', [
-    { number: 12, merged_at: '2026-10-30T00:00:00Z', head: { ref: 'scrutineer/finding-12' } },
+    { number: 12, merged_at: '2026-10-30T00:00:00Z', head: { ref: 'scrutineer/finding-12', repo: { full_name: 'o/app' } } },
     { number: 13, merged_at: '2026-10-31T00:00:00Z', head: { ref: 'feat/x' } },
     { number: 14, merged_at: null, head: { ref: 'feat/closed' } },
   ], [{ tag_name: 'v1', published_at: '2026-10-29T00:00:00Z' }]))
@@ -89,11 +89,28 @@ test('prState returns {state, mergeSha}', async () => {
   const open = stub({ 'pr view': JSON.stringify({ state: 'OPEN', mergeCommit: null }) })
   assert.deepEqual(await prState('o/app', 8, { exec: open.exec }), { state: 'OPEN', mergeSha: null })
 })
-test('prForBranch returns the PR, or null when none', async () => {
-  const { exec, calls } = stub({ 'pr list': JSON.stringify([{ number: 9, state: 'MERGED', mergeCommit: { oid: 'cafe' } }]) })
+const own = (o) => ({ isCrossRepository: false, headRepositoryOwner: { login: 'o' }, ...o })
+test('prForBranch returns the same-repo PR, or null when none', async () => {
+  const { exec, calls } = stub({ 'pr list': JSON.stringify([own({ number: 9, state: 'MERGED', mergeCommit: { oid: 'cafe' } })]) })
   assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec }), { number: 9, state: 'MERGED', mergeSha: 'cafe' })
-  assert.match(calls[0], /--head scrutineer\/finding-3 --state all --json number,state,mergeCommit --limit 1/)
+  assert.match(calls[0], /--head scrutineer\/finding-3 --state all --json number,state,mergeCommit,isCrossRepository,headRepositoryOwner/)
   assert.equal(await prForBranch('o/app', 'nope', { exec: stub({ 'pr list': '[]' }).exec }), null)
+})
+test('prForBranch ignores fork PRs with the branch name (cross-repo or foreign head owner)', async () => {
+  const fork = [{ number: 4, state: 'MERGED', mergeCommit: { oid: 'evil' }, isCrossRepository: true, headRepositoryOwner: { login: 'mallory' } }]
+  assert.equal(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(fork) }).exec }), null)
+  const spoof = [own({ number: 5, state: 'CLOSED', headRepositoryOwner: { login: 'mallory' } })]
+  assert.equal(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(spoof) }).exec }), null)
+  const both = [fork[0], own({ number: 9, state: 'OPEN', mergeCommit: null })]
+  assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(both) }).exec }), { number: 9, state: 'OPEN', mergeSha: null })
+})
+test('pollRepo counts a fork PR named scrutineer/finding-* as a rescan trigger', async () => {
+  const { exec } = stub(repoRoutes('public', [
+    { number: 20, merged_at: '2026-10-31T00:00:00Z', head: { ref: 'scrutineer/finding-1', repo: { full_name: 'mallory/app' } } },
+    { number: 21, merged_at: '2026-10-31T00:00:00Z', head: { ref: 'scrutineer/finding-2', repo: { full_name: 'O/App' } } },
+  ]))
+  const ev = await pollRepo('o/app', { sha: 'abc123' }, { exec })
+  assert.deepEqual(ev.mergedPrs.map((p) => p.number), [20])
 })
 
 test('chooseTiers: $10, estDiff 3 -> first diff (6), second weekly', () => {
