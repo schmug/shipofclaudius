@@ -48,13 +48,18 @@
 //   returns `git -C <clone> diff <sha>...HEAD` with a fresh nonce and Check sees it fenced. Before Check,
 //   the relayed diff's added/removed lines for each Scrutineer file must equal suggested_fix's as
 //   multisets (hunk headers, offsets and context ignored); any difference → failed. Then a blob check
-//   binds position too: a read-only relay applies Build's ${SCRATCH}fix.diff in a scratch worktree at
-//   BASE_SHA and prints `git hash-object` of that file plus `git diff --cached --raw --no-abbrev`; a
-//   second prints `git diff --raw --no-abbrev BASE_SHA CLONE_HEAD`. The script requires the fix file's
+//   binds position too. The clone is Build-controlled (its .git/config, hooks, fsmonitor and attribute
+//   drivers could run code), so both blob relays run git only in a FRESH repo under the scratch dir:
+//   `git init`, then `fetch --no-tags <clone> BASE_SHA CLONE_HEAD` (the clone is only a fetch source),
+//   every git under GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 with hooksPath, fsmonitor and
+//   attributesFile disabled. One relay checks out BASE_SHA detached, prints `hash-object --no-filters`
+//   of Build's ${SCRATCH}fix.diff, runs `apply --index` and `diff --cached --raw --no-abbrev`; the other
+//   prints `diff --raw --no-abbrev BASE_SHA CLONE_HEAD` from the fetched objects. Each removes its fresh
+//   repo on every exit path. The script requires the fix file's
 //   blob to equal its own git-blob SHA-1 of suggested_fix (so Build cannot have altered it) and each
 //   Scrutineer file's new blob and mode to match between the two. Workflow scripts cannot write files,
 //   so the fix file is Build's, verified by hash; no untrusted path or fix text enters a command.
-//   A mode, deletion or rename header in suggested_fix fails in Preflight.
+//   A mode, deletion (`deleted file mode` or `+++ /dev/null`) or rename header in suggested_fix fails in Preflight.
 //   weakened_control or suspicious_change (or a non-boolean answer) → stop_rule security_review:
 //   held on public repos, a stopped PR on private.
 // - Before any merge (fix and regate) read-only relays re-read the PR: base.ref must be the
@@ -367,7 +372,7 @@ if (!FIX.trim()) return done('failed', { reason: 'finding has no suggested_fix' 
 const SCRUT_FILES_RAW = [...new Set([...FIX.matchAll(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/gm)].map((m) => m[1]).filter(Boolean))].sort()
 if (SCRUT_FILES_RAW.length === 0) return done('failed', { reason: 'no files in suggested_fix' })
 // Every file in FIX is a Scrutineer file: a mode, deletion or rename/copy header is outside what the blob check covers.
-if (/^(new mode|old mode|deleted file mode|similarity index|rename from|copy from) /m.test(FIX)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
+if (/^(new mode|old mode|deleted file mode|similarity index|rename from|copy from) |^\+\+\+ \/dev\/null/m.test(FIX)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
 
 // Default branch and its tip SHA come from fixed read-only relays, never from an agent's report.
 const dbr = await agent(relayPrompt(`gh api repos/${REPO_SLUG} --jq .default_branch`, false),
@@ -486,17 +491,23 @@ const noLines = { add: [], del: [] }
 const sameLines = (f) => JSON.stringify(fixH.get(f) || noLines) === JSON.stringify(relH.get(f) || noLines)
 if (!SCRUT_FILES_RAW.every(sameLines)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
 // Blob check (position-exact): suggested_fix applied alone at BASE_SHA must give the same blob and mode as the clone
-// HEAD for every Scrutineer file. The scratch worktree is removed whatever happens; only fixed paths are in the command.
-const VERIFY = `${SCRATCH}verify`
+// HEAD for every Scrutineer file. All git runs in a fresh repo (never the Build-controlled clone's config, hooks or
+// worktree); the clone is only a fetch source. Paths come from the digit-only id; SHAs are validated (SHA_RE).
 const FIX_FILE = `${SCRATCH}fix.diff`
-const fixBlobs = await agent(relayPrompt(
-  `rm -rf "${VERIFY}"; git -C "${CLONE}" worktree add --detach "${VERIFY}" ${BASE_SHA} >/dev/null 2>&1 && ` +
-  `echo "FIXBLOB $(git hash-object "${FIX_FILE}")" && git -C "${VERIFY}" apply --check "${FIX_FILE}" && ` +
-  `git -C "${VERIFY}" apply "${FIX_FILE}" && git -C "${VERIFY}" add -A && echo APPLIED && ` +
-  `git -c core.quotePath=false -C "${VERIFY}" diff --cached --raw --no-abbrev ${BASE_SHA}; s=$?; ` +
-  `git -C "${CLONE}" worktree remove --force "${VERIFY}" >/dev/null 2>&1; exit $s`, false),
+const SAFE_GIT = 'env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null'
+const freshRepoCmd = (repo, body) =>
+  `rm -rf "${repo}"; ${SAFE_GIT} init -q "${repo}" && ` +
+  `${SAFE_GIT} -C "${repo}" fetch -q --no-tags "${CLONE}" ${BASE_SHA} ${CLONE_HEAD} && ${body}; s=$?; rm -rf "${repo}"; exit $s`
+const FIX_REPO = `${SCRATCH}verify-fix`
+const CLONE_REPO = `${SCRATCH}verify-clone`
+const fixBlobs = await agent(relayPrompt(freshRepoCmd(FIX_REPO,
+  `${SAFE_GIT} -C "${FIX_REPO}" checkout -q --detach ${BASE_SHA} && ` +
+  `echo "FIXBLOB $(${SAFE_GIT} -C "${FIX_REPO}" hash-object --no-filters "${FIX_FILE}")" && ` +
+  `${SAFE_GIT} -C "${FIX_REPO}" apply --check --index "${FIX_FILE}" && ${SAFE_GIT} -C "${FIX_REPO}" apply --index "${FIX_FILE}" && echo APPLIED && ` +
+  `${SAFE_GIT} -c core.quotePath=false -C "${FIX_REPO}" diff --cached --raw --no-abbrev ${BASE_SHA}`), false),
   { label: 'relay:fix-blobs', phase: 'Check', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
-const cloneBlobs = await agent(relayPrompt(`git -c core.quotePath=false -C "${CLONE}" diff --raw --no-abbrev ${BASE_SHA} ${CLONE_HEAD}`, false),
+const cloneBlobs = await agent(relayPrompt(freshRepoCmd(CLONE_REPO,
+  `${SAFE_GIT} -c core.quotePath=false -C "${CLONE_REPO}" diff --raw --no-abbrev ${BASE_SHA} ${CLONE_HEAD}`), false),
   { label: 'relay:clone-blobs', phase: 'Check', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const fixOut = fixBlobs && fixBlobs.exit_code === 0 ? str(fixBlobs.raw) : ''
 const fixFileSha = (fixOut.match(/^FIXBLOB ([0-9a-f]{40})\s*$/m) || [])[1]

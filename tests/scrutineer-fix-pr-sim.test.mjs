@@ -720,10 +720,25 @@ test('A: blob check — the fix applied at BASE_SHA in a scratch worktree must g
   assert.equal(ok.result.outcome, 'merged', 'equal blobs proceed')
   const fb = one(ok.calls, 'relay:fix-blobs'), cb = one(ok.calls, 'relay:clone-blobs')
   for (const r of [fb, cb]) assert.equal(r.opts.agentType, 'Explore')
-  assert.ok(fb.prompt.includes(`worktree add --detach "\${TMPDIR:-/tmp}/scrutineer-autopilot/42/verify" ${SHA}`), fb.prompt)
-  assert.ok(fb.prompt.includes('apply --check "${TMPDIR:-/tmp}/scrutineer-autopilot/42/fix.diff"'))
-  assert.ok(fb.prompt.includes('hash-object "${TMPDIR:-/tmp}/scrutineer-autopilot/42/fix.diff"'))
-  assert.ok(cb.prompt.includes(`diff --raw --no-abbrev ${SHA} ${HEAD_SHA}`))
+  const SCR = '${TMPDIR:-/tmp}/scrutineer-autopilot/42/'
+  const CLONE_Q = `"${SCR}repo"`
+  const SAFE = 'env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.attributesFile=/dev/null'
+  for (const [r, repo] of [[fb, `${SCR}verify-fix`], [cb, `${SCR}verify-clone`]]) {
+    const cmd = r.prompt.split('\n').find((l) => l.includes('git '))
+    assert.ok(cmd.includes(`${SAFE} init -q "${repo}"`), cmd)
+    assert.ok(cmd.includes(`${SAFE} -C "${repo}" fetch -q --no-tags ${CLONE_Q} ${SHA} ${HEAD_SHA}`), cmd)
+    assert.equal(cmd.split(CLONE_Q).length - 1, 1, 'the clone appears only as the fetch source')
+    assert.ok(!cmd.includes(`-C ${CLONE_Q}`), 'no git -C <clone>')
+    assert.ok(!/worktree/.test(cmd))
+    const gits = cmd.match(/(?:^|[;&(\s])(?:env [^;&]*?)?git /g) || []
+    assert.equal(gits.length, (cmd.split(SAFE).length - 1), `every git carries the env and -c overrides: ${cmd}`)
+    assert.ok(cmd.trimEnd().endsWith(`s=$?; rm -rf "${repo}"; exit $s`), 'fresh repo removed on every exit path')
+  }
+  assert.ok(fb.prompt.includes(`-C "${SCR}verify-fix" checkout -q --detach ${SHA}`))
+  assert.ok(fb.prompt.includes(`hash-object --no-filters "${SCR}fix.diff"`))
+  assert.ok(fb.prompt.includes(`apply --check --index "${SCR}fix.diff"`) && fb.prompt.includes(`apply --index "${SCR}fix.diff"`))
+  assert.ok(fb.prompt.includes(`-C "${SCR}verify-fix" diff --cached --raw --no-abbrev ${SHA}`))
+  assert.ok(cb.prompt.includes(`-C "${SCR}verify-clone" diff --raw --no-abbrev ${SHA} ${HEAD_SHA}`))
   for (const r of [fb, cb]) assert.ok(!r.prompt.includes('render(escape(q))') && !r.prompt.includes(HOSTILE_FIX_MARK), 'fix text is never in a command')
   const bad = {
     differingBlob: { 'relay:clone-blobs': () => ({ raw: rawLines(SUGGESTED_FIX, () => 'c'.repeat(40)), exit_code: 0 }) },
@@ -741,8 +756,10 @@ test('A: blob check — the fix applied at BASE_SHA in a scratch worktree must g
 })
 
 test('A: a mode, deletion or rename header in suggested_fix fails before any write agent', async () => {
-  for (const hdr of ['new mode 100755', 'deleted file mode 100644', 'similarity index 90%']) {
-    const fix = SUGGESTED_FIX.replace('--- a/src/search.js', `${hdr}\n--- a/src/search.js`)
+  const cases = ['new mode 100755', 'deleted file mode 100644', 'similarity index 90%'].map((hdr) => [hdr, SUGGESTED_FIX.replace('--- a/src/search.js', `${hdr}\n--- a/src/search.js`)])
+  // a deletion with no `deleted file mode` header: only `+++ /dev/null` marks it
+  cases.push(['+++ /dev/null', SUGGESTED_FIX.replace('+++ b/src/search.js', '+++ b/src/search.js\n--- a/src/old.js\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone')])
+  for (const [hdr, fix] of cases) {
     const { result, calls } = await runScript({ stubs: { 'relay:finding': () => ({ raw: JSON.stringify(relayFinding({ suggested_fix: fix })), nonce: NONCE, exit_code: 0 }) } })
     assert.equal(result.outcome, 'failed', hdr)
     assert.equal(result.reason, 'fix hunks differ from suggested_fix', hdr)
