@@ -16,10 +16,12 @@
 //   args.hasGate     true only when the default branch has required checks.
 //   args.binDir      directory holding finding.mjs. Required for mode 'fix'.
 //   args.buildModel / args.checkModel   default 'sonnet' / 'opus'; equal → throws.
-//   args.readonlyAgent  agentType for the relays and Check (default 'Explore').
+//   args.readonlyAgent  agentType for the read-only relays (default 'Explore'). Check always runs under shipofclaudius:security-hardening-reviewer.
 //
 // Returns { outcome: merged|awaiting_ci|opened|held|stopped|failed|skipped, pr_url, merge_sha,
-//           held_path, stop_rule: null|breaking_change|behaviour|no_gate|merge_escalated|policy_stop, reason }.
+//           held_path, stop_rule: null|security_review|breaking_change|behaviour|no_gate|merge_escalated|policy_stop,
+//           reason, test_output? }. test_output carries Build's red/green text for the run log only;
+//           it never goes into a PR body or a later prompt.
 //
 // INVARIANTS
 // - The script decides. stop_rule, hold-vs-ship and merge routing are computed here from enums
@@ -27,7 +29,14 @@
 //   decides whether to push or merge.
 // - The finding JSON comes only from the fixed relay `node "<binDir>/finding.mjs" <id>` (read-only
 //   agent, mints the nonce). It is UNTRUSTED: Build and Check see it only nonce-fenced behind
-//   INJECTION_GUARD. The Ship prompt gets only script-sanitized fields (CWE id, file path).
+//   INJECTION_GUARD. Outside the fence, prompts carry only script-sanitized values: CWE id and
+//   paths stripped to [A-Za-z0-9._/-] and capped at 120 chars. No diff-derived or agent-written
+//   text is interpolated into a shell command; the PR title and body reach gh via files.
+// - The changed-file list the script checks comes from a fixed read-only relay
+//   (`git -C <clone> diff --name-only <default>...HEAD`), never Build's report. Build's test paths
+//   must look like tests and must not touch CI, manifests, lockfiles or wrangler config.
+// - Check runs under security-hardening-reviewer; weakened_control or suspicious_change (or a
+//   non-boolean answer) → stop_rule security_review: held on public repos, a stopped PR on private.
 // - The token and its path never appear in a prompt; finding.mjs reads it itself.
 // - The PR number passed to merge-pr-with-gate comes from a fixed read-only `gh api ... pulls
 //   -f head=<owner>:<branch>` relay, filtered in script to head.repo.full_name === repo
@@ -47,8 +56,8 @@ export const meta = {
   phases: [
     { title: 'Preflight', detail: 'read-only: relay node finding.mjs <id> (mints a nonce; exit 3 → skipped), then gh pr list for an open scrutineer/finding-<id> PR (→ skipped)' },
     { title: 'Build', detail: 'write agent, no isolation: clone to ${TMPDIR:-/tmp}/scrutineer-autopilot/<id>/repo, branch, git apply --3way, regression test red→green, diff-files assertion, local gates, commit, no push' },
-    { title: 'Check', detail: 'read-only agent on checkModel: behaviour_change none | changed | unknown with evidence' },
-    { title: 'Ship', detail: 'script computes stop_rule; public stop → write agent moves the clone to ~/.claude/scrutineer-autopilot/held/<id>/; otherwise push + gh pr create, then a read-only relay resolves the PR number' },
+    { title: 'Check', detail: 'read-only security-hardening-reviewer on checkModel: behaviour_change none | changed | unknown, weakened_control, suspicious_change, with evidence' },
+    { title: 'Ship', detail: 'script computes stop_rule; public stop → write agent moves the clone to ~/.claude/scrutineer-autopilot/held/<id>/; otherwise a write agent writes the script-built title/body files, a write agent pushes + gh pr create --body-file, then a read-only relay resolves the PR number' },
     { title: 'Merge', detail: "policy auto + hasGate + no stop (or mode regate): workflow('shipofclaudius:merge-pr-with-gate', { pr, repo, execute: true }); NEEDS_REBASE → gh pr update-branch" },
   ],
 }
@@ -95,8 +104,9 @@ const SCRATCH = `\${TMPDIR:-/tmp}/scrutineer-autopilot/${ID}/`
 const CLONE = `${SCRATCH}repo`
 const HELD_PATH = `~/.claude/scrutineer-autopilot/held/${ID}/`
 
+let TEST_OUTPUT = null // Build's red/green text: run log only, never a PR body or prompt
 function done(outcome, extra = {}) {
-  const r = { outcome, pr_url: null, merge_sha: null, held_path: null, stop_rule: null, reason: '', ...extra }
+  const r = { outcome, pr_url: null, merge_sha: null, held_path: null, stop_rule: null, reason: '', ...(TEST_OUTPUT ? { test_output: TEST_OUTPUT } : {}), ...extra }
   log(`scrutineer-fix-pr #${ID} (${REPO_SLUG}): ${outcome}${r.stop_rule ? ` [${r.stop_rule}]` : ''}${r.reason ? ` — ${r.reason}` : ''}`)
   return r
 }
@@ -202,10 +212,24 @@ if (!Array.isArray(openRows)) return done('failed', { reason: 'could not list op
 if (openRows.length > 0) return done('skipped', { reason: `${BRANCH} already has an open PR` })
 
 // Script-derived, sanitized fields. Only these leave the fence.
-const SCRUT_FILES = [...new Set([...FIX.matchAll(/^\+\+\+ b\/(\S+)/gm)].map((m) => m[1]))].sort()
+// SCRUT_FILES_RAW is compared (as data, never in a command) against the relay's file list;
+// only the sanitized form may appear in a prompt.
+const safePath = (p) => str(p).replace(/[^A-Za-z0-9._\/-]/g, '').slice(0, 120)
+const SCRUT_FILES_RAW = [...new Set([...FIX.matchAll(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/gm)].map((m) => m[1]).filter(Boolean))].sort()
+if (SCRUT_FILES_RAW.length === 0) return done('failed', { reason: 'no files in suggested_fix' })
 const CLASS = /^CWE-\d{1,5}$/.test(str(F.cwe).trim()) ? str(F.cwe).trim() : 'vulnerability'
-const FILE = (str(F.location).trim().replace(/:\d+(?::\d+)?$/, '').replace(/[^A-Za-z0-9._\/-]/g, '').slice(0, 120)) || SCRUT_FILES[0] || 'unknown file'
+const FILE = safePath(str(F.location).trim().replace(/:\d+(?::\d+)?$/, '')) || safePath(SCRUT_FILES_RAW[0]) || 'unknown-file'
 const FENCED = fence(NONCE, RAW)
+
+// Test paths Build may add: must look like a test and must not touch CI, manifests, lockfiles
+// or wrangler config. Raw and sanitized forms must be identical (no shell-special characters).
+const isTestPath = (p) => /(^|\/)(tests?|__tests__|spec)\//.test(p) || /\.(test|spec)\.[a-z]+$/.test(p)
+const isForbiddenPath = (p) =>
+  /(^|\/)\.github\//i.test(p) ||
+  /(^|\/)(\.circleci|\.buildkite|\.woodpecker)\//i.test(p) ||
+  /(^|\/)(\.gitlab-ci\.ya?ml|\.travis\.ya?ml|azure-pipelines\.ya?ml|bitbucket-pipelines\.ya?ml|Jenkinsfile|\.npmrc|\.yarnrc(\.yml)?|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|pnpm-workspace\.yaml|bun\.lockb?|deno\.jsonc?|deno\.lock|Cargo\.(toml|lock)|go\.(mod|sum)|Gemfile(\.lock)?|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile(\.lock)?|setup\.(py|cfg)|composer\.(json|lock)|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?)$/i.test(p) ||
+  /(^|\/)wrangler[^/]*$/i.test(p)
+const badTestPath = (p) => !p || p !== safePath(p) || p.startsWith('/') || /(^|\/)\.\.(\/|$)/.test(p) || !isTestPath(p) || isForbiddenPath(p)
 
 // ── Build ──
 phase('Build')
@@ -219,7 +243,7 @@ const BUILD_SCHEMA = {
     test_added: { type: 'array', items: { type: 'string' }, description: 'Paths of the regression test files you added or changed.' },
     red: { type: 'string', description: 'Test output on the default branch (the new test failing), trimmed to the relevant lines.' },
     green: { type: 'string', description: 'Test output with the fix (the new test passing), with counts.' },
-    diff_files: { type: 'array', items: { type: 'string' }, description: 'Output of the non-test git diff --name-only assertion.' },
+    diff_files: { type: 'array', items: { type: 'string' }, description: 'Output of the non-test git diff --name-only assertion (informational; the workflow re-reads the diff itself).' },
   },
 }
 const build = await agent(
@@ -233,8 +257,11 @@ const build = await agent(
   `2. Write suggested_fix to "${SCRATCH}fix.diff" exactly and run git apply --3way "${SCRATCH}fix.diff". ` +
   `If it does not apply cleanly, stop and return status APPLY_FAILED.\n` +
   `3. Add a regression test, touching only test files, that FAILS on the default branch and PASSES with the fix. ` +
+  `Test files must live under a tests/, test/, __tests__/ or spec/ directory or be named *.test.<ext> / *.spec.<ext>, ` +
+  `and must not be CI config, .github/, package.json, lockfiles, dependency manifests or wrangler config. ` +
   `Prove both: run it with the fix stashed or reverted (red) and with the fix (green). Capture both outputs.\n` +
-  `4. Commit on ${BRANCH} (message "fix(security): ${CLASS} in ${FILE}", via git commit -F under ${SCRATCH}). ` +
+  `4. Commit on ${BRANCH}: write the message fix(security): ${CLASS} in ${FILE} to "${SCRATCH}commit-msg.txt" with your ` +
+  `file-write tool and run git commit -F "${SCRATCH}commit-msg.txt". ` +
   `Then assert the non-test diff is exactly Scrutineer's: git diff <default>... -- . ':!<test paths>' --name-only ` +
   `(concretely git diff "$DEFAULT"... --name-only -- . ':!<each test path>'). Report that file list as diff_files.\n` +
   `5. Run the repo's test, lint and build commands. Any red gate → status GATES_RED. Never commit a red gate.\n` +
@@ -242,30 +269,54 @@ const build = await agent(
   `Return { status, branch, default_branch, test_added, red, green, diff_files }.`,
   { label: 'build', phase: 'Build', model: BUILD_MODEL, schema: BUILD_SCHEMA })
 if (!build || build.status !== 'BUILT') return done('failed', { reason: build ? (str(build.status).toLowerCase() || 'build status missing') : 'build agent returned nothing' })
-const testAdded = Array.isArray(build.test_added) ? build.test_added.filter((t) => typeof t === 'string' && t.trim()) : []
+TEST_OUTPUT = { red: str(build.red).slice(0, 4000), green: str(build.green).slice(0, 4000) }
+const testAdded = [...new Set((Array.isArray(build.test_added) ? build.test_added : []).map((t) => str(t).trim()).filter(Boolean))].sort()
 if (testAdded.length === 0) return done('failed', { reason: 'no regression test added' })
-const diffFiles = [...new Set((Array.isArray(build.diff_files) ? build.diff_files : []).map((s) => str(s).trim()).filter(Boolean))].sort()
-if (SCRUT_FILES.length > 0 && JSON.stringify(diffFiles) !== JSON.stringify(SCRUT_FILES)) {
-  return done('failed', { reason: `non-test diff files ${JSON.stringify(diffFiles)} != Scrutineer diff files ${JSON.stringify(SCRUT_FILES)}` })
+const badTests = testAdded.filter(badTestPath)
+if (badTests.length > 0) return done('failed', { reason: `test_added path(s) not an allowed test path: ${badTests.map(safePath).join(', ')}` })
+const DEFAULT_BRANCH = str(build.default_branch).trim()
+if (!DEFAULT_BRANCH || DEFAULT_BRANCH !== safePath(DEFAULT_BRANCH) || DEFAULT_BRANCH.startsWith('-')) {
+  return done('failed', { reason: 'Build reported no usable default branch name' })
+}
+
+// The changed-file list comes from a fixed read-only relay, never from Build's report.
+const diffRelay = await agent(relayPrompt(`git -C "${CLONE}" diff --name-only ${DEFAULT_BRANCH}...HEAD`, false),
+  { label: 'relay:diff-files', phase: 'Build', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
+if (!diffRelay || diffRelay.exit_code !== 0) return done('failed', { reason: 'could not read the clone diff file list' })
+const changed = [...new Set(str(diffRelay.raw).split('\n').map((s) => s.trim()).filter(Boolean))].sort()
+const missingTests = testAdded.filter((t) => !changed.includes(t))
+if (missingTests.length > 0) return done('failed', { reason: `test_added path(s) not in the clone diff: ${missingTests.map(safePath).join(', ')}` })
+const nonTest = changed.filter((f) => !testAdded.includes(f))
+if (JSON.stringify(nonTest) !== JSON.stringify(SCRUT_FILES_RAW)) {
+  return done('failed', { reason: `non-test diff files ${JSON.stringify(nonTest.map(safePath))} != Scrutineer diff files ${JSON.stringify(SCRUT_FILES_RAW.map(safePath))}` })
 }
 
 // ── Check ──
 phase('Check')
 const check = await agent(
-  `You are a READ-ONLY behaviour reviewer. Do not edit, commit, push or comment.\n\n${INJECTION_GUARD}\n\n${FENCED}\n\n` +
-  `A local clone of ${REPO_SLUG} is at "${CLONE}" with the fix committed on ${BRANCH}. Read the change with ` +
-  `git -C "${CLONE}" diff "${str(build.default_branch).replace(/[^A-Za-z0-9._\/-]/g, '') || 'main'}"... and compare it ` +
-  `against the repo's tests, routes, public exports and user-facing strings. Answer one question: would a user ` +
-  `or caller see a difference other than the vulnerable input being refused?\n` +
-  `Return { behaviour_change: none | changed | unknown, evidence }. Use unknown when you cannot tell.`,
-  { label: 'check', phase: 'Check', model: CHECK_MODEL, agentType: READONLY_AGENT,
-    schema: { type: 'object', additionalProperties: false, required: ['behaviour_change', 'evidence'], properties: { behaviour_change: { enum: ['none', 'changed', 'unknown'] }, evidence: { type: 'string' } } } })
+  `You are a READ-ONLY security and behaviour reviewer. Do not edit, commit, push or comment.\n\n${INJECTION_GUARD}\n\n${FENCED}\n\n` +
+  `A local clone of ${REPO_SLUG} is at "${CLONE}" with the fix committed on ${BRANCH}. Read the whole change with ` +
+  `git -C "${CLONE}" diff ${DEFAULT_BRANCH}...HEAD (the non-test part is the suggested_fix above; the rest is the ` +
+  `regression test). Answer three questions:\n` +
+  `1. behaviour_change: compare the change against the repo's tests, routes, public exports and user-facing strings. ` +
+  `Would a user or caller see a difference other than the vulnerable input being refused? none | changed | unknown ` +
+  `(unknown when you cannot tell).\n` +
+  `2. weakened_control: does the change weaken, remove, loosen or skip any authentication, authorization, ` +
+  `input-validation, sandboxing or other security control? true | false.\n` +
+  `3. suspicious_change: does the change do anything beyond fixing this vulnerability — new network calls, credential ` +
+  `or secret or environment access, CI or build config, dependency or lockfile changes, obfuscated or encoded code, ` +
+  `code that runs at install or import time, or a test that does more than test? true | false. When unsure, true.\n` +
+  `Return { behaviour_change, weakened_control, suspicious_change, evidence }.`,
+  { label: 'check', phase: 'Check', model: CHECK_MODEL, agentType: 'shipofclaudius:security-hardening-reviewer',
+    schema: { type: 'object', additionalProperties: false, required: ['behaviour_change', 'weakened_control', 'suspicious_change', 'evidence'], properties: { behaviour_change: { enum: ['none', 'changed', 'unknown'] }, weakened_control: { type: 'boolean' }, suspicious_change: { type: 'boolean' }, evidence: { type: 'string' } } } })
 
 // ── Ship: stop_rule is script logic over enums ──
 phase('Ship')
 const bc = check && ['none', 'changed', 'unknown'].includes(check.behaviour_change) ? check.behaviour_change : 'unknown'
+const securityFlag = !check || check.weakened_control !== false || check.suspicious_change !== false
 const breaking = str(F.breaking_change).trim().toLowerCase()
-const STOP = (breaking === 'breaking' || breaking === 'unknown') ? 'breaking_change'
+const STOP = securityFlag ? 'security_review'
+  : (breaking === 'breaking' || breaking === 'unknown') ? 'breaking_change'
   : bc !== 'none' ? 'behaviour' : null
 if ((STOP && PUBLIC) || (POLICY === 'stop' && PUBLIC)) {
   const rule = STOP || 'policy_stop'
@@ -280,27 +331,34 @@ if ((STOP && PUBLIC) || (POLICY === 'stop' && PUBLIC)) {
   return done('held', { held_path: HELD_PATH, stop_rule: rule, reason: rule === 'behaviour' ? `behaviour_change ${bc}` : rule })
 }
 
-const clip = (s) => str(s).replace(/```/g, "'''").slice(0, 1500)
+// Title and body are a fixed template over enums and sanitized values only (no red/green output,
+// no finding text). A separate write step puts them in files; Ship sees only the file paths.
 const PR_TITLE = `fix(security): ${CLASS} in ${FILE}`
 const PR_BODY = [
   `Fixes Scrutineer finding ${ID}: ${CLASS} in \`${FILE}\`.`,
   '',
-  `Scrutineer reattack status: \`verified_secure\`. The non-test change is Scrutineer's verified diff, unchanged.`,
+  'reattack: verified_secure',
   '',
-  `Regression test: ${testAdded.map((t) => `\`${t.replace(/`/g, '')}\``).join(', ')}`,
-  '',
-  'Red (default branch):', '```', clip(build.red), '```',
-  'Green (with fix):', '```', clip(build.green), '```',
+  `The non-test change is Scrutineer's verified diff, unchanged. Regression test: ${testAdded.map((t) => `\`${safePath(t)}\``).join(', ')}`,
 ].join('\n')
+const TITLE_FILE = `${SCRATCH}pr-title.txt`
+const BODY_FILE = `${SCRATCH}pr-body.md`
+const FILE_SCHEMA = { type: 'object', additionalProperties: false, required: ['status', 'detail'], properties: { status: { enum: ['WRITTEN', 'FAILED'] }, detail: { type: 'string' } } }
+
+const files = await agent(
+  `You write two text files for a PR and do nothing else. Finding id ${ID}.\n\n${HARD_RULES}\n\n` +
+  `With your file-write tool (not a shell heredoc or echo), write:\n` +
+  `1. "${TITLE_FILE}" containing exactly this one line: ${PR_TITLE}\n` +
+  `2. "${BODY_FILE}" containing exactly the lines between the markers:\n<<<BODY\n${PR_BODY}\nBODY>>>\n` +
+  `Do not push, commit or run gh. Return { status: WRITTEN | FAILED, detail }.`,
+  { label: 'pr-files', phase: 'Ship', schema: FILE_SCHEMA })
+if (!files || files.status !== 'WRITTEN') return done('failed', { stop_rule: STOP, reason: `could not write PR title/body files: ${safePath(files && files.detail)}` })
 
 const ship = await agent(
   `You push ONE fix branch and open its PR. Clone: "${CLONE}", branch ${BRANCH}, repo ${REPO_SLUG}.\n\n${HARD_RULES}\n\n` +
   `1. cd "${CLONE}"; git push -u origin ${BRANCH} (only this branch).\n` +
-  `2. Write the PR body below, exactly, to "${SCRATCH}pr-body.md" with your file-write tool.\n` +
-  `3. gh pr create -R ${REPO_SLUG} --head ${BRANCH} --base "$(gh repo view ${REPO_SLUG} --json defaultBranchRef --jq .defaultBranchRef.name)" ` +
-  `--title "${PR_TITLE}" --body-file "${SCRATCH}pr-body.md"\n` +
-  `Do NOT merge, do NOT check CI. Return { status: OPENED | FAILED, pr_url, detail }.\n\n` +
-  `PR BODY (between the markers, not including them):\n----- BEGIN BODY -----\n${PR_BODY}\n----- END BODY -----`,
+  `2. gh pr create -R ${REPO_SLUG} --head ${BRANCH} --base ${DEFAULT_BRANCH} --title "$(cat "${TITLE_FILE}")" --body-file "${BODY_FILE}"\n` +
+  `Do not edit or print those files. Do NOT merge, do NOT check CI. Return { status: OPENED | FAILED, pr_url, detail }.`,
   { label: 'ship', phase: 'Ship', schema: { type: 'object', additionalProperties: false, required: ['status', 'pr_url', 'detail'], properties: { status: { enum: ['OPENED', 'FAILED'] }, pr_url: { type: 'string' }, detail: { type: 'string' } } } })
 if (!ship || ship.status !== 'OPENED') return done('failed', { stop_rule: STOP, reason: `push / gh pr create failed: ${str(ship && ship.detail).slice(0, 200)}` })
 
