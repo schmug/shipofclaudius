@@ -481,7 +481,7 @@ and 5), and Schmug is pinged when **any** of these hold:
    vulnerable input being refused?"
 3. The repo has no required-check gate (phishsoc and cortech.online today).
 4. `merge-pr-with-gate` escalates with a red required check, a blocking review, or DIRTY
-   after one re-apply (§8 step 7).
+   (§8 step 7; stops at once as `merge_escalated`).
 5. The repo's `merge_policy` in `config.json` is `stop`. Per Schmug, that is every repo
    that deploys on merge, plus shipofclaudius. The starting list is donthype-me, dmarc.mx,
    cortech.online, doohub and shipofclaudius. The builder confirms each by reading the
@@ -580,7 +580,7 @@ duplicate PRs.
 - Verify and reattack outcomes are read from scan reports, because the export omits them
   (§2.1).
 - Full rescan every 90 days or on a Scrutineer version change (§7.2).
-- Ping as a PR comment (§9). No exploit detail in PR bodies (§8).
+- Ping as a push notification (§9). No exploit detail in PR bodies (§8).
 - Run critic when `production_viability` is empty; proceed on `CONDITIONAL_VIABLE` (§6).
 - Merge-gate escalations: CI_PENDING → re-gate next tick; BEHIND → `update-branch`;
   one open fix PR per repo (§8).

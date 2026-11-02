@@ -44,6 +44,26 @@ test('no shipped skill file contains schmug, /Users/ or 8081', async () => {
   }
 })
 
+test('M5/I3: docs describe the shipped behaviour (verified diff, DIRTY stop, push notification, no test_output)', async () => {
+  const readme = await readFile(join(ROOT, 'README.md'), 'utf8')
+  const rows = readme.split('\n').filter((l) => l.startsWith('| [`scrutineer-fix-pr.js`]') || l.startsWith('- **`scrutineer-fix-pr`**'))
+  assert.equal(rows.length, 2)
+  for (const l of rows) {
+    assert.doesNotMatch(l, /minimal fix/i, 'README: scrutineer-fix-pr applies the verified diff, not a minimal fix')
+    assert.doesNotMatch(l, /test_output/, 'README: the workflow returns no test_output')
+  }
+  assert.ok(rows.some((l) => /reattack-verified diff/.test(l)))
+  const spec = await readFile(join(ROOT, 'docs/specs/2026-10-26-scrutineer-lifecycle-autopilot-design.md'), 'utf8')
+  const rule4 = spec.split('\n').findIndex((l) => l.startsWith('4. `merge-pr-with-gate` escalates'))
+  assert.ok(rule4 > 0)
+  assert.doesNotMatch(spec.split('\n').slice(rule4, rule4 + 2).join(' '), /re-apply/)
+  assert.doesNotMatch(spec, /Ping as a PR comment/)
+  assert.match(spec, /Ping as a push notification/)
+  const md = await read('SKILL.md')
+  assert.doesNotMatch(md, /test_output/)
+  assert.match(md, /stateDir/)
+})
+
 let failed = 0
 for (const [name, fn] of tests) {
   try { await fn(); console.log('PASS', name) }
