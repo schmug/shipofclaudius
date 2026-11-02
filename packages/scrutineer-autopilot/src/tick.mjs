@@ -118,13 +118,15 @@ export function dryRunFetch(fetch = globalThis.fetch) {
   }
 }
 
-export async function runTick({ config, client, exec, now = Date.now(), dryRun = false }) {
+// `only` (a finding id) scopes an attended tick to one finding: other findings are not listed and no rescan is
+// enqueued (repos are still polled, because step 7 needs their visibility and default branch).
+export async function runTick({ config, client, exec, now = Date.now(), dryRun = false, only = null }) {
   const t = toMs(now)
   const R = { status: 'ok', dryRun: !!dryRun, actions: [], agentItems: [], parked: [], stopped: [], notes: [] }
   const lock = await acquireLock(config.stateDir, { now: t })
   if (!lock.ok) return { ...R, status: 'locked' }
   try {
-    const tk = { config, exec, t, iso: isoOf(t), R, budget: config.budget, enqueues: 0, spent: { codex: 0, claude: 0 } }
+    const tk = { config, exec, t, iso: isoOf(t), R, budget: config.budget, enqueues: 0, spent: { codex: 0, claude: 0 }, only }
     const abort = await step1PausedCheck(tk, client, dryRun)
       ?? await step2FeatureDetect(tk)
       ?? await step3Budget(tk)
@@ -208,7 +210,7 @@ async function step5Lifecycle(tk) {
   try {
     for (const repo of tk.repos.values()) {
       const q = { repository_id: String(repo.id) }
-      for (const f of await tk.client.listFindings(q)) if (f.repository_id === repo.id && !OUT_OF_SCOPE.has(f.status)) tk.findings.push({ f, repo })
+      for (const f of await tk.client.listFindings(q)) if (f.repository_id === repo.id && !OUT_OF_SCOPE.has(f.status) && (tk.only == null || f.id === tk.only)) tk.findings.push({ f, repo })
       for (const s of await tk.client.listScans(q)) if (s.repository_id === repo.id) tk.scans.push(s)
     }
   } catch (e) { tk.R.notes.push(msg(e)); return 'scrutineer-down' }
@@ -412,6 +414,7 @@ async function step6Rescans(tk) {
       cands.push({ repo, st, ev })
     } catch (e) { tk.R.notes.push(`${repo.key}: GitHub poll failed (${msg(e)}); no rescan this tick`) }
   }
+  if (tk.only != null) { tk.R.notes.push(`--only ${tk.only}: rescans skipped`); return }
   const u = tk.usage.codex
   const dollarsLeft = Math.max(0, (100 - tk.budget.reserve - u.weeklyUsed) / tk.ppd.codex)
   const tiers = chooseTiers(cands.map(({ repo, st }) => ({

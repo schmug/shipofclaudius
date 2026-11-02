@@ -104,7 +104,7 @@ async function world(w) {
   return { stub, stateDir, config, client, posts }
 }
 
-const tick = (W, o = {}) => (clock = o.now ?? NOW, runTick({ config: W.config, client: W.client, exec: (o.exec ?? stubExec()).exec, now: o.now ?? NOW, dryRun: o.dryRun ?? false }))
+const tick = (W, o = {}) => (clock = o.now ?? NOW, runTick({ config: W.config, client: W.client, exec: (o.exec ?? stubExec()).exec, now: o.now ?? NOW, dryRun: o.dryRun ?? false, only: o.only ?? null }))
 const ledgerOf = async (W) => JSON.parse(await readFile(join(W.stateDir, 'ledger.json'), 'utf8'))
 const exists = (p) => access(p).then(() => true, () => false)
 
@@ -498,6 +498,17 @@ test('carry 8: one finding POST fails, the tick records it and continues to the 
   assert.match(a1.error, /500/)
   assert.equal(r.actions.find((a) => a.findingId === 2).result, 'done')
   assert.ok(W.posts().some((p) => p.path === '/findings/2/verify'))
+})
+
+test('only: an attended tick touches one finding and enqueues no rescan', async () => {
+  const W = await world({ findings: [finding(1), finding(2)], scans: [] })
+  const r = await tick(W, { only: 2 })
+  await W.stub.close()
+  assert.equal(r.status, 'ok')
+  assert.ok(!r.actions.some((a) => a.findingId === 1), 'finding 1 is out of scope for this tick')
+  assert.equal(r.actions.find((a) => a.findingId === 2).result, 'done')
+  assert.deepEqual(W.posts().map((p) => p.path), ['/findings/2/verify'])
+  assert.ok(r.notes.some((n) => /--only 2: rescans skipped/.test(n)))
 })
 
 test('bin/finding.mjs prints exactly the relay fields and never the token', async () => {

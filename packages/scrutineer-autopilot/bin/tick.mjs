@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// One autopilot tick. Usage: tick.mjs [--dry-run] [--json] [--config <path>] [--state-dir <path>]
+// One autopilot tick. Usage: tick.mjs [--dry-run] [--json] [--config <path>] [--state-dir <path>] [--only <findingId>]
 //        tick.mjs --record <findingId> [<outcome-json>; stdin when omitted] [--state-dir <path>]   store a scrutineer-fix-pr outcome as the ledger stage (exit 2 on invalid input)
 //        tick.mjs --digest-sent [--state-dir <path>]                       stamp lastDigestAt in the ledger
 // Prints the TickResult. Exit 0 for ok/paused/locked, 2 for scrutineer-too-old/-down/budget-unavailable, 1 on error.
@@ -28,6 +28,11 @@ function parseArgs(argv) {
       o.record = [id, argv[i + 1] != null && !argv[i + 1].startsWith('--') ? argv[++i] : null] // no JSON argument: read stdin
     }
     else if (a === '--digest-sent') o.digestSent = true
+    else if (a === '--only') {
+      const id = argv[++i]
+      if (!/^\d+$/.test(id ?? '')) throw new Error('--only needs a numeric finding id')
+      o.only = Number(id)
+    }
     else throw new Error(`unknown argument ${a}`)
   }
   return o
@@ -68,7 +73,7 @@ try {
   if (o.stateDir) config.stateDir = o.stateDir
   const fetch = o.dryRun ? dryRunFetch(globalThis.fetch) : globalThis.fetch
   const client = createClient({ baseUrl: config.baseUrl, tokenPath: config.tokenPath, fetch })
-  const r = await runTick({ config, client, exec, now: Date.now(), dryRun: o.dryRun })
+  const r = await runTick({ config, client, exec, now: Date.now(), dryRun: o.dryRun, only: o.only ?? null })
   console.log(o.json ? JSON.stringify(r, null, 2) : summary(r))
   process.exit(EXIT[r.status] ?? 1)
 } catch (e) {
