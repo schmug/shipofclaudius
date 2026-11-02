@@ -360,6 +360,16 @@ const DNONCE = diffText ? str(diffText.nonce).trim() : ''
 if (!diffText || diffText.exit_code !== 0 || !DNONCE || str(diffText.raw).includes(`END_UNTRUSTED_DIFF_${DNONCE}`)) {
   return done('failed', { reason: 'could not relay the clone diff for Check' })
 }
+// Cross-check: the relayed diff's file headers must equal the separate name-only relay's set, so a
+// steered relay cannot hand Check a doctored diff that omits or invents files.
+const headerPath = (rest) => {
+  const n = (rest.length - 3) / 2 // "X b/X" when a-path === b-path
+  if (Number.isInteger(n) && n > 0 && rest.slice(n, n + 3) === ' b/' && rest.slice(0, n) === rest.slice(n + 3)) return rest.slice(0, n)
+  const m = rest.match(/ b\/(.+)$/)
+  return m ? m[1] : ''
+}
+const diffPaths = [...new Set([...str(diffText.raw).matchAll(/^diff --git a\/(.+)$/gm)].map((m) => headerPath(m[1])).filter(Boolean))].sort()
+if (diffPaths.length === 0 || !sameSet(diffPaths, changed)) return done('failed', { reason: 'relayed diff does not match file list' })
 const check = await agent(
   `You are a READ-ONLY security and behaviour reviewer. Do not edit, commit, push or comment, and do not run git or ` +
   `fetch the diff yourself: judge the relayed diff below. You may read files in "${CLONE}" read-only for context.\n\n` +
