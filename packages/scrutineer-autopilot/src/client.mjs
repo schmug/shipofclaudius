@@ -26,6 +26,8 @@ export class ScrutineerTooOld extends Error {
   }
 }
 
+const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
 function parseJsonl(text) {
   return text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
 }
@@ -49,12 +51,21 @@ export function createClient({ baseUrl, tokenPath, readFile = fsReadFile, fetch 
       init.body = new URLSearchParams(form).toString()
     }
     const res = await fetch(url, init)
-    const redirected = res.status >= 300 && res.status < 400
-    if (!res.ok && !(method === 'POST' && redirected)) {
+    if (method === 'POST' ? res.status !== 302 && res.status !== 303 : !res.ok) {
       await res.text?.().catch(() => {})
       throw new ScrutineerError(res.status, path)
     }
     return res
+  }
+
+  // POST success = 302/303 whose Location path matches one of `patterns`; returns the match.
+  async function post(path, form, patterns) {
+    const res = await request('POST', path, { form })
+    const loc = res.headers.get('location') ?? ''
+    let p = ''
+    try { p = new URL(loc, 'http://x').pathname } catch { /* fall through */ }
+    for (const re of patterns) { const m = re.exec(p); if (m) return m }
+    throw new ScrutineerError(res.status, path, 'unexpected redirect')
   }
 
   const getJsonl = async (path, query) => parseJsonl(await (await request('GET', path, { query })).text())
@@ -72,21 +83,18 @@ export function createClient({ baseUrl, tokenPath, readFile = fsReadFile, fetch 
 
     async runFindingSkill(id, skill) {
       if (!SKILLS.has(skill)) throw new Error(`unknown skill ${JSON.stringify(skill)}`)
-      const res = await request('POST', `/findings/${encodeURIComponent(id)}/${skill}`, { form: {} })
-      const loc = res.headers.get('location') ?? ''
-      const m = loc.match(/\/scans\/(\d+)(?:[/?#]|$)/)
-      if (m) return { scanId: Number(m[1]), duplicate: false }
-      return { scanId: null, duplicate: /\/findings\/\d+/.test(loc) }
+      const m = await post(`/findings/${encodeURIComponent(id)}/${skill}`, {}, [/^\/scans\/(\d+)\/?$/, new RegExp(`^/findings/${esc(id)}/?$`)])
+      return m[1] ? { scanId: Number(m[1]), duplicate: false } : { scanId: null, duplicate: true }
     },
     async setStatus(id, status) {
       if (REFUSED_STATUSES.has(status)) throw new Error(`refusing to set status ${status} (not allowed from the autopilot)`)
-      await request('POST', `/findings/${encodeURIComponent(id)}/status`, { form: { status } })
+      await post(`/findings/${encodeURIComponent(id)}/status`, { status }, [new RegExp(`^/findings/${esc(id)}/?$`)])
     },
     async addNote(id, body) {
-      await request('POST', `/findings/${encodeURIComponent(id)}/notes`, { form: { body } })
+      await post(`/findings/${encodeURIComponent(id)}/notes`, { body }, [new RegExp(`^/findings/${esc(id)}/?$`)])
     },
     async scanRepo(repoId, { mode = 'full' } = {}) {
-      await request('POST', `/repositories/${encodeURIComponent(repoId)}/scan`, { form: mode === 'diff' ? { rescan_mode: 'diff' } : {} })
+      await post(`/repositories/${encodeURIComponent(repoId)}/scan`, mode === 'diff' ? { rescan_mode: 'diff' } : {}, [new RegExp(`^/repositories/${esc(repoId)}/?$`)])
     },
   }
 }

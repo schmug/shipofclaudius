@@ -87,12 +87,33 @@ test('addNote: posts form field body to /findings/{id}/notes', async () => {
 })
 
 test('scanRepo: diff sends rescan_mode=diff, full does not', async () => {
-  await withStub({ 'POST /repositories/{id}/scan': redirect('/scans/1') }, async (s, c) => {
+  await withStub({ 'POST /repositories/{id}/scan': redirect('/repositories/3#rt3') }, async (s, c) => {
     await c.scanRepo(3, { mode: 'diff' })
     await c.scanRepo(3, { mode: 'full' })
     assert.equal(s.requests[0].path, '/repositories/3/scan')
     assert.equal(s.requests[0].body.rescan_mode, 'diff')
     assert.equal(s.requests[1].body.rescan_mode, undefined)
+  })
+})
+
+test('POST redirect to /login rejects with ScrutineerError for addNote and runFindingSkill', async () => {
+  await withStub({ 'POST /findings/{id}/notes': redirect('/login'), 'POST /findings/{id}/verify': redirect('/login') }, async (_s, c) => {
+    await assert.rejects(c.addNote(5, 'x'), (e) => e instanceof ScrutineerError)
+    await assert.rejects(c.runFindingSkill(5, 'verify'), (e) => e instanceof ScrutineerError)
+  })
+})
+
+test('POST redirect to another finding id rejects', async () => {
+  await withStub({ 'POST /findings/{id}/status': redirect('/findings/6'), 'POST /repositories/{id}/scan': redirect('/repositories/9') }, async (_s, c) => {
+    await assert.rejects(c.setStatus(5, 'fixed'), ScrutineerError)
+    await assert.rejects(c.scanRepo(3, { mode: 'full' }), ScrutineerError)
+  })
+})
+
+test('POST answered 200 rejects; 401 surfaces as ScrutineerError(401, path)', async () => {
+  await withStub({ 'POST /findings/{id}/notes': { status: 200, body: 'ok' }, 'POST /findings/{id}/status': { status: 401 } }, async (_s, c) => {
+    await assert.rejects(c.addNote(5, 'x'), (e) => e instanceof ScrutineerError && e.status === 200)
+    await assert.rejects(c.setStatus(5, 'fixed'), (e) => e instanceof ScrutineerError && e.status === 401 && e.path === '/findings/5/status')
   })
 })
 
