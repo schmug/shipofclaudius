@@ -10,6 +10,9 @@ const PR_STAGES = new Set(['stopped', 'opened', 'awaiting_ci'])
 const BAD_VIABILITY = new Set(['NON_VIABLE', 'SAMPLE_OR_TEST'])
 const GOOD_VIABILITY = new Set(['VIABLE', 'CONDITIONAL_VIABLE'])
 const BAD_REVALIDATE = new Set(['false_positive', 'uncertain', 'inconclusive'])
+// Stages from which a verified_secure finding may go to the fix workflow. 'parked' is here because a parked entry only
+// reaches this point once the finding was updated after the park (a human or Scrutineer acted).
+const FIXABLE_STAGES = new Set([undefined, 'triaged', 'patching', 'reattacking', 'parked'])
 const MAX_PATCH_ATTEMPTS = 2
 const MAX_REATTACK_RETRIES = 1
 
@@ -65,8 +68,8 @@ const RULES = [
     (s) => park(`verify did not confirm (${verdicts(s.finding, s.verify)})`)],
   ['new: revalidate bad', (s) => isNew(s.finding) && BAD_REVALIDATE.has(s.finding.last_revalidate_verdict),
     (s) => park(`verdicts do not support a fix (${verdicts(s.finding, s.verify)})`)],
-  ['new High: revalidate pending', (s) => isNew(s.finding) && isHigh(s.finding) && !s.finding.last_revalidate_verdict,
-    () => act('wait', { reason: 'revalidate pending' })],
+  ['new High: no revalidate verdict', (s) => isNew(s.finding) && isHigh(s.finding) && !s.finding.last_revalidate_verdict,
+    () => park('no revalidate verdict on a High/Critical finding; revalidate cannot be started from the operator API — triage by hand')],
   ['new High: agree', (s) => isNew(s.finding) && isHigh(s.finding) && s.finding.last_revalidate_verdict === 'true_positive',
     () => act('triage', { note: NOTE_AGREE })],
   ['new High: disagree', (s) => isNew(s.finding) && isHigh(s.finding),
@@ -83,6 +86,10 @@ const RULES = [
     (s) => park(`unrecognised production viability ${s.finding.production_viability}`)],
   ['triaged: no patch', (s) => s.finding.status === 'triaged' && s.patchAttempts === 0, () => act('patch')],
   ['triaged: no reattack', (s) => s.finding.status === 'triaged' && s.reattack === null, () => act('reattack')],
+  ['triaged: verified_secure, fix PR exists', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && e.stage === 'skipped',
+    () => act('wait', { reason: 'fix workflow skipped: PR exists for the branch' })],
+  ['triaged: verified_secure, fix workflow ended', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && !FIXABLE_STAGES.has(e.stage),
+    (s, e) => park(`fix workflow ended '${e.stage}'`)],
   ['triaged: verified_secure, repo busy', (s, e, c) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && c.repoHasOpenFixPr,
     () => act('wait', { reason: 'repo already has an open fix PR' })],
   ['triaged: verified_secure', (s) => s.finding.status === 'triaged' && s.reattack === 'verified_secure', () => act('fix')],

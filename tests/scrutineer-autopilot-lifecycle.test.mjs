@@ -26,8 +26,15 @@ test('High true_positive + confirmed -> triage with exact note', () => {
   const a = run(snap({ last_revalidate_verdict: 'true_positive' }, { verify: 'confirmed' }))
   assert.deepEqual(a, { type: 'triage', note: 'autopilot: revalidate and verify agree' })
 })
-test('High confirmed, revalidate not yet recorded -> wait', () => {
-  assert.equal(run(snap({}, { verify: 'confirmed' })).type, 'wait')
+test('High confirmed, no revalidate verdict -> park with exact note', () => {
+  assert.deepEqual(run(snap({}, { verify: 'confirmed' })), { type: 'park', note: 'autopilot: no revalidate verdict on a High/Critical finding; revalidate cannot be started from the operator API — triage by hand' })
+})
+test('verified_secure with workflow-outcome stage: failed/unknown -> park verbatim; skipped -> wait; triaged-like -> fix', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  assert.deepEqual(run(s, { stage: 'failed' }), { type: 'park', note: "autopilot: fix workflow ended 'failed'" })
+  assert.deepEqual(run(s, { stage: 'weird' }), { type: 'park', note: "autopilot: fix workflow ended 'weird'" })
+  assert.equal(run(s, { stage: 'skipped' }).type, 'wait')
+  for (const stage of [undefined, 'triaged', 'patching', 'reattacking']) assert.equal(run(s, { stage }).type, 'fix')
 })
 test('Medium confirmed with empty viability -> critic; VIABLE -> triage with exact note', () => {
   assert.equal(run(snap({ severity: 'Medium' }, { verify: 'confirmed' })).type, 'critic')
