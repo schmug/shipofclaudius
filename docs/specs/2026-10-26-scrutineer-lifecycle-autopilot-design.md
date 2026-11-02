@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Repo:** `schmug/shipofclaudius`
-**Status:** Draft for Schmug's approval. No code until approved; the next step is
+**Status:** Approved by Schmug in chat 2026-11-01. The next step is
 `superpowers:writing-plans`.
 
 ---
