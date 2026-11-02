@@ -119,8 +119,8 @@ test('POST answered 200 rejects; 401 surfaces as ScrutineerError(401, path)', as
 
 test('errors: a 500 throws ScrutineerError carrying status and path, never the token', async () => {
   await withStub({ 'GET /api/v1/findings/{id}': { status: 500, body: `boom ${TOKEN}` }, 'POST /findings/{id}/notes': { status: 500 } }, async (_s, c) => {
-    for (const p of [c.getFinding(5), c.addNote(5, 'x')]) {
-      const err = await p.then(() => null, (e) => e)
+    for (const run of [() => c.getFinding(5), () => c.addNote(5, 'x')]) {
+      const err = await run().then(() => null, (e) => e)
       assert.ok(err instanceof ScrutineerError)
       assert.equal(err.status, 500)
       assert.ok(!err.message.includes(TOKEN) && !String(err.stack).includes(TOKEN))
