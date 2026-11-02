@@ -13,7 +13,7 @@ const scan = (skill, o = {}) => ({
   created_at: '2026-10-01T00:00:00Z', finished_at: '2026-10-01T00:10:00Z', report: '', ...o,
 })
 const variants = (n, extra = []) => [
-  ...Array.from({ length: n }, () => ({ valid: true, outcome: 'blocked' })), ...extra]
+  ...Array.from({ length: n }, (_, i) => ({ valid: true, outcome: 'blocked', origin: 'generated', input: `in-${i}` })), ...extra]
 const clean = (o = {}) => JSON.stringify({
   outcome: 'failed_to_bypass', variants: variants(3),
   benign_control: { reached_sink: true, crashed: false }, ...o,
@@ -95,6 +95,20 @@ test('reattackStatus: compares times by Date.parse, not string order', () => {
   const p = scan('patch', { finished_at: '2026-10-02T01:00:00+02:00' }) // = 2026-10-01T23:00Z
   const r = reattack(clean(), { created_at: '2026-10-01T23:30:00Z' })   // after p, string-sorts before it
   assert.equal(reattackStatus([p, r], 7), 'verified_secure')
+})
+
+test('reattackStatus: only valid generated blocked variants count (2 generated + 1 prior_bypass is incomplete)', () => {
+  const v = variants(2, [{ valid: true, outcome: 'blocked', origin: 'prior_bypass', input: 'pb' }])
+  assert.equal(reattackStatus([patch, reattack(clean({ variants: v }))], 7), 'verification_incomplete')
+})
+test('reattackStatus: duplicate generated input after trim invalidates the report', () => {
+  const v = variants(2, [{ valid: true, outcome: 'blocked', origin: 'generated', input: '  in-0 ' }])
+  assert.equal(reattackStatus([patch, reattack(clean({ variants: v }))], 7), 'verification_incomplete')
+})
+test('reattackStatus: newest report inconclusive with an older clean report is verification_incomplete', () => {
+  const older = reattack(clean(), { created_at: '2026-10-03T00:00:00Z', finished_at: '2026-10-03T00:30:00Z' })
+  const newer = reattack(clean({ outcome: 'inconclusive' }), { created_at: '2026-10-04T00:00:00Z', finished_at: '2026-10-04T00:30:00Z' })
+  assert.equal(reattackStatus([patch, older, newer], 7), 'verification_incomplete')
 })
 
 // ---- runner ----

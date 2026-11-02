@@ -1,7 +1,7 @@
 // Verdict readers over Scrutineer scan rows (/api/v1/scans). Pure, no I/O.
 // The operator export omits verification/remediation, so they are derived from scan reports.
 // reattackStatus mirrors Scrutineer internal/db/remediation.go RemediationPatchStatus and fails closed:
-// only failed_to_bypass with >=3 valid blocked variants and a passed benign control is verified_secure,
+// only failed_to_bypass with >=3 valid generated blocked variants and a passed benign control is verified_secure,
 // and a bypass in any report for the attempt is sticky.
 
 const VERIFY_STATUSES = new Set(['confirmed', 'fixed', 'inconclusive', 'deferred', 'not_attempted'])
@@ -43,6 +43,8 @@ export function patchAttemptCount(scans, findingId) {
   return done(scans, 'patch', findingId).length
 }
 
+// Accepted limitation: the API exposes no remediation_attempt_id, so reattacks are scoped to an attempt
+// as "created after the latest patch scan finished".
 export function reattackStatus(scans, findingId) {
   const patch = latestPatch(scans, findingId)
   if (!patch) return null
@@ -61,8 +63,13 @@ export function reattackStatus(scans, findingId) {
 
   const r = parsed[0]
   if (!r || r.outcome !== 'failed_to_bypass') return 'verification_incomplete'
-  const blocked = Array.isArray(r.variants)
-    ? r.variants.filter((v) => v && v.valid === true && v.outcome === 'blocked').length : 0
+  // Mirrors Scrutineer inspectReattackVariants (internal/worker/remediation.go): only valid generated
+  // variants count, and two valid generated variants with the same trimmed input invalidate the report.
+  const variants = Array.isArray(r.variants) ? r.variants : []
+  const generated = variants.filter((v) => v && v.valid === true && v.origin === 'generated')
+  const inputs = generated.map((v) => (typeof v.input === 'string' ? v.input.trim() : null))
+  if (inputs.some((i) => i === null) || new Set(inputs).size !== inputs.length) return 'verification_incomplete'
+  const blocked = generated.filter((v) => v.outcome === 'blocked').length
   const c = r.benign_control
   const controlOk = !!c && c.reached_sink === true && c.crashed === false
   return blocked >= MIN_BLOCKED_VARIANTS && controlOk ? 'verified_secure' : 'verification_incomplete'
