@@ -61,7 +61,7 @@ const RULES = [
   ['fix PR merged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'MERGED', () => act('mark_fixed')],
   ['fix PR closed unmerged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'CLOSED', () => park('fix PR closed unmerged')],
   ['held fix discarded', (s, e, c) => e.stage === 'held' && !c.heldBranchExists && c.prState !== 'OPEN', () => park('held fix discarded')],
-  ['fix PR open or held, waiting for Schmug', (s, e) => PR_STAGES.has(e.stage) || e.stage === 'held', () => act('wait', { reason: 'fix PR awaiting human' })],
+  ['fix PR open or held, waiting for a human', (s, e) => PR_STAGES.has(e.stage) || e.stage === 'held', () => act('wait', { reason: 'fix PR awaiting human' })],
   ['stage merged', (s, e) => e.stage === 'merged', () => act('mark_fixed')],
   ['fixed and marked', (s, e) => s.finding.status === 'fixed' && e.stage === 'marked_fixed', () => act('mark_published')],
   ['fixed otherwise', (s) => s.finding.status === 'fixed', () => act('skip', { reason: 'fixed; nothing to do' })],

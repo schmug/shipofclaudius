@@ -282,7 +282,7 @@ function pendingEnqueue(entry, mine, t) {
 
 async function prContext(tk, f, entry, repo) {
   const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: null, heldBranchExists: false, now: tk.iso }
-  if (PR_STAGES.has(entry.stage)) {
+  if (PR_STAGES.has(entry.stage) || entry.stage === 'merged') { // 'merged' is recorded by the workflow; resolve its PR so mark_fixed gets the merge sha
     // Ruling 18: the PR is always resolved by branch (same-repo, server-filtered), never from a ledger number that
     // `--record` or a hand edit could have pointed elsewhere. The resolved number is written back for the regate item.
     const p = await prForBranch(repo.key, ownBranch(f.id), { exec: tk.exec })

@@ -412,6 +412,24 @@ test('--record 5 {"outcome":"merged"} sets findings[5].stage = merged', async ()
   assert.equal((await ledgerOf(W)).findings['5'].stage, 'merged')
 })
 
+test('--record merged, then the next tick resolves the PR by branch: fixed, lastScannedSha = merge sha, no rescan', async () => {
+  const W = await world({ findings: [triagedViable(9)], scans: [deepDive(), ...verifiedSecure(9)] })
+  const r0 = await recordCli(W, '--record', '9', '{"outcome":"merged"}')
+  assert.equal(r0.code, 0, r0.stderr)
+  const ex = stubExec({
+    'head=o:scrutineer/finding-9': branchPr(9, 52, { state: 'closed', mergedAt: '2026-11-01T10:00:00Z', sha: 'm52' }),
+    'api repos/o/app/commits/main': 'm52\n',
+  })
+  await tick(W, { exec: ex })
+  await W.stub.close()
+  assert.equal(W.posts().find((p) => p.path === '/findings/9/status').body.status, 'fixed')
+  assert.match(W.posts().find((p) => p.path === '/findings/9/notes').body.body, /pull\/52.*m52/)
+  const L = await ledgerOf(W)
+  assert.equal(L.findings['9'].stage, 'marked_fixed')
+  assert.equal(L.repos['o/app'].lastScannedSha, 'm52')
+  assert.equal(W.posts().filter((x) => x.path.startsWith('/repositories/')).length, 0)
+})
+
 test('--record stores stop_rule, reason and a computed held_path, and never a PR number or url from the outcome JSON', async () => {
   const W = await world({ findings: [], scans: [] })
   await W.stub.close()
