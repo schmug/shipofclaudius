@@ -22,7 +22,12 @@ import { chooseTiers, dueScan } from './tiers.mjs'
 const DAY = 86400e3
 const OUT_OF_SCOPE = new Set(['rejected', 'duplicate', 'published'])
 const PR_STAGES = new Set(['stopped', 'opened', 'awaiting_ci', 'skipped', 'held'])
-const OPEN_FIX_STAGES = new Set(['stopped', 'opened', 'awaiting_ci', 'held'])
+const OPEN_FIX_STAGES = new Set(['stopped', 'opened', 'awaiting_ci', 'held', 'fixing'])
+// Stages whose PR is resolved by branch each tick: PR stages, the recorded 'merged' (needs GitHub proof, I1),
+// 'failed' (a PR may exist after a late failure, I4) and 'fixing' (a fix item is in flight, I6).
+const BRANCH_STAGES = new Set([...PR_STAGES, 'merged', 'failed', 'fixing'])
+// --record refuses these outcomes with a stop_rule: a stopped fix must never be regated or marked fixed.
+const NO_STOP_OUTCOMES = new Set(['awaiting_ci', 'merged'])
 const ENQUEUE = new Set(['verify', 'critic', 'patch', 'reattack'])
 const SEVERITY_RANK = { Critical: 0, High: 1, Medium: 2, Low: 3 }
 const OPEN = new Set(['queued', 'running'])
@@ -64,6 +69,7 @@ export async function recordOutcome(stateDir, findingId, outcomeJson, { now = Da
   if (!o || typeof o !== 'object' || Array.isArray(o)) throw new RecordError('outcome must be a JSON object')
   if (!OUTCOMES.includes(o.outcome)) throw new RecordError(`outcome must be one of ${OUTCOMES.join(', ')}`)
   if (o.stop_rule != null && !STOP_RULES.includes(o.stop_rule)) throw new RecordError(`stop_rule must be one of ${STOP_RULES.join(', ')}`)
+  if (o.stop_rule != null && NO_STOP_OUTCOMES.has(o.outcome)) throw new RecordError(`outcome ${o.outcome} cannot carry a stop_rule`)
   const lock = await acquireLock(stateDir, { now: toMs(now) })
   if (!lock.ok) throw new Error('a tick is running (locked); retry after it finishes')
   try {
@@ -214,7 +220,7 @@ async function step5Lifecycle(tk) {
   for (const it of tk.findings) {
     try { items.push(await prepare(tk, it)) } catch (e) {
       tk.R.actions.push({ findingId: it.f.id, repo: it.repo.key, type: 'prepare', result: 'failed', error: msg(e) })
-      if (PR_STAGES.has(entryOf(tk, it.f.id).stage)) tk.busyRepos.add(it.repo.key) // fail closed: PR state unknown
+      if (BRANCH_STAGES.has(entryOf(tk, it.f.id).stage)) tk.busyRepos.add(it.repo.key) // fail closed: PR state unknown
     }
   }
   for (const i of items) if (repoBusy(i)) tk.busyRepos.add(i.repo.key)
@@ -281,7 +287,7 @@ function pendingEnqueue(entry, mine, t) {
 
 async function prContext(tk, f, entry, repo) {
   const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: null, heldBranchExists: false, now: tk.iso }
-  if (PR_STAGES.has(entry.stage) || entry.stage === 'merged') { // 'merged' is recorded by the workflow; resolve its PR so mark_fixed gets the merge sha
+  if (BRANCH_STAGES.has(entry.stage)) { // a recorded 'merged' is only acted on when GitHub shows the PR MERGED
     // Ruling 18: the PR is always resolved by branch (same-repo, server-filtered), never from a ledger number that
     // `--record` or a hand edit could have pointed elsewhere. The resolved number is written back for the regate item.
     const p = await prForBranch(repo.key, ownBranch(f.id), { exec: tk.exec })
@@ -292,7 +298,9 @@ async function prContext(tk, f, entry, repo) {
   return ctx
 }
 
-const repoBusy = ({ entry, ctx }) => ctx.prState === 'OPEN' || (OPEN_FIX_STAGES.has(entry.stage) && ctx.prState !== 'MERGED' && ctx.prState !== 'CLOSED')
+// 'fixing' stays busy even when the branch shows an older CLOSED PR: the workflow may still be running.
+const repoBusy = ({ entry, ctx }) => ctx.prState === 'OPEN' || (entry.stage === 'fixing' && ctx.prState !== 'MERGED')
+  || (OPEN_FIX_STAGES.has(entry.stage) && ctx.prState !== 'MERGED' && ctx.prState !== 'CLOSED')
 
 async function execute(tk, it) {
   const { f, repo, entry, action } = it
@@ -456,7 +464,9 @@ function eventRates(tk, st) {
   return { push: n('push'), pr: n('pr'), release: n('release') }
 }
 
-// ---- step 7: agent items: fix (Claude-gated, one per repo) and regate (every awaiting_ci PR); none when paused ----
+// ---- step 7: agent items: fix (one per repo) and regate (awaiting_ci, no stop_rule), both Claude-gated; none when paused ----
+// A fix item sets stage 'fixing' + emittedAt (not in a dry run) so the next tick neither re-emits it nor opens a second
+// fix in the repo before `--record` overwrites the stage. Items carry stateDir so the workflow holds under this state dir.
 async function step7AgentItems(tk) {
   const gates = new Map()
   const describe = async (repo) => {
@@ -470,7 +480,7 @@ async function step7AgentItems(tk) {
     return gates.get(repo.key)
   }
   const byId = new Map(tk.findings.map((x) => [String(x.f.id), x]))
-  const regates = Object.entries(tk.ledger.data.findings).filter(([, e]) => e.stage === 'awaiting_ci' && e.pr)
+  const regates = Object.entries(tk.ledger.data.findings).filter(([, e]) => e.stage === 'awaiting_ci' && e.pr && e.stop_rule == null)
   if (tk.paused) { // pause is the kill switch: the skill runs every agentItem, so emit none
     for (const it of tk.fixCandidates) { it.rec.result = 'skipped'; it.rec.reason = 'paused' }
     for (const [id, e] of regates) tk.R.actions.push({ findingId: Number(id), repo: byId.get(id)?.repo.key, type: 'regate', pr: e.pr, result: 'skipped', reason: 'paused' })
@@ -484,13 +494,17 @@ async function step7AgentItems(tk) {
     const g = check(tk, 'claude', est)
     if (!g.ok) { it.rec.result = 'skipped'; it.rec.reason = `claude budget: ${g.reason}`; continue }
     used.add(it.repo.key); tk.spent.claude += est
-    tk.R.agentItems.push({ kind: 'fix', findingId: it.f.id, repo: it.repo.key, ...(await describe(it.repo)), estimateUsd: est, ...mark })
+    tk.R.agentItems.push({ kind: 'fix', findingId: it.f.id, repo: it.repo.key, ...(await describe(it.repo)), estimateUsd: est, stateDir: tk.config.stateDir, ...mark })
     it.rec.result = tk.dry ? 'would' : 'agent'
+    if (!tk.dry) Object.assign(ensureEntry(tk, it.f.id, it.repo.key), { stage: 'fixing', emittedAt: tk.iso })
   }
   for (const [id, e] of regates) {
     const x = byId.get(id) // the repo comes from the finding's repository_id, never from the ledger
     if (!x) { tk.R.notes.push(`finding ${id}: awaiting_ci but not an in-scope finding; no regate`); continue }
-    tk.R.agentItems.push({ kind: 'regate', findingId: x.f.id, repo: x.repo.key, pr: e.pr, ...(await describe(x.repo)), ...mark })
+    const g = check(tk, 'claude', est)
+    if (!g.ok) { tk.R.actions.push({ findingId: x.f.id, repo: x.repo.key, type: 'regate', pr: e.pr, result: 'skipped', reason: `claude budget: ${g.reason}` }); continue }
+    tk.spent.claude += est
+    tk.R.agentItems.push({ kind: 'regate', findingId: x.f.id, repo: x.repo.key, pr: e.pr, ...(await describe(x.repo)), estimateUsd: est, stateDir: tk.config.stateDir, ...mark })
   }
 }
 

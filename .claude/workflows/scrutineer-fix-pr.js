@@ -16,20 +16,23 @@
 //   args.visibility  'public' | 'private'. Anything but 'private' is treated as public.
 //   args.hasGate     true only when the default branch has required checks.
 //   args.binDir      directory holding finding.mjs. Required in both modes (regate needs the diff's file set).
+//   args.stateDir    the tick's state dir (absolute or ~/...; no quotes, $, backticks or backslashes). Held fixes go to
+//                    <stateDir>/held/<id>/. Default ~/.claude/scrutineer-autopilot. The tick puts it on every item.
 //   args.buildModel / args.checkModel   default 'sonnet' / 'opus'; equal → throws.
 //   args.readonlyAgent  agentType for the read-only relays and Check (default 'Explore').
 //
-// Returns { outcome: merged|awaiting_ci|opened|held|stopped|failed|skipped, pr_url, merge_sha,
+// Returns { outcome: merged|awaiting_ci|held|stopped|failed|skipped, pr_url, merge_sha,
 //           held_path, stop_rule: null|security_review|breaking_change|behaviour|no_gate|merge_escalated|policy_stop,
-//           reason, test_output? }. test_output carries Build's red/green text for the run log only;
-//           it never goes into a PR body or a later prompt.
+//           reason }. Build's red/green test output is never returned, persisted or put in a prompt.
+//           Once a PR has been opened, no path returns 'failed': any later failure is 'stopped' / merge_escalated
+//           (reason kept), so the tick waits on the PR instead of parking the finding.
 //
 // INVARIANTS
 // - The script decides. stop_rule, hold-vs-ship and merge routing are computed here from enums
 //   (relayed breaking_change, Check's behaviour_change, policy, visibility, hasGate). No agent
 //   decides whether to push or merge.
-// - The finding JSON comes only from the fixed relay `node "<binDir>/finding.mjs" <id>` (read-only
-//   agent, mints the nonce). It is UNTRUSTED: Build and Check see it only nonce-fenced behind
+// - The finding JSON comes only from the fixed relay `node "<binDir>/finding.mjs" --repo <repo> <id>`
+//   (read-only agent, mints the nonce; exit 3 when the finding is not in an allowlisted <repo>). It is UNTRUSTED: Build and Check see it only nonce-fenced behind
 //   INJECTION_GUARD. Outside the fence, prompts carry only script-sanitized values: CWE id and
 //   paths stripped to [A-Za-z0-9._/-] and capped at 120 chars. No diff-derived or agent-written
 //   text is interpolated into a shell command; the PR title and body reach gh via files.
@@ -42,19 +45,26 @@
 //   Non-Scrutineer files must be NEW, test-named (*.test.*, *.spec.*, *_test.*, test_*.py), not a
 //   support/config/CI/manifest file, and at most two.
 // - Check runs under the read-only agentType and never fetches the diff itself: a read-only relay
-//   returns `git -C <clone> diff <sha>...HEAD` with a fresh nonce and Check sees it fenced.
+//   returns `git -C <clone> diff <sha>...HEAD` with a fresh nonce and Check sees it fenced. Before Check,
+//   the relayed diff's added/removed lines for each Scrutineer file must equal suggested_fix's as
+//   multisets (hunk headers, offsets and context ignored); any difference → failed.
 //   weakened_control or suspicious_change (or a non-boolean answer) → stop_rule security_review:
 //   held on public repos, a stopped PR on private.
 // - Before any merge (fix and regate) read-only relays re-read the PR: base.ref must be the
 //   default branch, head must be this repo's fix branch, and the PR's files must be the Scrutineer
 //   files plus the allowed tests. Any mismatch → stopped / merge_escalated. Regate also obeys
 //   policy and hasGate before any agent runs.
+// - Fix mode pins the PR: head.sha must equal the clone HEAD (read by a fixed `git rev-parse HEAD`
+//   relay after Build), the commit Check reviewed. Regate cannot pin: the reviewed sha is from an
+//   earlier run and is not persisted. In both modes merge-pr-with-gate takes no expected sha, so a
+//   push between verifyPr and the merge call is not caught here; the gate's own re-verify and the
+//   required checks are the guard for that window.
 // - The token and its path never appear in a prompt; finding.mjs reads it itself.
 // - The PR number passed to merge-pr-with-gate comes from a fixed read-only `gh api ... pulls
 //   -f head=<owner>:<branch>` relay, filtered in script to head.repo.full_name === repo
 //   (Ruling 18). The Ship agent's own pr_url is ignored.
 // - Nothing is pushed before Check returns. A §9 stop on a public repo (rules 1, 2, 5) holds the
-//   unpushed clone under ~/.claude/scrutineer-autopilot/held/<id>/.
+//   unpushed clone under <stateDir>/held/<id>/.
 // - Build and Ship are write agents with NO isolation: they work in a separate clone under
 //   ${TMPDIR:-/tmp}/scrutineer-autopilot/<id>/, as factory-build does. A worktree of the session
 //   repo would be the wrong tree.
@@ -66,11 +76,11 @@ export const meta = {
   description: 'Build, check and land ONE Scrutineer-verified fix as a PR: a read-only relay fetches the finding, a write agent applies suggested_fix in a fresh clone with a regression test and local gates, a read-only Check on a different model judges behaviour change, then script logic holds the fix unpushed, opens a PR and stops, or merges through merge-pr-with-gate.',
   whenToUse: 'The scrutineer-autopilot tick emitted a fix or regate agentItem for one finding. Not for hand-picked findings outside Scrutineer (use fix-finding) or for gating an arbitrary PR (use merge-pr-with-gate).',
   phases: [
-    { title: 'Preflight', detail: 'read-only: relay node finding.mjs <id> (mints a nonce; exit 3 → skipped), default branch + tip SHA via gh api, then gh pr list for an open scrutineer/finding-<id> PR (→ skipped)' },
-    { title: 'Build', detail: 'write agent, no isolation: clone to ${TMPDIR:-/tmp}/scrutineer-autopilot/<id>/repo, branch from the default tip SHA, git apply --3way, new regression test red→green, local gates, commit, no push; read-only relays then list changed and added files' },
-    { title: 'Check', detail: 'a read-only relay returns the fenced clone diff; a read-only agent on checkModel returns behaviour_change none | changed | unknown, weakened_control, suspicious_change, with evidence' },
-    { title: 'Ship', detail: 'script computes stop_rule; public stop → write agent moves the clone to ~/.claude/scrutineer-autopilot/held/<id>/; otherwise a write agent writes the script-built title/body files, a write agent pushes + gh pr create --body-file, then a read-only relay resolves the PR number' },
-    { title: 'Merge', detail: "policy auto + hasGate + no stop (regate obeys the same rules): read-only relays re-verify PR base, head and files, then workflow('shipofclaudius:merge-pr-with-gate', { pr, repo, execute: true }); NEEDS_REBASE → gh pr update-branch" },
+    { title: 'Preflight', detail: 'read-only: relay node finding.mjs --repo <repo> <id> (mints a nonce; exit 3 → skipped), default branch + tip SHA via gh api, then gh api pulls head=<owner>:scrutineer/finding-<id> state=open, same-repo rows only (→ skipped)' },
+    { title: 'Build', detail: 'write agent, no isolation: clone to ${TMPDIR:-/tmp}/scrutineer-autopilot/<id>/repo, branch from the default tip SHA, git apply --3way, new regression test red→green, local gates, commit, no push; read-only relays then read the clone HEAD sha and list changed and added files' },
+    { title: 'Check', detail: 'a read-only relay returns the fenced clone diff, whose Scrutineer-file +/- lines must equal suggested_fix; a read-only agent on checkModel returns behaviour_change none | changed | unknown, weakened_control, suspicious_change, with evidence' },
+    { title: 'Ship', detail: 'script computes stop_rule; public stop → write agent moves the clone to <stateDir>/held/<id>/; otherwise a write agent writes the script-built title/body files, a write agent pushes + gh pr create --body-file, then a read-only relay resolves the PR number' },
+    { title: 'Merge', detail: "policy auto + hasGate + no stop (regate obeys the same rules): read-only relays re-verify PR base, head (and head sha in fix mode) and files, then workflow('shipofclaudius:merge-pr-with-gate', { pr, repo, execute: true }); NEEDS_REBASE → gh pr update-branch" },
   ],
 }
 
@@ -111,14 +121,22 @@ if (!BIN_DIR || /["`$\\\n\r]/.test(BIN_DIR)) {
   throw new Error('scrutineer-fix-pr: args.binDir is required in both modes — the directory holding finding.mjs (no quotes, $, backticks or backslashes).')
 }
 
+const STATE_DIR = A.stateDir == null ? '~/.claude/scrutineer-autopilot' : typeof A.stateDir === 'string' ? A.stateDir.trim().replace(/\/+$/, '') : ''
+if (!/^(~\/|\/)./.test(STATE_DIR) || /["`$\\\n\r]/.test(STATE_DIR)) {
+  throw new Error('scrutineer-fix-pr: args.stateDir must be an absolute or ~/ path with no quotes, $, backticks or backslashes.')
+}
+// Shell form of a state-dir path: double-quoted, with a leading ~/ as $HOME (a quoted ~ does not expand).
+const shPath = (p) => (p.startsWith('~/') ? `"$HOME/${p.slice(2)}"` : `"${p}"`)
+
 const BRANCH = `scrutineer/finding-${ID}`
 const SCRATCH = `\${TMPDIR:-/tmp}/scrutineer-autopilot/${ID}/`
 const CLONE = `${SCRATCH}repo`
-const HELD_PATH = `~/.claude/scrutineer-autopilot/held/${ID}/`
+const HELD_PATH = `${STATE_DIR}/held/${ID}/`
+const HELD_SH = shPath(`${STATE_DIR}/held/${ID}`)
+const HELD_PARENT_SH = shPath(`${STATE_DIR}/held`)
 
-let TEST_OUTPUT = null // Build's red/green text: run log only, never a PR body or prompt
 function done(outcome, extra = {}) {
-  const r = { outcome, pr_url: null, merge_sha: null, held_path: null, stop_rule: null, reason: '', ...(TEST_OUTPUT ? { test_output: TEST_OUTPUT } : {}), ...extra }
+  const r = { outcome, pr_url: null, merge_sha: null, held_path: null, stop_rule: null, reason: '', ...extra }
   log(`scrutineer-fix-pr #${ID} (${REPO_SLUG}): ${outcome}${r.stop_rule ? ` [${r.stop_rule}]` : ''}${r.reason ? ` — ${r.reason}` : ''}`)
   return r
 }
@@ -171,6 +189,35 @@ const relayPrompt = (cmd, nonce) =>
   `comment, push, or run any other command.`
 
 function parseJson(s) { try { return JSON.parse(s) } catch { return undefined } }
+
+// Per-file added and removed lines of a unified diff, keyed by the b/ path (the a/ path for a deletion), each a
+// sorted array (a multiset). Hunk headers, offsets and context lines are ignored; hunk lengths from the @@ line
+// decide where a hunk ends, so a diff without `diff --git` headers parses too.
+function hunkLines(text) {
+  const out = new Map()
+  const get = (f) => { if (!out.has(f)) out.set(f, { add: [], del: [] }); return out.get(f) }
+  let file = null, minus = null, oldLeft = 0, newLeft = 0, m
+  for (const raw of str(text).split('\n')) {
+    const l = raw.replace(/\r$/, '')
+    if (oldLeft > 0 || newLeft > 0) {
+      const c = l[0]
+      if (c === '+') { get(file).add.push(l.slice(1)); newLeft--; continue }
+      if (c === '-') { get(file).del.push(l.slice(1)); oldLeft--; continue }
+      if (c === ' ' || l === '') { oldLeft--; newLeft--; continue }
+      if (c === '\\') continue
+      oldLeft = newLeft = 0 // malformed hunk: read this line as a header
+    }
+    if ((m = l.match(/^--- "?a\/(.*?)"?[ \t]*$/))) minus = m[1]
+    else if (/^--- /.test(l)) minus = null
+    else if ((m = l.match(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/))) file = m[1]
+    else if (/^\+\+\+ /.test(l)) file = minus
+    else if ((m = l.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/)) && file != null) {
+      oldLeft = m[1] == null ? 1 : Number(m[1]); newLeft = m[2] == null ? 1 : Number(m[2]); get(file)
+    }
+  }
+  for (const v of out.values()) { v.add.sort(); v.del.sort() }
+  return out
+}
 const str = (v) => (typeof v === 'string' ? v : v == null ? '' : String(v))
 
 // Path rules. safePath is the only form of a repo path that may appear in a prompt.
@@ -195,14 +242,16 @@ const META_SCHEMA = (label) => ({ label, phase: 'Merge', agentType: READONLY_AGE
 
 // Re-verify the PR through read-only relays before any merge (fix and regate). testFiles is the
 // exact relay-derived test set in fix mode, or null in regate (then extras must pass the test-file
-// rules, capped). Any mismatch → stopped / merge_escalated.
-async function verifyPr(pr, prUrl, testFiles) {
+// rules, capped). headSha is the clone HEAD Check reviewed (fix mode) or null (regate: no pin).
+// Any mismatch → stopped / merge_escalated.
+async function verifyPr(pr, prUrl, testFiles, headSha) {
   const meta = await agent(relayPrompt(`gh api repos/${REPO_SLUG}/pulls/${pr}`, false), META_SCHEMA('relay:pr-meta'))
   const m = meta && meta.exit_code === 0 ? parseJson(str(meta.raw)) : undefined
   const esc = (reason) => done('stopped', { pr_url: prUrl, stop_rule: 'merge_escalated', reason })
   if (!m || typeof m !== 'object') return esc('could not read the PR read-only')
   if (!m.base || m.base.ref !== DEFAULT_BRANCH) return esc(`PR base ${safePath(m.base && m.base.ref)} is not the default branch ${DEFAULT_BRANCH}`)
   if (!m.head || m.head.ref !== BRANCH || !m.head.repo || m.head.repo.full_name !== REPO_SLUG) return esc('PR head is not this repo\'s fix branch')
+  if (headSha && m.head.sha !== headSha) return esc('PR head sha differs from the commit Check reviewed')
   const fl = await agent(relayPrompt(`gh api repos/${REPO_SLUG}/pulls/${pr}/files --jq '.[].filename'`, false), META_SCHEMA('relay:pr-files'))
   if (!fl || fl.exit_code !== 0) return esc('could not read the PR file list')
   const prFiles = lines(fl.raw)
@@ -218,17 +267,19 @@ async function verifyPr(pr, prUrl, testFiles) {
 }
 
 // Merge result → outcome. Pure enum mapping; the only agent here is update-branch on NEEDS_REBASE.
-async function mergeStep(pr, prUrl, testFiles) {
+// A PR exists here, so every failure is stopped / merge_escalated, never failed (the tick then waits on the PR).
+async function mergeStep(pr, prUrl, testFiles, headSha) {
   phase('Merge')
-  const bad = await verifyPr(pr, prUrl, testFiles)
+  const bad = await verifyPr(pr, prUrl, testFiles, headSha)
   if (bad) return bad
+  const esc = (reason) => done('stopped', { pr_url: prUrl, stop_rule: 'merge_escalated', reason })
   let res
   try { res = await workflow('shipofclaudius:merge-pr-with-gate', { pr, repo: REPO_SLUG, execute: true }) }
-  catch (e) { return done('failed', { pr_url: prUrl, reason: `merge-pr-with-gate threw: ${str(e && e.message).split('\n')[0]}` }) }
+  catch (e) { return esc(`merge-pr-with-gate threw: ${str(e && e.message).split('\n')[0]}`) }
   const status = res && res.outcome && res.outcome.status
   const verdict = res && res.outcome && res.outcome.verdict
   if (status === 'MERGED') return done('merged', { pr_url: prUrl, merge_sha: (res.merge && res.merge.merged_sha) || null })
-  if (status !== 'ESCALATED') return done('failed', { pr_url: prUrl, reason: `merge-pr-with-gate status ${status || 'missing'}` })
+  if (status !== 'ESCALATED') return esc(`merge-pr-with-gate status ${status || 'missing'}`)
   if (verdict === 'CI_PENDING') return done('awaiting_ci', { pr_url: prUrl, reason: 'required checks pending' })
   if (verdict === 'NEEDS_REBASE') {
     const up = await agent(
@@ -237,7 +288,7 @@ async function mergeStep(pr, prUrl, testFiles) {
       `Do not rebase, do not force-push, do not merge the PR. Return { status: UPDATED | FAILED, detail }.`,
       { label: 'update-branch', phase: 'Merge', schema: { type: 'object', additionalProperties: false, required: ['status', 'detail'], properties: { status: { enum: ['UPDATED', 'FAILED'] }, detail: { type: 'string' } } } })
     if (up && up.status === 'UPDATED') return done('awaiting_ci', { pr_url: prUrl, reason: 'branch updated from base; re-gate next tick' })
-    return done('failed', { pr_url: prUrl, reason: `gh pr update-branch failed: ${safePath(up && up.detail)}` })
+    return esc(`gh pr update-branch failed: ${safePath(up && up.detail)}`)
   }
   if (verdict === 'CONFLICT') return done('stopped', { pr_url: prUrl, stop_rule: 'merge_escalated', reason: 'conflict' })
   if (verdict === 'BLOCKED' || verdict === 'CI_FAILING') return done('stopped', { pr_url: prUrl, stop_rule: 'merge_escalated', reason: verdict })
@@ -253,10 +304,10 @@ if (MODE === 'regate' && !HAS_GATE) return done('stopped', { pr_url: REGATE_URL,
 
 // ── Preflight ──
 phase('Preflight')
-const relay = await agent(relayPrompt(`node "${BIN_DIR}/finding.mjs" ${ID}`, true),
+const relay = await agent(relayPrompt(`node "${BIN_DIR}/finding.mjs" --repo ${REPO_SLUG} ${ID}`, true),
   { label: 'relay:finding', phase: 'Preflight', agentType: READONLY_AGENT, schema: NONCE_RELAY_SCHEMA, effort: 'low' })
 if (!relay) return done('failed', { reason: 'finding relay returned nothing' })
-if (relay.exit_code === 3) return done('skipped', { reason: 'repository not allowlisted (finding.mjs exit 3)' })
+if (relay.exit_code === 3) return done('skipped', { reason: 'repository not allowlisted or not args.repo (finding.mjs exit 3)' })
 if (relay.exit_code !== 0) return done('failed', { reason: `finding.mjs exit ${relay.exit_code}` })
 const NONCE = str(relay.nonce).trim()
 const RAW = str(relay.raw)
@@ -275,18 +326,22 @@ const dbr = await agent(relayPrompt(`gh api repos/${REPO_SLUG} --jq .default_bra
 const DEFAULT_BRANCH = dbr && dbr.exit_code === 0 ? str(dbr.raw).trim() : ''
 if (!SAFE_REF.test(DEFAULT_BRANCH)) return done('failed', { reason: 'could not resolve a safe default branch name' })
 
-if (MODE === 'regate') return await mergeStep(PR_ARG, REGATE_URL, null)
+if (MODE === 'regate') return await mergeStep(PR_ARG, REGATE_URL, null, null)
 
 const dsha = await agent(relayPrompt(`gh api repos/${REPO_SLUG}/commits/${DEFAULT_BRANCH} --jq .sha`, false),
   { label: 'relay:default-sha', phase: 'Preflight', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const BASE_SHA = dsha && dsha.exit_code === 0 ? str(dsha.raw).trim() : ''
 if (!SHA_RE.test(BASE_SHA)) return done('failed', { reason: 'could not resolve the default branch tip SHA' })
 
-const open = await agent(relayPrompt(`gh pr list -R ${REPO_SLUG} --head ${BRANCH} --state open --json number`, false),
+// Same server-filtered relay and same-repo filter as the PR-number relay in Ship (Ruling 18).
+const ownPrs = (rows, base) => (Array.isArray(rows) ? rows : []).filter((r) => r && Number.isInteger(r.number) && r.head &&
+  r.head.ref === BRANCH && r.head.repo && r.head.repo.full_name === REPO_SLUG && (!base || (r.base && r.base.ref === base)))
+const PR_LIST_CMD = `gh api --method GET repos/${REPO_SLUG}/pulls -f head=${OWNER}:${BRANCH} -f state=open -f per_page=5`
+const open = await agent(relayPrompt(PR_LIST_CMD, false),
   { label: 'relay:open-pr', phase: 'Preflight', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const openRows = open && open.exit_code === 0 ? parseJson(str(open.raw)) : undefined
 if (!Array.isArray(openRows)) return done('failed', { reason: 'could not list open PRs for the fix branch' })
-if (openRows.length > 0) return done('skipped', { reason: `${BRANCH} already has an open PR` })
+if (ownPrs(openRows, null).length > 0) return done('skipped', { reason: `${BRANCH} already has an open PR` })
 
 // Script-derived, sanitized fields. Only these leave the fence.
 const CLASS = /^CWE-\d{1,5}$/.test(str(F.cwe).trim()) ? str(F.cwe).trim() : 'vulnerability'
@@ -331,8 +386,13 @@ const build = await agent(
   `Return { status, branch, default_branch (${DEFAULT_BRANCH}), test_added, red, green, diff_files }.`,
   { label: 'build', phase: 'Build', model: BUILD_MODEL, schema: BUILD_SCHEMA })
 if (!build || build.status !== 'BUILT') return done('failed', { reason: build ? (safePath(build.status).toLowerCase() || 'build status missing') : 'build agent returned nothing' })
-TEST_OUTPUT = { red: str(build.red).slice(0, 4000), green: str(build.green).slice(0, 4000) }
 if (str(build.default_branch).trim() !== DEFAULT_BRANCH) return done('failed', { reason: `Build reported default branch ${safePath(build.default_branch)}, expected ${DEFAULT_BRANCH}` })
+
+// The commit Check reviews and verifyPr pins the PR head to (Rec 3), from a fixed read-only relay.
+const headRelay = await agent(relayPrompt(`git -C "${CLONE}" rev-parse HEAD`, false),
+  { label: 'relay:clone-head', phase: 'Build', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
+const CLONE_HEAD = headRelay && headRelay.exit_code === 0 ? str(headRelay.raw).trim() : ''
+if (!SHA_RE.test(CLONE_HEAD)) return done('failed', { reason: 'could not read the clone HEAD sha' })
 
 // The changed and added file lists come from fixed read-only relays, never from Build's report.
 const diffRelay = await agent(relayPrompt(`git -C "${CLONE}" diff --name-only ${BASE_SHA}...HEAD`, false),
@@ -370,6 +430,12 @@ const headerPath = (rest) => {
 }
 const diffPaths = [...new Set([...str(diffText.raw).matchAll(/^diff --git a\/(.+)$/gm)].map((m) => headerPath(m[1])).filter(Boolean))].sort()
 if (diffPaths.length === 0 || !sameSet(diffPaths, changed)) return done('failed', { reason: 'relayed diff does not match file list' })
+// The Scrutineer files' added/removed lines must be exactly suggested_fix's, so Build cannot have rewritten the fix.
+const fixH = hunkLines(FIX)
+const relH = hunkLines(diffText.raw)
+const noLines = { add: [], del: [] }
+const sameLines = (f) => JSON.stringify(fixH.get(f) || noLines) === JSON.stringify(relH.get(f) || noLines)
+if (!SCRUT_FILES_RAW.every(sameLines)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
 const check = await agent(
   `You are a READ-ONLY security and behaviour reviewer. Do not edit, commit, push or comment, and do not run git or ` +
   `fetch the diff yourself: judge the relayed diff below. You may read files in "${CLONE}" read-only for context.\n\n` +
@@ -395,15 +461,15 @@ const bc = check && ['none', 'changed', 'unknown'].includes(check.behaviour_chan
 const securityFlag = !check || check.weakened_control !== false || check.suspicious_change !== false
 const breaking = str(F.breaking_change).trim().toLowerCase()
 const STOP = securityFlag ? 'security_review'
-  : (breaking === 'breaking' || breaking === 'unknown') ? 'breaking_change'
+  : (breaking && breaking !== 'non_breaking') ? 'breaking_change' // M4: anything but empty or non_breaking stops
   : bc !== 'none' ? 'behaviour' : null
 if ((STOP && PUBLIC) || (POLICY === 'stop' && PUBLIC)) {
   const rule = STOP || 'policy_stop'
   const hold = await agent(
     `You park ONE unpushed fix clone for a human. Finding id ${ID}.\n\n${HARD_RULES}\n\n` +
-    `Do NOT push anything. Run: test -e ${HELD_PATH.replace(/\/$/, '')} && echo EXISTS; if it exists return status FAILED. ` +
-    `Otherwise: mkdir -p ~/.claude/scrutineer-autopilot/held && mv "${CLONE}" ${HELD_PATH.replace(/\/$/, '')}. ` +
-    `Confirm git -C ${HELD_PATH.replace(/\/$/, '')} log -1 --oneline ${BRANCH} works.\n` +
+    `Do NOT push anything. The held path is ${HELD_PATH}. Run: test -e ${HELD_SH} && echo EXISTS; if it exists return status FAILED. ` +
+    `Otherwise: mkdir -p ${HELD_PARENT_SH} && mv "${CLONE}" ${HELD_SH}. ` +
+    `Confirm git -C ${HELD_SH} log -1 --oneline ${BRANCH} works.\n` +
     `Return { status: HELD | FAILED, path, detail }.`,
     { label: 'hold', phase: 'Ship', schema: { type: 'object', additionalProperties: false, required: ['status', 'path', 'detail'], properties: { status: { enum: ['HELD', 'FAILED'] }, path: { type: 'string' }, detail: { type: 'string' } } } })
   if (!hold || hold.status !== 'HELD') return done('failed', { stop_rule: rule, reason: `could not move clone to ${HELD_PATH}: ${safePath(hold && hold.detail)}` })
@@ -442,12 +508,12 @@ const ship = await agent(
 if (!ship || ship.status !== 'OPENED') return done('failed', { stop_rule: STOP, reason: `push / gh pr create failed: ${safePath(ship && ship.detail)}` })
 
 // Ruling 18: the PR number comes from a fixed read-only relay, never the Ship agent's report.
-const prRelay = await agent(relayPrompt(`gh api --method GET repos/${REPO_SLUG}/pulls -f head=${OWNER}:${BRANCH} -f state=open -f per_page=5`, false),
+// Ship reported OPENED, so the branch is pushed: from here a failure is stopped, never failed (I4).
+const prRelay = await agent(relayPrompt(PR_LIST_CMD, false),
   { label: 'relay:pr-number', phase: 'Ship', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const rows = prRelay && prRelay.exit_code === 0 ? parseJson(str(prRelay.raw)) : undefined
-const own = Array.isArray(rows) ? rows.filter((r) => r && Number.isInteger(r.number) && r.head && r.head.ref === BRANCH &&
-  r.head.repo && r.head.repo.full_name === REPO_SLUG && r.base && r.base.ref === DEFAULT_BRANCH) : []
-if (own.length !== 1) return done('failed', { stop_rule: STOP, reason: `expected one same-repo open PR for ${BRANCH} into ${DEFAULT_BRANCH}, found ${own.length}` })
+const own = ownPrs(rows, DEFAULT_BRANCH)
+if (own.length !== 1) return done('stopped', { stop_rule: STOP || 'merge_escalated', reason: `expected one same-repo open PR for ${BRANCH} into ${DEFAULT_BRANCH}, found ${own.length}` })
 const PR = own[0].number
 const PR_URL = `https://github.com/${REPO_SLUG}/pull/${PR}`
 
@@ -455,4 +521,4 @@ if (STOP) return done('stopped', { pr_url: PR_URL, stop_rule: STOP, reason: STOP
 if (POLICY === 'stop') return done('stopped', { pr_url: PR_URL, stop_rule: 'policy_stop', reason: 'merge_policy stop' })
 if (!HAS_GATE) return done('stopped', { pr_url: PR_URL, stop_rule: 'no_gate', reason: 'repo has no required-check gate' })
 
-return await mergeStep(PR, PR_URL, TEST_FILES)
+return await mergeStep(PR, PR_URL, TEST_FILES, CLONE_HEAD)
