@@ -8,6 +8,7 @@
 // Run:  node tests/scrutineer-fix-pr-sim.test.mjs
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { OUTCOMES } from '../packages/scrutineer-autopilot/src/tick.mjs'
 
 const SRC_PATH = new URL('../.claude/workflows/scrutineer-fix-pr.js', import.meta.url)
@@ -82,9 +83,17 @@ function prRows(over = []) {
   ])
 }
 
+// git blob sha of a text, as `git hash-object` prints it (node's own SHA-1, to check the workflow's).
+const blobSha = (t) => createHash('sha1').update(`blob ${Buffer.byteLength(t)}\0`).update(t).digest('hex')
+const ZERO = '0'.repeat(40)
+const scrutPaths = (fix) => [...new Set([...fix.matchAll(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/gm)].map((m) => m[1]))]
+// One `git diff --raw --no-abbrev` line per Scrutineer file; the blob is a stand-in derived from the path.
+const rawLines = (fix, blob = (p) => blobSha(`fixed ${p}`)) => scrutPaths(fix).map((p) => `:100644 100644 ${SHA} ${blob(p)} M\t${p}`).join('\n')
+
 async function runScript({ args, stubs = {}, wf } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], workflows: [] }
+  let FIX = SUGGESTED_FIX // the suggested_fix the finding relay returned in this run
   const defaults = {
     'relay:finding': () => ({ raw: JSON.stringify(relayFinding(), null, 2), nonce: NONCE, exit_code: 0 }),
     'relay:default-branch': () => ({ raw: 'main\n', exit_code: 0 }),
@@ -92,6 +101,8 @@ async function runScript({ args, stubs = {}, wf } = {}) {
     'relay:open-pr': () => ({ raw: '[]', exit_code: 0 }),
     build: () => built(),
     'relay:clone-head': () => ({ raw: `${HEAD_SHA}\n`, exit_code: 0 }),
+    'relay:fix-blobs': () => ({ raw: `FIXBLOB ${blobSha(FIX)}\nAPPLIED\n${rawLines(FIX)}\n`, exit_code: 0 }),
+    'relay:clone-blobs': () => ({ raw: `${rawLines(FIX)}\n:000000 100644 ${ZERO} ${blobSha('test')} A\ttest/search.test.js\n`, exit_code: 0 }),
     'relay:diff-files': () => ({ raw: 'src/search.js\ntest/search.test.js\n', exit_code: 0 }),
     'relay:added-files': () => ({ raw: 'test/search.test.js\n', exit_code: 0 }),
     'relay:check-diff': () => ({ raw: CHECK_DIFF, nonce: DNONCE, exit_code: 0 }),
@@ -111,7 +122,11 @@ async function runScript({ args, stubs = {}, wf } = {}) {
     const fn = stubs[label] || defaults[label]
     if (!fn) throw new Error('unexpected agent label: ' + label)
     await new Promise((r) => setTimeout(r, 1))
-    return fn(prompt, opts)
+    const out = await fn(prompt, opts)
+    if (label === 'relay:finding' && out && typeof out.raw === 'string') {
+      try { const f = JSON.parse(out.raw); if (typeof f.suggested_fix === 'string') FIX = f.suggested_fix } catch {}
+    }
+    return out
   }
   const workflow = async (name, wargs) => {
     calls.workflows.push({ name, args: wargs })
@@ -698,6 +713,41 @@ test('M5: the header Returns list names exactly the outcomes --record accepts (n
   const m = src.match(/^\/\/ Returns \{ outcome: ([a-z_|]+),/m)
   assert.ok(m, 'Returns line present')
   assert.deepEqual(m[1].split('|').sort(), [...OUTCOMES].sort())
+})
+
+test('A: blob check — the fix applied at BASE_SHA in a scratch worktree must give the clone HEAD blobs', async () => {
+  const ok = await runScript()
+  assert.equal(ok.result.outcome, 'merged', 'equal blobs proceed')
+  const fb = one(ok.calls, 'relay:fix-blobs'), cb = one(ok.calls, 'relay:clone-blobs')
+  for (const r of [fb, cb]) assert.equal(r.opts.agentType, 'Explore')
+  assert.ok(fb.prompt.includes(`worktree add --detach "\${TMPDIR:-/tmp}/scrutineer-autopilot/42/verify" ${SHA}`), fb.prompt)
+  assert.ok(fb.prompt.includes('apply --check "${TMPDIR:-/tmp}/scrutineer-autopilot/42/fix.diff"'))
+  assert.ok(fb.prompt.includes('hash-object "${TMPDIR:-/tmp}/scrutineer-autopilot/42/fix.diff"'))
+  assert.ok(cb.prompt.includes(`diff --raw --no-abbrev ${SHA} ${HEAD_SHA}`))
+  for (const r of [fb, cb]) assert.ok(!r.prompt.includes('render(escape(q))') && !r.prompt.includes(HOSTILE_FIX_MARK), 'fix text is never in a command')
+  const bad = {
+    differingBlob: { 'relay:clone-blobs': () => ({ raw: rawLines(SUGGESTED_FIX, () => 'c'.repeat(40)), exit_code: 0 }) },
+    modeChange: { 'relay:clone-blobs': () => ({ raw: rawLines(SUGGESTED_FIX).replace(':100644 100644', ':100644 100755'), exit_code: 0 }) },
+    missingFile: { 'relay:clone-blobs': () => ({ raw: '', exit_code: 0 }) },
+    tamperedFixFile: { 'relay:fix-blobs': () => ({ raw: `FIXBLOB ${'d'.repeat(40)}\nAPPLIED\n${rawLines(SUGGESTED_FIX)}\n`, exit_code: 0 }) },
+    applyFailed: { 'relay:fix-blobs': () => ({ raw: `FIXBLOB ${blobSha(SUGGESTED_FIX)}\n`, exit_code: 1 }) },
+  }
+  for (const [name, stubs] of Object.entries(bad)) {
+    const { result, calls } = await runScript({ stubs })
+    assert.equal(result.outcome, 'failed', name)
+    assert.equal(result.reason, 'fix hunks differ from suggested_fix', name)
+    assert.ok(!labels(calls).includes('check') && !labels(calls).includes('ship'), `${name}: Check never runs`)
+  }
+})
+
+test('A: a mode, deletion or rename header in suggested_fix fails before any write agent', async () => {
+  for (const hdr of ['new mode 100755', 'deleted file mode 100644', 'similarity index 90%']) {
+    const fix = SUGGESTED_FIX.replace('--- a/src/search.js', `${hdr}\n--- a/src/search.js`)
+    const { result, calls } = await runScript({ stubs: { 'relay:finding': () => ({ raw: JSON.stringify(relayFinding({ suggested_fix: fix })), nonce: NONCE, exit_code: 0 }) } })
+    assert.equal(result.outcome, 'failed', hdr)
+    assert.equal(result.reason, 'fix hunks differ from suggested_fix', hdr)
+    assert.equal(writes(calls).length, 0, hdr)
+  }
 })
 
 let failed = 0

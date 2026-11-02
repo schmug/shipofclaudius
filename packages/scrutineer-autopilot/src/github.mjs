@@ -75,5 +75,6 @@ export async function prForBranch(key, branch, { exec }) {
     && String(x.head?.repo?.full_name ?? '').toLowerCase() === String(key).toLowerCase())
   if (!p) return null
   const merged = p.merged_at != null
-  return { number: p.number, state: merged ? 'MERGED' : p.state === 'open' ? 'OPEN' : 'CLOSED', mergeSha: merged ? p.merge_commit_sha ?? null : null }
+  return { number: p.number, state: merged ? 'MERGED' : p.state === 'open' ? 'OPEN' : 'CLOSED', mergeSha: merged ? p.merge_commit_sha ?? null : null,
+    mergedAt: p.merged_at ?? null, createdAt: p.created_at ?? null }
 }

@@ -617,6 +617,35 @@ test('I6: emitting a fix item writes stage fixing + emittedAt; the next tick wai
   assert.equal(await exists(join(D.stateDir, 'ledger.json')), false, 'dry run writes no fixing stage')
 })
 
+test('I6 follow-up: a stale fixing entry with an OPEN PR is not parked, becomes stopped, and the repo stays busy', async () => {
+  const W = await world({ findings: [triagedViable(7), triagedViable(8)], scans: [deepDive(), ...verifiedSecure(7), ...verifiedSecure(8)] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 7: { stage: 'fixing', emittedAt: iso(NOW - 7 * 3600e3), repo: 'o/app' } }))
+  const r = await tick(W, { exec: stubExec({ 'head=o:scrutineer/finding-7': branchPr(7, 70), 'head=o:scrutineer/finding-8': '[]' }) })
+  await W.stub.close()
+  assert.equal(r.actions.find((a) => a.findingId === 7).type, 'wait')
+  assert.equal(r.parked.length, 0)
+  assert.equal(W.posts().length, 0, 'no park note')
+  assert.equal(r.agentItems.length, 0, 'no fix item for finding 8')
+  assert.equal(r.actions.find((a) => a.findingId === 8).result, 'waiting')
+  const e = (await ledgerOf(W)).findings['7']
+  assert.equal(e.stage, 'stopped')
+  assert.equal(e.pr, 70)
+})
+
+test('B: a fixing entry whose branch shows an older merged PR is not marked fixed; a newer merged PR is', async () => {
+  const pr = (created) => JSON.stringify([{ number: 3, state: 'closed', merged_at: created, created_at: created, merge_commit_sha: 'm3', head: { ref: 'scrutineer/finding-7', repo: { full_name: 'o/app' } } }])
+  const W = await world({ findings: [triagedViable(7), triagedViable(8)], scans: [deepDive(), ...verifiedSecure(7), ...verifiedSecure(8)] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 7: { stage: 'fixing', emittedAt: iso(NOW - 3600e3), repo: 'o/app' } }))
+  const r = await tick(W, { exec: stubExec({ 'head=o:scrutineer/finding-7': pr('2026-09-01T00:00:00Z'), 'head=o:scrutineer/finding-8': '[]' }) })
+  assert.equal(W.posts().length, 0)
+  assert.equal(r.actions.find((a) => a.findingId === 7).type, 'wait')
+  assert.equal(r.agentItems.length, 0, 'fixing keeps the repo busy despite the old merged PR')
+  const r2 = await tick(W, { exec: stubExec({ 'head=o:scrutineer/finding-7': pr(iso(NOW - 1800e3)), 'head=o:scrutineer/finding-8': '[]' }) })
+  await W.stub.close()
+  assert.equal(r2.actions.find((a) => a.findingId === 7).type, 'mark_fixed')
+  assert.equal(W.posts().find((p) => p.path === '/findings/7/status').body.status, 'fixed')
+})
+
 let failed = 0
 for (const [name, fn] of tests) {
   try { await fn(); console.log('PASS', name) }

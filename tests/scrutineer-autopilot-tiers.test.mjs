@@ -90,14 +90,15 @@ test('prState returns {state, mergeSha}', async () => {
   assert.deepEqual(await prState('o/app', 8, { exec: open.exec }), { state: 'OPEN', mergeSha: null })
 })
 // REST pulls rows (gh api repos/{key}/pulls?head=owner:branch).
-const pull = (o) => ({ number: 9, state: 'closed', merged_at: null, merge_commit_sha: 'test-merge', head: { ref: 'scrutineer/finding-3', repo: { full_name: 'o/app' } }, ...o })
+const pull = (o) => ({ number: 9, state: 'closed', merged_at: null, created_at: '2026-10-29T00:00:00Z', merge_commit_sha: 'test-merge', head: { ref: 'scrutineer/finding-3', repo: { full_name: 'o/app' } }, ...o })
 test('prForBranch filters server-side by head=owner:branch, separate argv, and maps REST state', async () => {
   const { exec, calls } = stub({ 'pulls': JSON.stringify([pull({ merged_at: '2026-10-30T00:00:00Z', merge_commit_sha: 'cafe' })]) })
-  assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec }), { number: 9, state: 'MERGED', mergeSha: 'cafe' })
+  assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec }), { number: 9, state: 'MERGED', mergeSha: 'cafe', mergedAt: '2026-10-30T00:00:00Z', createdAt: '2026-10-29T00:00:00Z' })
   assert.equal(calls[0], 'gh api --method GET repos/o/app/pulls -f head=o:scrutineer/finding-3 -f state=all -f per_page=5')
   const one = async (row) => prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pulls': JSON.stringify([row]) }).exec })
-  assert.deepEqual(await one(pull({ state: 'open' })), { number: 9, state: 'OPEN', mergeSha: null })
-  assert.deepEqual(await one(pull()), { number: 9, state: 'CLOSED', mergeSha: null })
+  assert.deepEqual(await one(pull({ state: 'open' })), { number: 9, state: 'OPEN', mergeSha: null, mergedAt: null, createdAt: '2026-10-29T00:00:00Z' })
+  assert.deepEqual(await one(pull()), { number: 9, state: 'CLOSED', mergeSha: null, mergedAt: null, createdAt: '2026-10-29T00:00:00Z' })
+  assert.deepEqual(await one(pull({ created_at: undefined })), { number: 9, state: 'CLOSED', mergeSha: null, mergedAt: null, createdAt: null })
   assert.equal(await prForBranch('o/app', 'nope', { exec: stub({ 'pulls': '[]' }).exec }), null)
 })
 test('prForBranch ignores fork PRs with the branch name even if the server returns them', async () => {
@@ -105,7 +106,7 @@ test('prForBranch ignores fork PRs with the branch name even if the server retur
   const run = (rows) => prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pulls': JSON.stringify(rows) }).exec })
   assert.equal(await run([fork]), null)
   assert.equal(await run([pull({ head: { ref: 'scrutineer/finding-3', repo: null } })]), null) // head repo deleted
-  assert.deepEqual(await run([fork, pull({ number: 8, state: 'open' })]), { number: 8, state: 'OPEN', mergeSha: null })
+  assert.deepEqual(await run([fork, pull({ number: 8, state: 'open' })]), { number: 8, state: 'OPEN', mergeSha: null, mergedAt: null, createdAt: '2026-10-29T00:00:00Z' })
 })
 test('pollRepo counts a fork PR named scrutineer/finding-* as a rescan trigger', async () => {
   const { exec } = stub(repoRoutes('public', [

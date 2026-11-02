@@ -47,7 +47,14 @@
 // - Check runs under the read-only agentType and never fetches the diff itself: a read-only relay
 //   returns `git -C <clone> diff <sha>...HEAD` with a fresh nonce and Check sees it fenced. Before Check,
 //   the relayed diff's added/removed lines for each Scrutineer file must equal suggested_fix's as
-//   multisets (hunk headers, offsets and context ignored); any difference → failed.
+//   multisets (hunk headers, offsets and context ignored); any difference → failed. Then a blob check
+//   binds position too: a read-only relay applies Build's ${SCRATCH}fix.diff in a scratch worktree at
+//   BASE_SHA and prints `git hash-object` of that file plus `git diff --cached --raw --no-abbrev`; a
+//   second prints `git diff --raw --no-abbrev BASE_SHA CLONE_HEAD`. The script requires the fix file's
+//   blob to equal its own git-blob SHA-1 of suggested_fix (so Build cannot have altered it) and each
+//   Scrutineer file's new blob and mode to match between the two. Workflow scripts cannot write files,
+//   so the fix file is Build's, verified by hash; no untrusted path or fix text enters a command.
+//   A mode, deletion or rename header in suggested_fix fails in Preflight.
 //   weakened_control or suspicious_change (or a non-boolean answer) → stop_rule security_review:
 //   held on public repos, a stopped PR on private.
 // - Before any merge (fix and regate) read-only relays re-read the PR: base.ref must be the
@@ -190,6 +197,46 @@ const relayPrompt = (cmd, nonce) =>
 
 function parseJson(s) { try { return JSON.parse(s) } catch { return undefined } }
 
+// git blob SHA-1 of a string (what `git hash-object` prints for a file with this exact content).
+const utf8 = (t) => (typeof TextEncoder === 'function' ? new TextEncoder().encode(t)
+  : Uint8Array.from(unescape(encodeURIComponent(t)), (c) => c.charCodeAt(0)))
+function sha1Hex(msg) {
+  const ml = msg.length, size = ((ml + 9 + 63) >> 6) << 6
+  const buf = new Uint8Array(size); buf.set(msg); buf[ml] = 0x80
+  const dv = new DataView(buf.buffer)
+  dv.setUint32(size - 4, (ml * 8) >>> 0); dv.setUint32(size - 8, Math.floor((ml * 8) / 4294967296))
+  let h = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0]
+  const w = new Uint32Array(80)
+  for (let off = 0; off < size; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4)
+    for (let i = 16; i < 80; i++) { const x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]; w[i] = (x << 1) | (x >>> 31) }
+    let [a, b, c, d, e] = h
+    for (let i = 0; i < 80; i++) {
+      const f = i < 20 ? (b & c) | (~b & d) : i < 40 ? b ^ c ^ d : i < 60 ? (b & c) | (b & d) | (c & d) : b ^ c ^ d
+      const k = i < 20 ? 0x5A827999 : i < 40 ? 0x6ED9EBA1 : i < 60 ? 0x8F1BBCDC : 0xCA62C1D6
+      const t = (((a << 5) | (a >>> 27)) + f + e + k + w[i]) >>> 0
+      e = d; d = c; c = ((b << 30) | (b >>> 2)) >>> 0; b = a; a = t
+    }
+    h = [h[0] + a, h[1] + b, h[2] + c, h[3] + d, h[4] + e].map((x) => x >>> 0)
+  }
+  return h.map((x) => x.toString(16).padStart(8, '0')).join('')
+}
+function gitBlobSha(text) {
+  const body = utf8(text), head = utf8(`blob ${body.length}\0`)
+  const all = new Uint8Array(head.length + body.length); all.set(head); all.set(body, head.length)
+  return sha1Hex(all)
+}
+// `git diff --raw --no-abbrev` lines → Map(path → "newmode newsha"). Quoted paths keep their escapes (same as the
+// +++ b/ parse), so an unusual path fails closed by not matching.
+function rawBlobs(text) {
+  const out = new Map()
+  for (const l of str(text).split('\n')) {
+    const m = l.match(/^:\d{6} (\d{6}) [0-9a-f]{40} ([0-9a-f]{40}) [A-Z]\d*\t(?:[^\t]*\t)?(.+)$/)
+    if (m) out.set(m[3].replace(/^"(.*)"$/, '$1'), `${m[1]} ${m[2]}`)
+  }
+  return out
+}
+
 // Per-file added and removed lines of a unified diff, keyed by the b/ path (the a/ path for a deletion), each a
 // sorted array (a multiset). Hunk headers, offsets and context lines are ignored; hunk lengths from the @@ line
 // decide where a hunk ends, so a diff without `diff --git` headers parses too.
@@ -319,6 +366,8 @@ if (!FIX.trim()) return done('failed', { reason: 'finding has no suggested_fix' 
 // SCRUT_FILES_RAW is compared only as data, never placed in a command; prompts get safePath forms.
 const SCRUT_FILES_RAW = [...new Set([...FIX.matchAll(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/gm)].map((m) => m[1]).filter(Boolean))].sort()
 if (SCRUT_FILES_RAW.length === 0) return done('failed', { reason: 'no files in suggested_fix' })
+// Every file in FIX is a Scrutineer file: a mode, deletion or rename/copy header is outside what the blob check covers.
+if (/^(new mode|old mode|deleted file mode|similarity index|rename from|copy from) /m.test(FIX)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
 
 // Default branch and its tip SHA come from fixed read-only relays, never from an agent's report.
 const dbr = await agent(relayPrompt(`gh api repos/${REPO_SLUG} --jq .default_branch`, false),
@@ -436,6 +485,27 @@ const relH = hunkLines(diffText.raw)
 const noLines = { add: [], del: [] }
 const sameLines = (f) => JSON.stringify(fixH.get(f) || noLines) === JSON.stringify(relH.get(f) || noLines)
 if (!SCRUT_FILES_RAW.every(sameLines)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
+// Blob check (position-exact): suggested_fix applied alone at BASE_SHA must give the same blob and mode as the clone
+// HEAD for every Scrutineer file. The scratch worktree is removed whatever happens; only fixed paths are in the command.
+const VERIFY = `${SCRATCH}verify`
+const FIX_FILE = `${SCRATCH}fix.diff`
+const fixBlobs = await agent(relayPrompt(
+  `rm -rf "${VERIFY}"; git -C "${CLONE}" worktree add --detach "${VERIFY}" ${BASE_SHA} >/dev/null 2>&1 && ` +
+  `echo "FIXBLOB $(git hash-object "${FIX_FILE}")" && git -C "${VERIFY}" apply --check "${FIX_FILE}" && ` +
+  `git -C "${VERIFY}" apply "${FIX_FILE}" && git -C "${VERIFY}" add -A && echo APPLIED && ` +
+  `git -c core.quotePath=false -C "${VERIFY}" diff --cached --raw --no-abbrev ${BASE_SHA}; s=$?; ` +
+  `git -C "${CLONE}" worktree remove --force "${VERIFY}" >/dev/null 2>&1; exit $s`, false),
+  { label: 'relay:fix-blobs', phase: 'Check', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
+const cloneBlobs = await agent(relayPrompt(`git -c core.quotePath=false -C "${CLONE}" diff --raw --no-abbrev ${BASE_SHA} ${CLONE_HEAD}`, false),
+  { label: 'relay:clone-blobs', phase: 'Check', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
+const fixOut = fixBlobs && fixBlobs.exit_code === 0 ? str(fixBlobs.raw) : ''
+const fixFileSha = (fixOut.match(/^FIXBLOB ([0-9a-f]{40})\s*$/m) || [])[1]
+const applied = /^APPLIED\s*$/m.test(fixOut)
+const want = rawBlobs(fixOut)
+const got = cloneBlobs && cloneBlobs.exit_code === 0 ? rawBlobs(cloneBlobs.raw) : new Map()
+if (fixFileSha !== gitBlobSha(FIX) || !applied || !SCRUT_FILES_RAW.every((f) => want.has(f) && want.get(f) === got.get(f))) {
+  return done('failed', { reason: 'fix hunks differ from suggested_fix' })
+}
 const check = await agent(
   `You are a READ-ONLY security and behaviour reviewer. Do not edit, commit, push or comment, and do not run git or ` +
   `fetch the diff yourself: judge the relayed diff below. You may read files in "${CLONE}" read-only for context.\n\n` +

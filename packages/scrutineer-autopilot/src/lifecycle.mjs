@@ -3,7 +3,7 @@
 // RULES is an ordered list of [predicate, action]; the first match wins, so code order is table order, with these
 // deliberate hoists: skip/exclude/parked checks first; PR-state and stage rows before the openScan wait (they enqueue
 // nothing); openScan -> wait before every enqueue action; NON_VIABLE/SAMPLE_OR_TEST park before any enqueue.
-// park actions always carry a note starting "autopilot: ".
+// park actions always carry a note starting "autopilot: ". A wait may carry setStage, which the tick writes to the entry.
 
 const OUT_OF_SCOPE = new Set(['rejected', 'duplicate', 'published'])
 const PR_STAGES = new Set(['stopped', 'opened', 'awaiting_ci', 'skipped'])
@@ -28,6 +28,17 @@ const NOTE_NO_REVALIDATE = 'autopilot: verify confirmed; no revalidate for this 
 const act = (type, extra = {}) => ({ type, ...extra })
 const park = (note) => act('park', { note: `autopilot: ${note}` })
 const time = (s) => { const t = Date.parse(s); return Number.isNaN(t) ? null : t }
+// Merge proof for 'fixing'/'failed' must belong to this attempt: the branch name is reused, so a PR merged by an
+// earlier attempt could otherwise mark a later one fixed. The PR must be created at or after emittedAt ('fixing'
+// requires emittedAt; 'failed' without one is a pre-emittedAt entry and is accepted). Other PR stages were recorded
+// by the tick for this attempt, so any MERGED counts.
+function mergeProof(e, c) {
+  if (c.prState !== 'MERGED') return false
+  if (e.stage !== 'fixing' && e.stage !== 'failed') return true
+  if (e.emittedAt == null) return e.stage === 'failed'
+  const created = time(c.prCreatedAt), emitted = time(e.emittedAt)
+  return created !== null && emitted !== null && created >= emitted
+}
 // true when `at` is more than `ms` before `now`; unparseable times count as old (fail closed: park, never act).
 const olderThan = (at, now, ms) => { const a = time(at), n = time(now); return a === null || n === null || n - a > ms }
 const verdicts = (f, verify) => `revalidate=${f.last_revalidate_verdict || 'none'} verify=${verify ?? 'none'}`
@@ -66,7 +77,7 @@ const RULES = [
   ['acknowledged by hand', (s, e) => s.finding.status === 'acknowledged' && !e.stage, () => act('skip', { reason: 'acknowledged by hand' })],
 
   // ---- post-fix stages (no enqueue) ----
-  ['fix PR merged', (s, e, c) => BRANCH_STAGES.has(e.stage) && c.prState === 'MERGED', () => act('mark_fixed')],
+  ['fix PR merged', (s, e, c) => BRANCH_STAGES.has(e.stage) && mergeProof(e, c), () => act('mark_fixed')],
   ['fix PR closed unmerged', (s, e, c) => CLOSABLE_STAGES.has(e.stage) && c.prState === 'CLOSED', () => park('fix PR closed unmerged')],
   ['held fix discarded', (s, e, c) => e.stage === 'held' && !c.heldBranchExists && c.prState !== 'OPEN', () => park('held fix discarded')],
   ['fix PR open or held, waiting for a human', (s, e) => PR_STAGES.has(e.stage) || e.stage === 'held', () => act('wait', { reason: 'fix PR awaiting human' })],
@@ -74,7 +85,10 @@ const RULES = [
   ['stage merged, no MERGED proof', (s, e) => e.stage === 'merged',
     (s, e, c) => (olderThan(e.recordedAt, c.now, MERGE_PROOF_MS) ? park('recorded merge not confirmed on GitHub') : act('wait', { reason: 'recorded merge not yet confirmed on GitHub' }))],
   ['fix workflow in flight', (s, e) => e.stage === 'fixing',
-    (s, e, c) => (olderThan(e.emittedAt, c.now, FIXING_MS) ? park('fix workflow never recorded an outcome') : act('wait', { reason: 'fix workflow in flight' }))],
+    (s, e, c) => (!olderThan(e.emittedAt, c.now, FIXING_MS) ? act('wait', { reason: 'fix workflow in flight' })
+      // stale with an open PR: adopt it as 'stopped' (repo stays busy, a human decides); never park over an open PR
+      : c.prState === 'OPEN' ? act('wait', { reason: 'fix workflow never recorded an outcome; PR open', setStage: 'stopped' })
+      : park('fix workflow never recorded an outcome'))],
   ['fixed and marked', (s, e) => s.finding.status === 'fixed' && e.stage === 'marked_fixed', () => act('mark_published')],
   ['fixed otherwise', (s) => s.finding.status === 'fixed', () => act('skip', { reason: 'fixed; nothing to do' })],
 

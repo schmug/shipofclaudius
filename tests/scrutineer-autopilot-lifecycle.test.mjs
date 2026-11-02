@@ -135,9 +135,29 @@ test('I6: stage fixing -> wait for 6h, then park; a MERGED PR -> mark_fixed; an 
   const fresh = { stage: 'fixing', emittedAt: '2026-10-19T20:00:00Z' } // 4h before ctx.now
   assert.equal(run(s, fresh).type, 'wait')
   assert.equal(run(s, fresh, { prState: 'CLOSED' }).type, 'wait')
-  assert.equal(run(s, fresh, { prState: 'MERGED' }).type, 'mark_fixed')
+  assert.equal(run(s, fresh, { prState: 'MERGED', prCreatedAt: '2026-10-19T21:00:00Z' }).type, 'mark_fixed')
   const old = { stage: 'fixing', emittedAt: '2026-10-19T17:00:00Z' } // 7h before ctx.now
   assert.deepEqual(run(s, old), { type: 'park', note: 'autopilot: fix workflow never recorded an outcome' })
+  assert.deepEqual(run(s, old, { prState: 'CLOSED' }), { type: 'park', note: 'autopilot: fix workflow never recorded an outcome' })
+  assert.equal(run(s, old, { prState: 'MERGED', prCreatedAt: '2026-10-19T18:00:00Z' }).type, 'mark_fixed')
+})
+test('B: merge proof is bound to the attempt for fixing/failed: a PR created before emittedAt does not mark fixed', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  const emittedAt = '2026-10-19T20:00:00Z'
+  const oldPr = { prState: 'MERGED', prCreatedAt: '2026-10-01T00:00:00Z', prMergedAt: '2026-10-02T00:00:00Z' }
+  const newPr = { prState: 'MERGED', prCreatedAt: '2026-10-19T21:00:00Z', prMergedAt: '2026-10-19T22:00:00Z' }
+  assert.equal(run(s, { stage: 'fixing', emittedAt }, oldPr).type, 'wait')
+  assert.equal(run(s, { stage: 'fixing', emittedAt }, newPr).type, 'mark_fixed')
+  assert.notEqual(run(s, { stage: 'fixing' }, newPr).type, 'mark_fixed', 'fixing without emittedAt never accepts a merge')
+  assert.notEqual(run(s, { stage: 'fixing', emittedAt }, { prState: 'MERGED' }).type, 'mark_fixed', 'unknown createdAt fails closed')
+  assert.deepEqual(run(s, { stage: 'failed', emittedAt }, oldPr), { type: 'park', note: "autopilot: fix workflow ended 'failed'" })
+  assert.equal(run(s, { stage: 'failed', emittedAt }, newPr).type, 'mark_fixed')
+  assert.equal(run(snap({ status: 'triaged' }), { stage: 'awaiting_ci', emittedAt }, oldPr).type, 'mark_fixed', 'tick-recorded PR stages unchanged')
+})
+test('I6 follow-up: stale fixing with an OPEN PR -> wait and adopt stage stopped (no park)', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  const a = run(s, { stage: 'fixing', emittedAt: '2026-10-19T17:00:00Z' }, { prState: 'OPEN' })
+  assert.deepEqual(a, { type: 'wait', reason: 'fix workflow never recorded an outcome; PR open', setStage: 'stopped' })
 })
 test('I8 Ruling 12: parked, parkedAt older than updated_at, verified_secure -> fix', () => {
   const s = snap({ status: 'triaged', production_viability: 'VIABLE', updated_at: '2026-10-15T00:00:00Z' }, { patchAttempts: 1, reattack: 'verified_secure' })

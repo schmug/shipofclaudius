@@ -286,20 +286,20 @@ function pendingEnqueue(entry, mine, t) {
 }
 
 async function prContext(tk, f, entry, repo) {
-  const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: null, heldBranchExists: false, now: tk.iso }
+  const ctx = { policy: repo.policy, prState: null, mergeSha: entry.mergeSha ?? null, pr: null, prMergedAt: null, prCreatedAt: null, heldBranchExists: false, now: tk.iso }
   if (BRANCH_STAGES.has(entry.stage)) { // a recorded 'merged' is only acted on when GitHub shows the PR MERGED
     // Ruling 18: the PR is always resolved by branch (same-repo, server-filtered), never from a ledger number that
     // `--record` or a hand edit could have pointed elsewhere. The resolved number is written back for the regate item.
     const p = await prForBranch(repo.key, ownBranch(f.id), { exec: tk.exec })
-    if (p) { ctx.prState = p.state; ctx.mergeSha = p.mergeSha ?? ctx.mergeSha; ctx.pr = p.number; entry.pr = p.number }
+    if (p) { ctx.prState = p.state; ctx.mergeSha = p.mergeSha ?? ctx.mergeSha; ctx.pr = p.number; ctx.prMergedAt = p.mergedAt ?? null; ctx.prCreatedAt = p.createdAt ?? null; entry.pr = p.number }
     else delete entry.pr
   }
   if (entry.stage === 'held') ctx.heldBranchExists = await exists(join(tk.config.stateDir, 'held', String(f.id)))
   return ctx
 }
 
-// 'fixing' stays busy even when the branch shows an older CLOSED PR: the workflow may still be running.
-const repoBusy = ({ entry, ctx }) => ctx.prState === 'OPEN' || (entry.stage === 'fixing' && ctx.prState !== 'MERGED')
+// 'fixing' is always busy: the branch may show an older CLOSED or MERGED PR from an earlier attempt while the workflow runs.
+const repoBusy = ({ entry, ctx }) => ctx.prState === 'OPEN' || entry.stage === 'fixing'
   || (OPEN_FIX_STAGES.has(entry.stage) && ctx.prState !== 'MERGED' && ctx.prState !== 'CLOSED')
 
 async function execute(tk, it) {
@@ -310,7 +310,9 @@ async function execute(tk, it) {
   if (action.type === 'skip') { rec.result = 'skipped'; return }
   if (action.type === 'wait') {
     rec.result = 'waiting'
-    if (entry.stage === 'stopped' || entry.stage === 'held') tk.R.stopped.push({ findingId: f.id, repo: repo.key, stage: entry.stage, pr: it.ctx.pr ?? undefined })
+    if (action.setStage && !tk.dry) ensureEntry(tk, f.id, repo.key).stage = action.setStage
+    const stage = entryOf(tk, f.id).stage ?? entry.stage
+    if (stage === 'stopped' || stage === 'held') tk.R.stopped.push({ findingId: f.id, repo: repo.key, stage, pr: it.ctx.pr ?? undefined })
     return
   }
   if (action.type === 'fix') { rec.result = 'pending-agent'; it.rec = rec; tk.fixCandidates.push(it); return }
