@@ -25,8 +25,8 @@ test('normalizeConfig: refuses a non-loopback baseUrl', () => {
 })
 
 test('repoKey: handles https, ssh and non-GitHub URLs', () => {
-  assert.equal(repoKey('https://github.com/Schmug/PhishSOC.git'), 'schmug/phishsoc')
-  assert.equal(repoKey('git@github.com:schmug/dewpt.git'), 'schmug/dewpt')
+  assert.equal(repoKey('https://github.com/Owner/Repo.git'), 'owner/repo')
+  assert.equal(repoKey('git@github.com:Owner/Other.git'), 'owner/other')
   assert.equal(repoKey('https://gitlab.com/a/b'), null)
 })
 
