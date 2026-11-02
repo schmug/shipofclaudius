@@ -2,7 +2,7 @@
 // Mirrors Scrutineer internal/db/remediation.go RemediationPatchStatus.
 // Run:  node tests/scrutineer-autopilot-reports.test.mjs
 import assert from 'node:assert/strict'
-import { skillAttempts, verifyOutcome, latestPatch, patchAttemptCount, reattackStatus } from '../packages/scrutineer-autopilot/src/reports.mjs'
+import { skillAttempts, verifyOutcome, latestPatch, patchAttemptCount, reattackStatus, patchRefusal } from '../packages/scrutineer-autopilot/src/reports.mjs'
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
@@ -20,6 +20,16 @@ const clean = (o = {}) => JSON.stringify({
 })
 const patch = scan('patch', { created_at: '2026-10-02T00:00:00Z', finished_at: '2026-10-02T01:00:00Z' })
 const reattack = (report, o = {}) => scan('reattack', { created_at: '2026-10-03T00:00:00Z', finished_at: '2026-10-03T00:30:00Z', report, ...o })
+
+test('patchRefusal: the newest done patch report error, first line, sanitized; null without one', () => {
+  const p = (report, o = {}) => scan('patch', { report, ...o })
+  assert.equal(patchRefusal([p('{"error":"finding already fixed upstream; no duplicate patch produced","rationale":"x"}')], 7),
+    'finding already fixed upstream; no duplicate patch produced')
+  assert.equal(patchRefusal([p(JSON.stringify({ error: 'bad `$(x)` "q"\nsecond line' }))], 7), 'bad x q')
+  assert.equal(patchRefusal([p('{"patch":"diff --git a/x b/x"}')], 7), null)
+  assert.equal(patchRefusal([p('{"error":"old"}', { finished_at: '2026-09-01T00:00:00Z' }), p('{"patch":"d"}')], 7), null, 'newest wins')
+  assert.equal(patchRefusal([], 7), null)
+})
 
 test('verifyOutcome: JSON string report with status confirmed', () => {
   assert.equal(verifyOutcome([scan('verify', { report: '{"status":"confirmed"}' })], 7), 'confirmed')

@@ -124,6 +124,11 @@ const RULES = [
   ['triaged: unknown viability', (s) => s.finding.status === 'triaged' && !GOOD_VIABILITY.has(s.finding.production_viability),
     (s) => park(`unrecognised production viability ${s.finding.production_viability}`)],
   ['triaged: no patch', (s) => s.finding.status === 'triaged' && s.patchAttempts === 0, enqueue('patch')],
+  // A finished patch that the applicability gate kept no fix from (refused, or no gated diff) has nothing to reattack:
+  // Scrutineer answers a reattack with 412, so park with the patch's own reason instead of retrying every tick.
+  ['triaged: patch produced no fix', (s) => s.finding.status === 'triaged' && s.reattack === null && s.patchAttempts > 0
+    && (s.patchRefused || s.finding.suggested_fix === ''),
+    (s) => park(`patch produced no fix: ${s.patchRefused || 'no gated suggested_fix'}`)],
   ['triaged: no reattack', (s) => s.finding.status === 'triaged' && s.reattack === null, enqueue('reattack')],
   ['triaged: verified_secure, fix workflow ended', (s, e) => s.finding.status === 'triaged' && s.reattack === 'verified_secure' && !FIXABLE_STAGES.has(e.stage),
     (s, e) => park(`fix workflow ended '${e.stage}'`)],

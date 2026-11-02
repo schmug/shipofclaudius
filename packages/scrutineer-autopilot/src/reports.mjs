@@ -53,6 +53,15 @@ export function skillAttempts(scans, findingId, skill, { since } = {}) {
   return out
 }
 
+// The patch skill reports a refusal (for example "finding already fixed upstream") as report.error and writes no
+// suggested_fix. Returns the newest done patch's error, first line only, stripped to plain characters, else null.
+export function patchRefusal(scans, findingId) {
+  const [latest] = newestFirst(done(scans, 'patch', findingId))
+  const err = latest ? parseReport(latest.report)?.error : null
+  if (typeof err !== 'string' || err.trim() === '') return null
+  return err.split('\n')[0].replace(/[^A-Za-z0-9 ._:;,/'()-]/g, '').replace(/[()]/g, '').trim().slice(0, 160) || null
+}
+
 export function patchAttemptCount(scans, findingId) {
   return done(scans, 'patch', findingId).length
 }

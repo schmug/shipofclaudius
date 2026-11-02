@@ -12,7 +12,7 @@ import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { repoKey, policyFor } from './config.mjs'
 import { ScrutineerTooOld } from './client.mjs'
-import { verifyOutcome, latestPatch, patchAttemptCount, reattackStatus, skillAttempts } from './reports.mjs'
+import { verifyOutcome, latestPatch, patchAttemptCount, patchRefusal, reattackStatus, skillAttempts } from './reports.mjs'
 import { readUsage, estimate, calibrate, canStart } from './budget.mjs'
 import { nextAction } from './lifecycle.mjs'
 import { openLedger, acquireLock, isPaused, writeRun } from './ledger.mjs'
@@ -270,6 +270,7 @@ async function prepare(tk, { f, repo }) {
     verify: verifyOutcome(mine, f.id),
     reattack: reattackStatus(mine, f.id),
     patchAttempts: patchAttemptCount(mine, f.id),
+    patchRefused: patchRefusal(mine, f.id),
     openScan: mine.some((s) => OPEN.has(s.status)) || pendingEnqueue(entry, mine, tk.t),
     attempts: {
       verify: skillAttempts(mine, f.id, 'verify'),
