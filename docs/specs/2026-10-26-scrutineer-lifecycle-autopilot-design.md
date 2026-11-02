@@ -53,6 +53,24 @@ Restated close to the original wording. Do not relitigate.
 - **Open going in:** event tiers (diff, PR, release) need polling GitHub each tick or a
   hook. Resolved in §7.1.
 
+**Answered by Schmug 2026-11-01** (the questions are recorded in §15):
+
+- **Stop signal:** the autopilot's own behaviour check (§8 step 5) is the primary signal.
+  `breaking_change` is honoured whenever Scrutineer has set it.
+- **Deploy-on-merge repos and shipofclaudius:** open the fix and stop for Schmug's merge.
+  Every other gated repo auto-merges.
+- **Public disclosure window:** run the behaviour check before anything is pushed. A fix
+  that will auto-merge gets a PR with a regression test. A stopped fix stays an unpushed
+  local branch until Schmug answers.
+- **Budget:** Scrutineer runs on Codex, so `codexbar --provider codex` gates scans and
+  `--provider claude` gates the autopilot's own agents. Schmug: "we can use codexbar to
+  proxy usage limits. we're using codex as a backend." There is **no dollar ceiling**; the
+  codexbar usage limits are the backstop.
+- **Medium/Low:** triage on verify `confirmed` plus a critic verdict. High/Critical still
+  need revalidate and verify to agree.
+- **Ping:** a push notification, plus a note on the Scrutineer finding.
+- **Scrutineer upgrade:** done by Schmug on 2026-11-01 (§2.1).
+
 ## 2. Recon findings that shape the design
 
 Observed 2026-10-26 against the running instance and the Scrutineer source at `d5158e3`.
@@ -70,8 +88,25 @@ Each one changes something below.
   `verification`, `remediation`, `suggested_fix`, `breaking_change`. `openapi.yaml`'s
   `FindingExport` (allOf `FindingDetail`) defines all of them.
 
+**Update 2026-11-01:** Schmug upgraded to Homebrew `2026.10.24.1` (still
+`--backend codex`). Observed on that build:
+
+- `GET /api/v1/findings/{id}` returns 200 with `last_revalidate_verdict`,
+  `production_viability`, `suggested_fix`, `suggested_fix_commit` and `breaking_change`.
+- `verification` and `remediation` are **absent**, even on findings that have finished
+  verify scans (ids 5, 14, 15, 25).
+- The verify outcome is still readable from the operator surface:
+  `GET /api/v1/scans?skill=verify&status=done` rows carry `finding_id` and a JSON
+  `report` whose `status` is `confirmed`, `fixed`, `inconclusive`, and so on. 50 of 53 have
+  a report.
+
+So the autopilot reads verify and reattack outcomes from the **latest done scan of that
+skill for that finding**. It parses `report.status` for verify, and `outcome`/`status`
+per `skills/reattack/schema.json` for reattack. No reattack scan exists yet, so that
+parse is written to the schema and is unverified.
+
 **Consequence:** the autopilot requires a Scrutineer build whose `GET /api/v1/findings/{id}`
-returns `FindingExport` with those fields. It feature-detects this on every tick and does
+returns those fields. It feature-detects this on every tick and does
 nothing (reports "Scrutineer too old") when the fields are missing. It never falls back to
 reading `scrutineer.db` directly or scraping HTML: both couple to internals Schmug does not
 own.
@@ -270,7 +305,8 @@ depends on Q3.
 |---|---|---|
 | `new`/`enriched` | no open finding scan, no `verification` | `POST /findings/{id}/verify` (budget-gated) |
 | `new`/`enriched` | verify or revalidate still running | wait |
-| `new`/`enriched` | `last_revalidate_verdict=true_positive` and `verification.status=confirmed` | `status=triaged`, note "autopilot: revalidate and verify agree" |
+| `new`/`enriched`, High/Critical | `last_revalidate_verdict=true_positive` and verify `confirmed` | `status=triaged`, note "autopilot: revalidate and verify agree" |
+| `new`/`enriched`, Medium/Low | verify `confirmed` and a critic verdict (run critic first if empty) | `status=triaged`, note "autopilot: verify confirmed; no revalidate for this severity" |
 | `new`/`enriched` | either verdict is `false_positive`, `uncertain` or `inconclusive`, or they disagree | **park** with a note quoting both verdicts |
 | `new`/`enriched` | `already_fixed` or verification `fixed` | **park** with note (my call: confirming already-fixed is cheap for Schmug and has no fix PR to record it) |
 | any | `production_viability` is `NON_VIABLE` or `SAMPLE_OR_TEST` | **park** with note (my call: no release build is affected, so a fix PR is a judgement call) |
@@ -376,9 +412,11 @@ finding is cheaper to finish than a new one is to find.
 - **Claude backend:** `pause_on_overage` (instance setting) and `max_cost_usd`. The UI
   finding routes do not accept `max_cost_usd`; only `POST /repositories/{id}/skill-scan`
   does. So the per-run cap applies only to repo-level skill scans enqueued that way.
-- **Codex backend (current):** neither backstop applies (§2.2). The autopilot's own
-  limits are the only cap: at most 1 scan group running at a time, at most 10 enqueues per
-  tick, and a hard weekly ceiling in list-price dollars (my call: $150). See Q2.
+- **Codex backend (current):** neither backstop applies (§2.2). Per Schmug, the codexbar
+  usage limits are the backstop, and there is no dollar ceiling. Concretely:
+  - the §7.4 gate, which fails closed on stale or failed codexbar output;
+  - at most 1 scan group running at a time;
+  - at most 10 enqueues per tick (my call).
 
 ## 8. Building and landing the fix PR (`scrutineer-fix-pr`)
 
@@ -391,8 +429,8 @@ and the patch itself through a read-only relay; it never receives them as caller
    default branch, and applies `suggested_fix` with `git apply --3way`. If the diff no
    longer applies, the run stops; the tick re-runs `patch` once against a fresh scan,
    then parks the finding.
-3. **Regression test.** Depends on Q4. Recommended: the agent adds a test that fails on
-   the default branch and passes with the diff, touching only test files. The workflow
+3. **Regression test.** The agent adds a test that fails on the default branch and passes
+   with the diff, touching only test files. The workflow
    checks with `git diff --name-only` that the Scrutineer diff's non-test hunks are
    unchanged, because reattack verified that exact diff.
 4. **Local gates.** Run the repo's test/lint/build commands. A red gate stops the run with
@@ -402,7 +440,11 @@ and the patch itself through a read-only relay; it never receives them as caller
    its author; on a Claude backend, use a different Claude family from the patch scan's
    `model`), paid from the Claude budget. It returns `behaviour_change: none | changed | unknown` with
    evidence. Details in §9.
-6. **Open the PR.** Title `fix(security): <one-line class> in <file>`. The body names the
+   Steps 2–5 run in a local clone and **nothing is pushed before step 5 returns**. If §9
+   would stop the fix, the branch stays unpushed under
+   `~/.claude/scrutineer-autopilot/held/<finding-id>/`. Schmug gets the ping, and pushing
+   or discarding it is Schmug's call (the skill's `status` lists held fixes).
+6. **Push and open the PR** (only for fixes §9 clears). Title `fix(security): <one-line class> in <file>`. The body names the
    class, the file, the Scrutineer finding id, reattack `verified_secure`, and the test
    output. It carries **no** attacker story, payload or PoC, because 8 of 10 repos are
    public and the PR is visible before it merges.
@@ -428,7 +470,8 @@ per-finding scratch path under `${TMPDIR:-/tmp}/scrutineer-autopilot/<finding-id
 
 ## 9. When to stop and ask
 
-The PR is left open, not merged, and Schmug is pinged when **any** of these hold:
+The fix is held, unmerged (unpushed if the stop is known before step 6, as in rules 1, 2
+and 5), and Schmug is pinged when **any** of these hold:
 
 1. `breaking_change` is `breaking` or `unknown`, or `breaking_change_rationale` names an
    affected dependent, whenever Scrutineer has populated it. Today it never is (§2.3).
@@ -437,13 +480,27 @@ The PR is left open, not merged, and Schmug is pinged when **any** of these hold
    answers one question: "would a user or caller see a difference other than the
    vulnerable input being refused?"
 3. The repo has no required-check gate (phishsoc and cortech.online today).
-4. `merge-pr-with-gate` escalates (`DIRTY`, `BEHIND`, `BLOCKED`, a red required check).
+4. `merge-pr-with-gate` escalates with a red required check, a blocking review, or DIRTY
+   after one re-apply (§8 step 7).
+5. The repo's `merge_policy` in `config.json` is `stop`. Per Schmug, that is every repo
+   that deploys on merge, plus shipofclaudius. The starting list is donthype-me, dmarc.mx,
+   cortech.online, doohub and shipofclaudius. The builder confirms each by reading the
+   repo's `.github/workflows/`, and reports any other repo whose default-branch push runs
+   a deploy job. Allowed values: `auto | stop | exclude`.
 
-**The ping.** One GitHub comment on the PR that @-mentions Schmug with the reason, plus a
-note on the Scrutineer finding. A comment is chosen over chat because the run is
-unattended, and over an issue because the PR already holds the context. The ledger
-records the PR as `stopped`, and the tick only re-checks whether Schmug merged or closed
-it. A closed, unmerged PR parks the finding.
+   For a `stop` repo the fix is pushed and opened as a PR **without** the merge call,
+   because Schmug merges it. On a public `stop` repo this re-opens the disclosure window
+   Schmug chose to close for stopped fixes, so the default for public `stop` repos is to
+   hold the fix unpushed, as for rules 1 and 2 (my call). The ping says so.
+
+**The ping.** A push notification from the scheduled session (the `PushNotification`
+tool), with the repo, the finding id, the rule that fired, and the PR URL or held-branch
+path. The autopilot also adds a note on the Scrutineer finding. It is a push rather than a
+PR comment because GitHub does not notify you of your own @-mention under your token. The
+ledger records the finding as `stopped`. The tick only re-checks whether Schmug pushed,
+merged or closed it. A closed, unmerged PR, or a deleted held branch, parks the finding.
+Each stopped finding is notified once, plus a daily digest of everything still waiting
+(my call).
 
 ## 10. State
 
@@ -519,7 +576,10 @@ duplicate PRs.
 - 2 patch attempts and 1 reattack retry before parking (§6).
 - Scrutineer's own `scan_schedule` stays off on autopilot repos (§7.2).
 - Budget numbers: p75 estimates, $5/$15 fallbacks, 30% reserve, 5-point margin, 80% cap
-  on the 5-hour window, a seed of 1 point per $2, and a $150/week ceiling (§7).
+  on the 5-hour window, a seed of 1 point per $2, and 10 enqueues per tick (§7).
+- Public `stop` repos hold the fix unpushed; ping once per stop plus a daily digest (§9).
+- Verify and reattack outcomes are read from scan reports, because the export omits them
+  (§2.1).
 - Full rescan every 90 days or on a Scrutineer version change (§7.2).
 - Ping as a PR comment (§9). No exploit detail in PR bodies (§8).
 - Run critic when `production_viability` is empty; proceed on `CONDITIONAL_VIABLE` (§6).
@@ -532,7 +592,8 @@ duplicate PRs.
 
 ## 15. Open questions for Schmug
 
-Answers get folded into §1 before approval. Ranked by how much they change what gets built.
+**All answered 2026-11-01. The answers are in §1, and the questions are kept for the
+record.**
 
 - **Q1. Stop signal.** `breaking_change` is never set, and the autopilot cannot trigger it
   (§2.3). Recommended: the §8 step-5 behaviour check is the primary signal, and
@@ -579,8 +640,8 @@ Answers get folded into §1 before approval. Ranked by how much they change what
 in §2.7.
 
 **Not verified; the plan must check these before building on them:** bearer POSTs to UI
-routes (§11); the `FindingExport` fields on a newer Scrutineer build (§2.1, read from
-`openapi.yaml`, not from a running server); `codexbar`'s codex `secondary` window (§7.4:
+routes (§11); the reattack report parse (§2.1, no reattack scan exists yet); whether
+`PushNotification` is available in a scheduled session (§9); `codexbar`'s codex `secondary` window (§7.4:
 the codex output showed `pace.secondary` but its `usage` block was truncated in recon);
 and whether a Claude desktop scheduled task can run a Workflow with write agents
 unattended.
