@@ -13,6 +13,12 @@ const BAD_REVALIDATE = new Set(['false_positive', 'uncertain', 'inconclusive'])
 // Stages from which a verified_secure finding may go to the fix workflow. 'parked' is here because a parked entry only
 // reaches this point once the finding was updated after the park (a human or Scrutineer acted).
 const FIXABLE_STAGES = new Set([undefined, 'triaged', 'patching', 'reattacking', 'parked'])
+// Stages whose PR the tick resolves by branch (ctx.prState). A GitHub MERGED state is the only proof of a merge.
+const BRANCH_STAGES = new Set([...PR_STAGES, 'held', 'merged', 'failed', 'fixing'])
+// 'fixing' is left out: an older closed PR on the same branch must not park a fix that is still in flight.
+const CLOSABLE_STAGES = new Set([...PR_STAGES, 'held', 'merged', 'failed'])
+const MERGE_PROOF_MS = 24 * 3600e3 // stage 'merged' (from --record) without a MERGED PR for this long parks
+const FIXING_MS = 6 * 3600e3 // stage 'fixing' (set when the tick emits a fix item) without a --record for this long parks
 const MAX_PATCH_ATTEMPTS = 2
 const MAX_REATTACK_RETRIES = 1
 
@@ -22,6 +28,8 @@ const NOTE_NO_REVALIDATE = 'autopilot: verify confirmed; no revalidate for this 
 const act = (type, extra = {}) => ({ type, ...extra })
 const park = (note) => act('park', { note: `autopilot: ${note}` })
 const time = (s) => { const t = Date.parse(s); return Number.isNaN(t) ? null : t }
+// true when `at` is more than `ms` before `now`; unparseable times count as old (fail closed: park, never act).
+const olderThan = (at, now, ms) => { const a = time(at), n = time(now); return a === null || n === null || n - a > ms }
 const verdicts = (f, verify) => `revalidate=${f.last_revalidate_verdict || 'none'} verify=${verify ?? 'none'}`
 
 function parkedUnchanged(f, entry) {
@@ -58,11 +66,15 @@ const RULES = [
   ['acknowledged by hand', (s, e) => s.finding.status === 'acknowledged' && !e.stage, () => act('skip', { reason: 'acknowledged by hand' })],
 
   // ---- post-fix stages (no enqueue) ----
-  ['fix PR merged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'MERGED', () => act('mark_fixed')],
-  ['fix PR closed unmerged', (s, e, c) => (PR_STAGES.has(e.stage) || e.stage === 'held') && c.prState === 'CLOSED', () => park('fix PR closed unmerged')],
+  ['fix PR merged', (s, e, c) => BRANCH_STAGES.has(e.stage) && c.prState === 'MERGED', () => act('mark_fixed')],
+  ['fix PR closed unmerged', (s, e, c) => CLOSABLE_STAGES.has(e.stage) && c.prState === 'CLOSED', () => park('fix PR closed unmerged')],
   ['held fix discarded', (s, e, c) => e.stage === 'held' && !c.heldBranchExists && c.prState !== 'OPEN', () => park('held fix discarded')],
   ['fix PR open or held, waiting for a human', (s, e) => PR_STAGES.has(e.stage) || e.stage === 'held', () => act('wait', { reason: 'fix PR awaiting human' })],
-  ['stage merged', (s, e) => e.stage === 'merged', () => act('mark_fixed')],
+  ['failed with an open fix PR', (s, e, c) => e.stage === 'failed' && c.prState === 'OPEN', () => act('wait', { reason: 'fix PR open after a failed workflow run' })],
+  ['stage merged, no MERGED proof', (s, e) => e.stage === 'merged',
+    (s, e, c) => (olderThan(e.recordedAt, c.now, MERGE_PROOF_MS) ? park('recorded merge not confirmed on GitHub') : act('wait', { reason: 'recorded merge not yet confirmed on GitHub' }))],
+  ['fix workflow in flight', (s, e) => e.stage === 'fixing',
+    (s, e, c) => (olderThan(e.emittedAt, c.now, FIXING_MS) ? park('fix workflow never recorded an outcome') : act('wait', { reason: 'fix workflow in flight' }))],
   ['fixed and marked', (s, e) => s.finding.status === 'fixed' && e.stage === 'marked_fixed', () => act('mark_published')],
   ['fixed otherwise', (s) => s.finding.status === 'fixed', () => act('skip', { reason: 'fixed; nothing to do' })],
 

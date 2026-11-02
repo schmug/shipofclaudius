@@ -64,6 +64,15 @@ test('normalizeConfig: budget overrides merge over defaults', () => {
   assert.equal(normalizeConfig({ budget: { reserve: 10 } }, { owner: 'o' }).budget.reserve, 10)
 })
 
+test('I7: normalizeConfig throws on a non-finite or non-number budget value, or an unknown budget key', () => {
+  for (const v of ['10', null, NaN, Infinity, -Infinity, true, [], {}]) {
+    assert.throws(() => normalizeConfig({ budget: { reserve: v } }, { owner: 'o' }), /budget/, String(v))
+  }
+  assert.throws(() => normalizeConfig({ budget: { reserv: 10 } }, { owner: 'o' }), /budget.*reserv/)
+  assert.throws(() => normalizeConfig({ budget: { __proto__: null, constructor: 1 } }, { owner: 'o' }), /budget/)
+  assert.equal(normalizeConfig({ budget: { margin: 0, fixEstimateUsd: 2.5 } }, { owner: 'o' }).budget.fixEstimateUsd, 2.5)
+})
+
 test('normalizeConfig: owner is lowercased and required', () => {
   assert.equal(normalizeConfig({}, { owner: 'Foo' }).owner, 'foo')
   assert.throws(() => normalizeConfig({}, {}), /owner/)

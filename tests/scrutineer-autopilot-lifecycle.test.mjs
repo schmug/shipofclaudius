@@ -111,9 +111,38 @@ test('held: branch gone -> park with exact note; PR merged -> mark_fixed; branch
   assert.equal(run(s, { stage: 'held' }, { heldBranchExists: false, prState: 'MERGED' }).type, 'mark_fixed')
   assert.equal(run(s, { stage: 'held' }, { heldBranchExists: true }).type, 'wait')
 })
-test('stage merged -> mark_fixed; fixed + marked_fixed -> mark_published', () => {
-  assert.equal(run(snap({ status: 'triaged' }), { stage: 'merged' }).type, 'mark_fixed')
+test('stage merged + PR MERGED -> mark_fixed; fixed + marked_fixed -> mark_published', () => {
+  assert.equal(run(snap({ status: 'triaged' }), { stage: 'merged', recordedAt: '2026-10-19T23:00:00Z' }, { prState: 'MERGED' }).type, 'mark_fixed')
   assert.equal(run(snap({ status: 'fixed' }), { stage: 'marked_fixed' }).type, 'mark_published')
+})
+test('I1: stage merged without GitHub MERGED proof -> wait; after 24h -> park; CLOSED -> park', () => {
+  const s = snap({ status: 'triaged' })
+  const fresh = { stage: 'merged', recordedAt: '2026-10-19T12:00:00Z' } // 12h before ctx.now
+  for (const prState of [null, 'OPEN']) assert.equal(run(s, fresh, { prState }).type, 'wait', String(prState))
+  const old = { stage: 'merged', recordedAt: '2026-10-18T23:00:00Z' } // 25h before ctx.now
+  assert.deepEqual(run(s, old, { prState: null }), { type: 'park', note: 'autopilot: recorded merge not confirmed on GitHub' })
+  assert.deepEqual(run(s, { stage: 'merged' }, { prState: null }), { type: 'park', note: 'autopilot: recorded merge not confirmed on GitHub' })
+  assert.deepEqual(run(s, fresh, { prState: 'CLOSED' }), { type: 'park', note: 'autopilot: fix PR closed unmerged' })
+})
+test('I4: stage failed with an OPEN PR -> wait (not park); with a MERGED PR -> mark_fixed; no PR -> park', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  assert.equal(run(s, { stage: 'failed' }, { prState: 'OPEN' }).type, 'wait')
+  assert.equal(run(s, { stage: 'failed' }, { prState: 'MERGED' }).type, 'mark_fixed')
+  assert.deepEqual(run(s, { stage: 'failed' }, { prState: null }), { type: 'park', note: "autopilot: fix workflow ended 'failed'" })
+})
+test('I6: stage fixing -> wait for 6h, then park; a MERGED PR -> mark_fixed; an old CLOSED PR does not park', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  const fresh = { stage: 'fixing', emittedAt: '2026-10-19T20:00:00Z' } // 4h before ctx.now
+  assert.equal(run(s, fresh).type, 'wait')
+  assert.equal(run(s, fresh, { prState: 'CLOSED' }).type, 'wait')
+  assert.equal(run(s, fresh, { prState: 'MERGED' }).type, 'mark_fixed')
+  const old = { stage: 'fixing', emittedAt: '2026-10-19T17:00:00Z' } // 7h before ctx.now
+  assert.deepEqual(run(s, old), { type: 'park', note: 'autopilot: fix workflow never recorded an outcome' })
+})
+test('I8 Ruling 12: parked, parkedAt older than updated_at, verified_secure -> fix', () => {
+  const s = snap({ status: 'triaged', production_viability: 'VIABLE', updated_at: '2026-10-15T00:00:00Z' }, { patchAttempts: 1, reattack: 'verified_secure' })
+  assert.equal(run(s, { stage: 'parked', parkedAt: '2026-10-12T00:00:00Z' }).type, 'fix')
+  assert.equal(run(s, { stage: 'parked', parkedAt: '2026-10-16T00:00:00Z' }).type, 'skip')
 })
 test('stage published -> skip', () => {
   assert.equal(run(snap({ status: 'fixed' }), { stage: 'published' }).type, 'skip')

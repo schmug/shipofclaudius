@@ -45,6 +45,19 @@ export function repoKey(url) {
   return m ? `${m[1]}/${m[2]}`.toLowerCase() : null
 }
 
+// Every override must be a known DEFAULTS.budget key with a finite number; anything else throws.
+function budgetOverrides(raw) {
+  if (raw == null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: budget must be an object')
+  const out = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (!Object.hasOwn(DEFAULTS.budget, k)) throw new Error(`config: unknown budget key ${JSON.stringify(k)}`)
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`config: budget.${k} must be a finite number, got ${JSON.stringify(v) ?? String(v)}`)
+    out[k] = v
+  }
+  return out
+}
+
 export function normalizeConfig(raw = {}, { owner } = {}) {
   const resolvedOwner = String(raw.owner ?? owner ?? '').toLowerCase()
   if (!resolvedOwner) throw new Error('config: owner is required')
@@ -61,7 +74,7 @@ export function normalizeConfig(raw = {}, { owner } = {}) {
     tokenPath: raw.tokenPath ?? DEFAULTS.tokenPath,
     allowlist: (raw.allowlist ?? []).map((s) => String(s).toLowerCase()),
     repoPolicy,
-    budget: { ...DEFAULTS.budget, ...(raw.budget ?? {}) },
+    budget: { ...DEFAULTS.budget, ...budgetOverrides(raw.budget) },
     stateDir: raw.stateDir ?? DEFAULTS.stateDir,
   }
 }
