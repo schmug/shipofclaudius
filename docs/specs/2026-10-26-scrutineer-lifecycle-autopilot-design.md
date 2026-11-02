@@ -641,8 +641,25 @@ record.**
 **Observed 2026-10-26:** everything in §2, apart from the classic-branch-protection caveat
 in §2.7.
 
-**Not verified; the plan must check these before building on them:** the reattack report parse (§2.1, no reattack scan exists yet); whether
-`PushNotification` is available in a scheduled session (§9); `codexbar`'s codex `secondary` window (§7.4:
-the codex output showed `pace.secondary` but its `usage` block was truncated in recon);
-and whether a Claude desktop scheduled task can run a Workflow with write agents
-unattended.
+**Observed 2026-11-01, live attended walk (Task 11; `tick.mjs --only <id>`, scheduled task not installed):**
+
+- `codexbar` 0.163.0: codex reports its weekly window in `usage.secondary` and has no 5-hour window. Claude's 5-hour
+  window is a synthetic placeholder. So only the weekly limit gates (Ruling 6).
+- Read-only dry run over all 10 repos: 0 POSTs, 142 findings in scope.
+- dungelo #825: critic, then patch. Patch refused ("already fixed upstream", dungelo `1187df7`) and wrote no
+  `suggested_fix`. The tick then asked for a reattack, which returned 412. That gap is fixed, and the finding now parks
+  with a fixed-string note. The next tick skipped it with no second note.
+- dewpt #112: verify returned `not_attempted` and the finding parked as designed. Cause, upstream in Scrutineer: codex
+  runs every command as `bash -lc`, and the login shell resets `PATH`, dropping the `node`, `go` and `beam` profile
+  runtimes. Reproduced against `scrutineer-profile-node`: `bash -c` finds node v22.23.0, `bash -lc` finds none.
+  Schmug is filing it upstream.
+
+**Not verified; the plan must check these before building on them:**
+
+- reattack, and its report parse (§2.1), since no reattack scan has run on this instance;
+- the `scrutineer-fix-pr` workflow end to end against a real repo;
+- `PushNotification` in a scheduled session (§9);
+- whether a Claude desktop scheduled task can run a Workflow with write agents unattended;
+- `${CLAUDE_PLUGIN_ROOT}` in a scheduled session.
+
+A Node, Go or Elixir finding cannot reach reattack under the codex backend until the upstream `PATH` bug is fixed.
