@@ -456,7 +456,7 @@ and the patch itself through a read-only relay; it never receives them as caller
      separate **re-gate** item that calls `merge-pr-with-gate` again (step 1's preflight
      skip does not apply to re-gate items). It never polls.
    - BEHIND: `gh pr update-branch` (a merge commit, never a force-push), then re-gate.
-   - DIRTY: re-apply `suggested_fix` onto the current default branch once, then stop.
+   - DIRTY: stop (`merge_escalated`, conflict); changed in the plan to avoid a second branch per finding.
    - A red required check or a blocking review: stop (§9).
 
    **At most one open fix PR per repo** (my call). Further triaged findings in that repo
