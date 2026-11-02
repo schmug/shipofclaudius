@@ -145,6 +145,14 @@ test('estimate: diff uses group sums, not single scan costs', () => {
   assert.equal(estimate(s, { repoId: 1, kind: 'diff' }), 5)
 })
 
+test('estimate: diff and full share the repo group history (Ruling 7)', () => {
+  const t = (d) => `2026-10-${String(d).padStart(2, '0')}T00:00:00Z`
+  const s = [2, 4, 6].map((c, i) => sc({ skill_name: 'security-deep-dive', cost_usd: c, created_at: t(1 + i * 5) }))
+  assert.equal(estimate(s, { repoId: 1, kind: 'diff' }), 6)
+  assert.equal(estimate(s, { repoId: 1, kind: 'full' }), 6)
+  assert.equal(estimate(s, { repoId: 2, kind: 'diff' }), 6)
+})
+
 // ---- runner ----
 let failed = 0
 for (const [name, fn] of tests) {

@@ -48,7 +48,6 @@ function percentile(values, p) {
 
 const usable = (s) => s && s.status === 'done' && typeof s.cost_usd === 'number' && s.cost_usd > 0
 const isGroupScan = (s) => !FINDING_KINDS.has(s.skill_name)
-const isDiffScan = (s) => /diff/i.test(s.skill_name ?? '')
 const t = (s) => Date.parse(s.created_at)
 
 // Cost per scan group, oldest group first. Scan rows exported by /api/v1/scans have NO
@@ -80,12 +79,13 @@ function groupCosts(scans, repoId, pred) {
 }
 
 export function diffGroupCost(scans, repoId) {
-  return groupCosts(scans, repoId, (s) => isGroupScan(s) && isDiffScan(s))
+  return groupCosts(scans, repoId, isGroupScan)
 }
 
 function samplesFor(scans, repoId, kind) {
-  if (kind === 'diff') return groupCosts(scans, repoId, (s) => isGroupScan(s) && isDiffScan(s))
-  if (kind === 'full') return groupCosts(scans, repoId, (s) => isGroupScan(s) && !isDiffScan(s))
+  // Ruling 7: diff and full share one group history (no skill or rescan_mode field tells them apart);
+  // only the fallback differs.
+  if (kind === 'diff' || kind === 'full') return groupCosts(scans, repoId, isGroupScan)
   return scans
     .filter((s) => (repoId == null || s.repository_id === repoId) && usable(s) && s.skill_name === kind)
     .sort((a, b) => t(a) - t(b)).map((s) => s.cost_usd)
