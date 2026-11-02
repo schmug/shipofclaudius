@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, readFile, readdir, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { startStub } from './lib/stub-scrutineer.mjs'
 import { createClient } from '../packages/scrutineer-autopilot/src/client.mjs'
@@ -445,6 +445,26 @@ test('--record stores stop_rule, reason and a computed held_path, and never a PR
   assert.equal(e.pr, 3)
   assert.equal(JSON.stringify(e).includes('evil.example'), false)
   assert.equal(JSON.stringify(e).includes('77'), false)
+})
+
+const recordStdin = (W, id, text) => new Promise((resolve) => {
+  const c = spawn('node', [join(ROOT, 'packages/scrutineer-autopilot/bin/tick.mjs'), '--state-dir', W.stateDir, '--config', join(W.stateDir, 'none.json'), '--record', id])
+  let err = ''
+  c.stderr.on('data', (d) => { err += d })
+  c.on('close', (code) => resolve({ code, stderr: err }))
+  c.stdin.end(text)
+})
+
+test('--record <id> reads the outcome JSON from stdin; reason is stripped to [A-Za-z0-9 ._:/-]', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  const r = await recordStdin(W, '8', JSON.stringify({ outcome: 'failed', reason: "it's $(x) `y` ; rm -rf /tmp/z" }))
+  assert.equal(r.code, 0, r.stderr)
+  const e = (await ledgerOf(W)).findings['8']
+  assert.equal(e.stage, 'failed')
+  assert.equal(e.reason, 'its x y  rm -rf /tmp/z')
+  assert.equal(/['$`;()]/.test(e.reason), false)
+  assert.equal((await recordStdin(W, '8', 'not json')).code, 2)
 })
 
 test('--record rejects a bad finding id, outcome, stop_rule or JSON with exit 2 and no ledger write', async () => {

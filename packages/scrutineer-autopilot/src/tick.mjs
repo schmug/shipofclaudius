@@ -52,7 +52,7 @@ export function relayFields(f) {
 }
 
 // `tick.mjs --record <findingId> <outcome-json>` (Ruling 18): store a scrutineer-fix-pr outcome as the entry's stage.
-// Only the outcome enum, the stop_rule enum, the first line of reason (capped) and a held_path computed from stateDir
+// Only the outcome enum, the stop_rule enum, the first line of reason (restricted to [A-Za-z0-9 ._:/-], 200 chars) and a held_path computed from stateDir
 // are kept. A PR number or URL in the outcome JSON is never stored: the tick resolves the PR by branch. Invalid input
 // throws RecordError and writes nothing.
 export class RecordError extends Error {}
@@ -72,8 +72,7 @@ export async function recordOutcome(stateDir, findingId, outcomeJson, { now = Da
     e.stage = o.outcome
     for (const k of ['stop_rule', 'reason', 'held_path']) delete e[k]
     if (o.stop_rule) e.stop_rule = o.stop_rule
-    // eslint-disable-next-line no-control-regex
-    const reason = typeof o.reason === 'string' ? o.reason.split('\n')[0].replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200) : ''
+    const reason = typeof o.reason === 'string' ? o.reason.split('\n')[0].replace(/[^A-Za-z0-9 ._:/-]/g, '').trim().slice(0, 200) : ''
     if (reason) e.reason = reason
     if (o.outcome === 'held') e.held_path = join(stateDir, 'held', id)
     e.recordedAt = isoOf(toMs(now))

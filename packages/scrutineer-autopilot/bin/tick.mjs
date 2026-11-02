@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // One autopilot tick. Usage: tick.mjs [--dry-run] [--json] [--config <path>] [--state-dir <path>]
-//        tick.mjs --record <findingId> <outcome-json> [--state-dir <path>]   store a scrutineer-fix-pr outcome as the ledger stage (exit 2 on invalid input)
+//        tick.mjs --record <findingId> [<outcome-json>; stdin when omitted] [--state-dir <path>]   store a scrutineer-fix-pr outcome as the ledger stage (exit 2 on invalid input)
 //        tick.mjs --digest-sent [--state-dir <path>]                       stamp lastDigestAt in the ledger
 // Prints the TickResult. Exit 0 for ok/paused/locked, 2 for scrutineer-too-old/-down/budget-unavailable, 1 on error.
 // --dry-run also wraps fetch so any non-GET request throws before it leaves the process.
@@ -22,7 +22,11 @@ function parseArgs(argv) {
     else if (a === '--json') o.json = true
     else if (a === '--config') o.config = argv[++i]
     else if (a === '--state-dir') o.stateDir = argv[++i]
-    else if (a === '--record') { o.record = [argv[++i], argv[++i]]; if (o.record.some((x) => x == null)) throw new RecordError('--record needs <findingId> <outcome-json>') }
+    else if (a === '--record') {
+      const id = argv[++i]
+      if (id == null) throw new RecordError('--record needs <findingId> [<outcome-json>]')
+      o.record = [id, argv[i + 1] != null && !argv[i + 1].startsWith('--') ? argv[++i] : null] // no JSON argument: read stdin
+    }
     else if (a === '--digest-sent') o.digestSent = true
     else throw new Error(`unknown argument ${a}`)
   }
@@ -39,6 +43,12 @@ function summary(r) {
 }
 
 // Record modes read only stateDir (no owner lookup, no network); a config file may name it.
+async function readStdin() {
+  const chunks = []
+  for await (const c of process.stdin) chunks.push(c)
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 async function stateDirFor(o) {
   if (o.stateDir) return o.stateDir
   try { return JSON.parse(await readFile(o.config, 'utf8')).stateDir ?? DEFAULTS.stateDir } catch (e) { if (e.code === 'ENOENT') return DEFAULTS.stateDir; throw e }
@@ -48,7 +58,9 @@ try {
   const o = parseArgs(process.argv.slice(2))
   if (o.record || o.digestSent) {
     const dir = await stateDirFor(o)
-    if (o.record) { const e = await recordOutcome(dir, o.record[0], o.record[1]); console.log(`recorded ${o.record[0]}: ${e.stage}`) }
+    if (o.record) {
+      const json = o.record[1] ?? await readStdin()
+      const e = await recordOutcome(dir, o.record[0], json); console.log(`recorded ${o.record[0]}: ${e.stage}`) }
     else console.log(`lastDigestAt ${await markDigestSent(dir)}`)
     process.exit(0)
   }
