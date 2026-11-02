@@ -56,6 +56,10 @@ test('normalizeConfig: budget defaults match the spec numbers and DEFAULTS is fr
   assert.ok(Object.isFrozen(DEFAULTS) && Object.isFrozen(DEFAULTS.budget))
 })
 
+test('normalizeConfig: default tokenPath is the spec §5 operator-token file', () => {
+  assert.ok(normalizeConfig({}, { owner: 'o' }).tokenPath.endsWith('scrutineer/data/operator-token'))
+})
+
 test('normalizeConfig: budget overrides merge over defaults', () => {
   assert.equal(normalizeConfig({ budget: { reserve: 10 } }, { owner: 'o' }).budget.reserve, 10)
 })

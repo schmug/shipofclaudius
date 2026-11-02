@@ -12,7 +12,7 @@ Read from `~/.claude/scrutineer-autopilot/config.json` by `loadConfig`. Every ke
 |---|---|---|
 | `owner` | GitHub owner, lowercased | `gh api user --jq .login` |
 | `baseUrl` | Scrutineer URL; host must be `127.0.0.1`, `localhost` or `::1`, else `normalizeConfig` throws | loopback, port 8080 |
-| `tokenPath` | file holding the operator token, read at call time, never logged | `<stateDir>/token` |
+| `tokenPath` | file holding the operator token, read at call time, never logged | `~/scrutineer/data/operator-token` |
 | `allowlist` | `owner/name` repos the autopilot may touch | `[]` |
 | `repoPolicy` | `owner/name` to `auto`, `stop` or `exclude` | `{}` |
 | `budget` | overrides for the spec §7 numbers (`DEFAULTS.budget`) | spec values |

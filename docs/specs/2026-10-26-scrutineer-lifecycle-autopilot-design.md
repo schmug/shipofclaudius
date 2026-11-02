@@ -641,8 +641,7 @@ record.**
 **Observed 2026-10-26:** everything in §2, apart from the classic-branch-protection caveat
 in §2.7.
 
-**Not verified; the plan must check these before building on them:** bearer POSTs to UI
-routes (§11); the reattack report parse (§2.1, no reattack scan exists yet); whether
+**Not verified; the plan must check these before building on them:** the reattack report parse (§2.1, no reattack scan exists yet); whether
 `PushNotification` is available in a scheduled session (§9); `codexbar`'s codex `secondary` window (§7.4:
 the codex output showed `pace.secondary` but its `usage` block was truncated in recon);
 and whether a Claude desktop scheduled task can run a Workflow with write agents

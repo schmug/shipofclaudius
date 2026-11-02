@@ -12,7 +12,7 @@ const POLICIES = new Set(['auto', 'stop', 'exclude'])
 
 export const DEFAULTS = Object.freeze({
   baseUrl: 'http://127.0.0.1:8080',
-  tokenPath: join(STATE_DIR, 'token'),
+  tokenPath: join(homedir(), 'scrutineer', 'data', 'operator-token'),
   stateDir: STATE_DIR,
   budget: Object.freeze({
     reserve: 30,
