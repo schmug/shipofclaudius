@@ -1,0 +1,58 @@
+[
+  {
+    "source": "web",
+    "usage": {
+      "updatedAt": "2026-11-02T00:42:59Z",
+      "loginMethod": "Claude Max 20x",
+      "identity": {
+        "providerID": "claude",
+        "accountOrganization": "Example Org",
+        "loginMethod": "Claude Max 20x",
+        "accountEmail": "user@example.com"
+      },
+      "extraRateWindows": [
+        {
+          "title": "Fable only",
+          "window": {
+            "windowMinutes": 10080,
+            "resetsAt": "2026-11-07T05:00:00Z",
+            "usedPercent": 0
+          },
+          "id": "redacted-id"
+        }
+      ],
+      "primary": {
+        "windowMinutes": 300,
+        "usedPercent": 0,
+        "isSyntheticPlaceholder": true
+      },
+      "providerCost": {
+        "updatedAt": "2026-11-02T00:42:59Z",
+        "limit": 0,
+        "period": "Extra usage",
+        "balance": 0.01,
+        "used": 0,
+        "currencyCode": "USD"
+      },
+      "accountEmail": "user@example.com",
+      "secondary": {
+        "windowMinutes": 10080,
+        "usedPercent": 24,
+        "resetsAt": "2026-11-07T05:00:00Z",
+        "resetDescription": "Nov 7 at 12:00AM"
+      },
+      "tertiary": null,
+      "accountOrganization": "Example Org"
+    },
+    "pace": {
+      "secondary": {
+        "willLastToReset": true,
+        "stage": "slightlyBehind",
+        "summary": "2% in reserve | Expected 26% used | Lasts until reset",
+        "deltaPercent": -2,
+        "expectedUsedPercent": 26
+      }
+    },
+    "provider": "claude"
+  }
+]
