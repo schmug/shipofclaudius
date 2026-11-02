@@ -89,20 +89,23 @@ test('prState returns {state, mergeSha}', async () => {
   const open = stub({ 'pr view': JSON.stringify({ state: 'OPEN', mergeCommit: null }) })
   assert.deepEqual(await prState('o/app', 8, { exec: open.exec }), { state: 'OPEN', mergeSha: null })
 })
-const own = (o) => ({ isCrossRepository: false, headRepositoryOwner: { login: 'o' }, ...o })
-test('prForBranch returns the same-repo PR, or null when none', async () => {
-  const { exec, calls } = stub({ 'pr list': JSON.stringify([own({ number: 9, state: 'MERGED', mergeCommit: { oid: 'cafe' } })]) })
+// REST pulls rows (gh api repos/{key}/pulls?head=owner:branch).
+const pull = (o) => ({ number: 9, state: 'closed', merged_at: null, merge_commit_sha: 'test-merge', head: { ref: 'scrutineer/finding-3', repo: { full_name: 'o/app' } }, ...o })
+test('prForBranch filters server-side by head=owner:branch, separate argv, and maps REST state', async () => {
+  const { exec, calls } = stub({ 'pulls': JSON.stringify([pull({ merged_at: '2026-10-30T00:00:00Z', merge_commit_sha: 'cafe' })]) })
   assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec }), { number: 9, state: 'MERGED', mergeSha: 'cafe' })
-  assert.match(calls[0], /--head scrutineer\/finding-3 --state all --json number,state,mergeCommit,isCrossRepository,headRepositoryOwner/)
-  assert.equal(await prForBranch('o/app', 'nope', { exec: stub({ 'pr list': '[]' }).exec }), null)
+  assert.equal(calls[0], 'gh api --method GET repos/o/app/pulls -f head=o:scrutineer/finding-3 -f state=all -f per_page=5')
+  const one = async (row) => prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pulls': JSON.stringify([row]) }).exec })
+  assert.deepEqual(await one(pull({ state: 'open' })), { number: 9, state: 'OPEN', mergeSha: null })
+  assert.deepEqual(await one(pull()), { number: 9, state: 'CLOSED', mergeSha: null })
+  assert.equal(await prForBranch('o/app', 'nope', { exec: stub({ 'pulls': '[]' }).exec }), null)
 })
-test('prForBranch ignores fork PRs with the branch name (cross-repo or foreign head owner)', async () => {
-  const fork = [{ number: 4, state: 'MERGED', mergeCommit: { oid: 'evil' }, isCrossRepository: true, headRepositoryOwner: { login: 'mallory' } }]
-  assert.equal(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(fork) }).exec }), null)
-  const spoof = [own({ number: 5, state: 'CLOSED', headRepositoryOwner: { login: 'mallory' } })]
-  assert.equal(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(spoof) }).exec }), null)
-  const both = [fork[0], own({ number: 9, state: 'OPEN', mergeCommit: null })]
-  assert.deepEqual(await prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pr list': JSON.stringify(both) }).exec }), { number: 9, state: 'OPEN', mergeSha: null })
+test('prForBranch ignores fork PRs with the branch name even if the server returns them', async () => {
+  const fork = pull({ number: 4, merged_at: '2026-10-30T00:00:00Z', head: { ref: 'scrutineer/finding-3', repo: { full_name: 'mallory/app' } } })
+  const run = (rows) => prForBranch('o/app', 'scrutineer/finding-3', { exec: stub({ 'pulls': JSON.stringify(rows) }).exec })
+  assert.equal(await run([fork]), null)
+  assert.equal(await run([pull({ head: { ref: 'scrutineer/finding-3', repo: null } })]), null) // head repo deleted
+  assert.deepEqual(await run([fork, pull({ number: 8, state: 'open' })]), { number: 8, state: 'OPEN', mergeSha: null })
 })
 test('pollRepo counts a fork PR named scrutineer/finding-* as a rescan trigger', async () => {
   const { exec } = stub(repoRoutes('public', [

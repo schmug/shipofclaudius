@@ -66,9 +66,14 @@ export async function prState(key, pr, { exec }) {
   return { state: v.state, mergeSha: v.mergeCommit?.oid ?? null }
 }
 
+// Server-side filter: head=<owner>:<branch> returns only PRs whose head is in the base repo's owner namespace, so
+// fork PRs with the same branch name cannot crowd the real one out of the page. head.repo.full_name === key is a
+// second guard. Every value is its own argv element (gh encodes -f into the GET query string).
 export async function prForBranch(key, branch, { exec }) {
-  const list = await ghJson(exec, ['pr', 'list', '-R', key, '--head', branch, '--state', 'all', '--json', 'number,state,mergeCommit,isCrossRepository,headRepositoryOwner', '--limit', '20'])
-  const p = list.find((x) => x.isCrossRepository === false && String(x.headRepositoryOwner?.login ?? '').toLowerCase() === ownerOf(key))
+  const list = await ghJson(exec, ['api', '--method', 'GET', `repos/${key}/pulls`, '-f', `head=${ownerOf(key)}:${branch}`, '-f', 'state=all', '-f', 'per_page=5'])
+  const p = (Array.isArray(list) ? list : []).find((x) => x?.head?.ref === branch
+    && String(x.head?.repo?.full_name ?? '').toLowerCase() === String(key).toLowerCase())
   if (!p) return null
-  return { number: p.number, state: p.state, mergeSha: p.mergeCommit?.oid ?? null }
+  const merged = p.merged_at != null
+  return { number: p.number, state: merged ? 'MERGED' : p.state === 'open' ? 'OPEN' : 'CLOSED', mergeSha: merged ? p.merge_commit_sha ?? null : null }
 }
