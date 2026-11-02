@@ -54,12 +54,13 @@ export function skillAttempts(scans, findingId, skill, { since } = {}) {
 }
 
 // The patch skill reports a refusal (for example "finding already fixed upstream") as report.error and writes no
-// suggested_fix. Returns the newest done patch's error, first line only, stripped to plain characters, else null.
+// suggested_fix. That error is model-written text, so it is mapped to a fixed string and never copied into notes or
+// the ledger. Returns the mapped refusal for the newest done patch, else null.
 export function patchRefusal(scans, findingId) {
   const [latest] = newestFirst(done(scans, 'patch', findingId))
   const err = latest ? parseReport(latest.report)?.error : null
   if (typeof err !== 'string' || err.trim() === '') return null
-  return err.split('\n')[0].replace(/[^A-Za-z0-9 ._:;,/'()-]/g, '').replace(/[()]/g, '').trim().slice(0, 160) || null
+  return /already (been )?fixed/i.test(err) ? 'already fixed upstream' : 'patch skill refused'
 }
 
 export function patchAttemptCount(scans, findingId) {

@@ -78,8 +78,8 @@ test('triaged with patchAttempts 0 -> patch; with patch and reattack null -> rea
 })
 test('a finished patch with no gated fix parks with its reason instead of asking for a reattack', () => {
   const f = { status: 'triaged', production_viability: 'VIABLE', suggested_fix: '' }
-  assert.deepEqual(run(snap(f, { patchAttempts: 1, patchRefused: 'finding already fixed upstream; no duplicate patch produced' })),
-    { type: 'park', note: 'autopilot: patch produced no fix: finding already fixed upstream; no duplicate patch produced' })
+  assert.deepEqual(run(snap(f, { patchAttempts: 1, patchRefused: 'already fixed upstream' })),
+    { type: 'park', note: 'autopilot: patch produced no fix: already fixed upstream' })
   assert.deepEqual(run(snap(f, { patchAttempts: 1 })), { type: 'park', note: 'autopilot: patch produced no fix: no gated suggested_fix' })
   assert.equal(run(snap({ ...f, suggested_fix: 'diff --git a/x b/x' }, { patchAttempts: 1 })).type, 'reattack')
 })
