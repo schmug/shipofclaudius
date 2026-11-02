@@ -159,7 +159,7 @@ evaluated for High/Critical. 114 of the 123 `new` findings are Medium or Low. Se
   finding; the autopilot uses neither.
 - `POST /findings/{id}/reattack` pins the newest gated patch attempt and its base commit;
   it returns 412 when there is none.
-- Bearer-token POSTs from loopback are documented but **not yet verified** (§11).
+- Bearer-token POSTs from loopback work: verified 2026-11-01 (§11).
 
 ### 2.6 Scrutineer already has a per-repo clock
 
@@ -529,10 +529,9 @@ Each stopped finding is notified once, plus a daily digest of everything still w
 - **Scope check at every write.** Before any POST, the tick re-reads the finding and
   checks that its `repository_id` maps to an allowlisted `github.com/<owner>/` URL. This
   is what keeps the autopilot off non-Schmug repos even if the ledger is wrong.
-- **Unverified prerequisite.** Bearer-token POSTs to the UI routes from loopback are
-  documented in `docs/api.md` but have not been tried. Plan step 1 is to verify this on
-  one harmless call (`POST /findings/{id}/notes` on a Schmug finding) before building on
-  it. If it fails, the design needs Q1's upstream route, or a cookie session.
+- **Verified prerequisite (2026-11-01).** A bearer-token POST to a UI route from loopback
+  works: `POST /findings/19/notes` with the operator token returned `303` with a redirect
+  to `/findings/19`. No cookie session or upstream route is needed for this route family.
 
 ## 12. Skill shim (`skills/scrutineer-autopilot/SKILL.md`, `workflow: none`)
 
@@ -635,6 +634,9 @@ record.**
   `~/scrutineer`. Until then the plan builds offline against a stub server.
 
 ## 16. Verified vs unverified
+
+**Observed 2026-11-01:** a bearer POST to `/findings/{id}/notes` from loopback returns
+`303` to the finding page (§11).
 
 **Observed 2026-10-26:** everything in §2, apart from the classic-branch-protection caveat
 in §2.7.
