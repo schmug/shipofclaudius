@@ -81,6 +81,7 @@ async function world(w) {
   const byId = () => new Map(w.findings.map((f) => [String(f.id), f]))
   const bump = (id) => { const f = byId().get(id); if (f) f.updated_at = iso(NOW + 1000) } // Scrutineer's clock runs 1s ahead
   const stub = await startStub({
+    ...(w.routes ?? {}), // test overrides match first
     'GET /api/v1/findings/{id}': (req) => {
       const f = byId().get(req.params.id)
       if (!f) return { status: 404 }
@@ -291,6 +292,112 @@ test('paused -> status paused, zero POSTs, no ledger written', async () => {
   assert.equal(r.status, 'paused')
   assert.equal(W.posts().length, 0)
   assert.equal(await exists(join(W.stateDir, 'ledger.json')), false)
+})
+
+const triagedViable = (id, o = {}) => finding(id, { status: 'triaged', production_viability: 'VIABLE', ...o })
+const L0 = (findings, repos = {}) => JSON.stringify({ findings, repos, budgetSamples: [] })
+
+test('paused: no agentItems at all; fix and regate candidates recorded skipped: paused', async () => {
+  const run = async (findings, scans, ledger, extra = {}) => {
+    const W = await world({ findings, scans: [deepDive(), ...scans] })
+    if (ledger) await writeFile(join(W.stateDir, 'ledger.json'), L0(ledger))
+    await writeFile(join(W.stateDir, 'paused'), '')
+    const r = await tick(W, { exec: stubExec(extra) })
+    await W.stub.close()
+    assert.equal(r.status, 'paused')
+    assert.equal(r.agentItems.length, 0)
+    assert.equal(W.posts().length, 0)
+    return r.actions.filter((a) => a.reason === 'paused').map((a) => [a.findingId, a.type])
+  }
+  assert.deepEqual(await run([triagedViable(7)], verifiedSecure(7)), [[7, 'fix']])
+  assert.deepEqual(await run([triagedViable(11)], verifiedSecure(11), { 11: { stage: 'awaiting_ci', pr: 6, repo: 'o/app' } },
+    { 'pr view 6': JSON.stringify({ state: 'OPEN', mergeCommit: null }) }), [[11, 'regate']])
+})
+
+test('dry run: agent items are kept and marked would:true', async () => {
+  const W = await world({ findings: [triagedViable(7)], scans: [deepDive(), ...verifiedSecure(7)] })
+  const r = await tick(W, { dryRun: true })
+  await W.stub.close()
+  assert.equal(r.agentItems.length, 1)
+  assert.equal(r.agentItems[0].would, true)
+})
+
+test('a failed prepare on a PR-stage entry still marks the repo busy: no second fix item', async () => {
+  const W = await world({ findings: [triagedViable(10), triagedViable(11)], scans: [deepDive(), ...verifiedSecure(10), ...verifiedSecure(11)] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 10: { stage: 'awaiting_ci', pr: 5, repo: 'o/app' } }))
+  const r = await tick(W, { exec: stubExec({ 'pr view 5': new Error('gh: HTTP 502') }) })
+  await W.stub.close()
+  assert.equal(r.actions.find((a) => a.findingId === 10).result, 'failed')
+  assert.equal(r.agentItems.filter((i) => i.kind === 'fix').length, 0)
+  assert.equal(r.actions.find((a) => a.findingId === 11).result, 'waiting')
+})
+
+test('stale claude codexbar -> zero fix items, reason claude budget:', async () => {
+  const W = await world({ findings: [triagedViable(7)], scans: [deepDive(), ...verifiedSecure(7)] })
+  const r = await tick(W, { exec: stubExec({ 'codexbar usage --provider claude': () => codexbar('claude', { updatedAt: iso(NOW - 31 * 60e3) }) }) })
+  await W.stub.close()
+  assert.equal(r.status, 'ok')
+  assert.equal(r.agentItems.length, 0)
+  assert.match(r.actions.find((a) => a.findingId === 7).reason, /^claude budget:/)
+})
+
+test('carry 4: a new patch resets reattackRetries, then a verification_incomplete retry increments it', async () => {
+  const patch = scan({ finding_id: 9, skill_name: 'patch', created_at: '2026-10-10T00:00:00Z', finished_at: '2026-10-10T01:00:00Z' })
+  const incomplete = scan({ finding_id: 9, skill_name: 'reattack', created_at: '2026-10-11T00:00:00Z', finished_at: '2026-10-11T01:00:00Z', report: JSON.stringify({ outcome: 'failed_to_bypass', variants: [] }) })
+  const W = await world({ findings: [triagedViable(9)], scans: [deepDive(), patch, incomplete] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 9: { stage: 'reattacking', repo: 'o/app', lastPatchScanId: 1, reattackRetries: 1 } }))
+  await tick(W)
+  await W.stub.close()
+  assert.deepEqual(W.posts().map((p) => p.path), ['/findings/9/reattack']) // with retries still 1 it would park
+  const e = (await ledgerOf(W)).findings['9']
+  assert.equal(e.lastPatchScanId, patch.id)
+  assert.equal(e.reattackRetries, 1)
+})
+
+test('carry 7: weekly tier does not rescan before 7 days since the last scan', async () => {
+  const repoState = (lastScanAt) => ({ 'o/app': { id: 1, lastScannedSha: 'old', lastFullAt: NOW - 10 * 86400e3, lastScanAt, scrutineerVersion: 'scrutineer 2026.10.24.1',
+    firstSeenAt: NOW - 30 * 86400e3, seen: { sha: HEAD, prMergedAt: iso(NOW), releaseAt: iso(NOW) }, events: [] } })
+  const out = []
+  for (const days of [3, 8]) {
+    const W = await world({ findings: [], scans: [deepDive()] })
+    await writeFile(join(W.stateDir, 'ledger.json'), L0({}, repoState(NOW - days * 86400e3)))
+    const r = await tick(W)
+    await W.stub.close()
+    const a = r.actions.find((x) => x.type === 'rescan')
+    out.push([a.tier, a.kind, a.result, W.posts().length])
+  }
+  assert.deepEqual(out, [['weekly', null, 'not-due', 0], ['weekly', 'diff', 'done', 1]])
+})
+
+test('carry 2: a running revalidate scan on the finding -> wait, no POST', async () => {
+  const W = await world({ findings: [finding(1)], scans: [deepDive(), scan({ finding_id: 1, skill_name: 'revalidate', status: 'running', finished_at: null })] })
+  const r = await tick(W)
+  await W.stub.close()
+  assert.equal(r.actions.find((a) => a.findingId === 1).type, 'wait')
+  assert.equal(W.posts().length, 0)
+})
+
+test('carry 3: a skipped entry without a PR number is resolved through prForBranch', async () => {
+  const W = await world({ findings: [triagedViable(13)], scans: [deepDive(), ...verifiedSecure(13)] })
+  await writeFile(join(W.stateDir, 'ledger.json'), L0({ 13: { stage: 'skipped', repo: 'o/app' } }))
+  const ex = stubExec({ 'head=o:scrutineer/finding-13': JSON.stringify([{ number: 31, state: 'closed', merged_at: '2026-10-31T00:00:00Z', merge_commit_sha: 'm31', head: { ref: 'scrutineer/finding-13', repo: { full_name: 'o/app' } } }]) })
+  await tick(W, { exec: ex })
+  await W.stub.close()
+  assert.ok(ex.calls.some((c) => c.includes('repos/o/app/pulls -f head=o:scrutineer/finding-13')), ex.calls.join('\n'))
+  assert.equal(W.posts().find((p) => p.path === '/findings/13/status').body.status, 'fixed')
+  assert.equal((await ledgerOf(W)).findings['13'].pr, 31)
+})
+
+test('carry 8: one finding POST fails, the tick records it and continues to the next finding', async () => {
+  const W = await world({ findings: [finding(1), finding(2)], scans: [deepDive()], routes: { 'POST /findings/1/verify': { status: 500 } } })
+  const r = await tick(W)
+  await W.stub.close()
+  assert.equal(r.status, 'ok')
+  const a1 = r.actions.find((a) => a.findingId === 1)
+  assert.equal(a1.result, 'failed')
+  assert.match(a1.error, /500/)
+  assert.equal(r.actions.find((a) => a.findingId === 2).result, 'done')
+  assert.ok(W.posts().some((p) => p.path === '/findings/2/verify'))
 })
 
 test('bin/finding.mjs prints exactly the relay fields and never the token', async () => {

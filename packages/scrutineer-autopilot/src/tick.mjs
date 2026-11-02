@@ -162,10 +162,14 @@ async function step5Lifecycle(tk) {
   for (const repo of tk.repos.values()) seedRepo(tk, repo)
 
   const items = []
+  tk.busyRepos = new Set()
   for (const it of tk.findings) {
-    try { items.push(await prepare(tk, it)) } catch (e) { tk.R.actions.push({ findingId: it.f.id, repo: it.repo.key, type: 'prepare', result: 'failed', error: msg(e) }) }
+    try { items.push(await prepare(tk, it)) } catch (e) {
+      tk.R.actions.push({ findingId: it.f.id, repo: it.repo.key, type: 'prepare', result: 'failed', error: msg(e) })
+      if (PR_STAGES.has(entryOf(tk, it.f.id).stage)) tk.busyRepos.add(it.repo.key) // fail closed: PR state unknown
+    }
   }
-  tk.busyRepos = new Set(items.filter((i) => repoBusy(i)).map((i) => i.repo.key))
+  for (const i of items) if (repoBusy(i)) tk.busyRepos.add(i.repo.key)
   items.sort((a, b) => (SEVERITY_RANK[a.f.severity] ?? 9) - (SEVERITY_RANK[b.f.severity] ?? 9) || a.f.id - b.f.id)
   tk.fixCandidates = []
   for (const it of items) {
@@ -402,7 +406,7 @@ function eventRates(tk, st) {
   return { push: n('push'), pr: n('pr'), release: n('release') }
 }
 
-// ---- step 7: agent items: fix (Claude-gated, one per repo) and regate (every awaiting_ci PR) ----
+// ---- step 7: agent items: fix (Claude-gated, one per repo) and regate (every awaiting_ci PR); none when paused ----
 async function step7AgentItems(tk) {
   const gates = new Map()
   const describe = async (repo) => {
@@ -415,6 +419,14 @@ async function step7AgentItems(tk) {
     }
     return gates.get(repo.key)
   }
+  const byId = new Map(tk.findings.map((x) => [String(x.f.id), x]))
+  const regates = Object.entries(tk.ledger.data.findings).filter(([, e]) => e.stage === 'awaiting_ci' && e.pr)
+  if (tk.paused) { // pause is the kill switch: the skill runs every agentItem, so emit none
+    for (const it of tk.fixCandidates) { it.rec.result = 'skipped'; it.rec.reason = 'paused' }
+    for (const [id, e] of regates) tk.R.actions.push({ findingId: Number(id), repo: byId.get(id)?.repo.key, type: 'regate', pr: e.pr, result: 'skipped', reason: 'paused' })
+    return
+  }
+  const mark = tk.dry ? { would: true } : {}
   const used = new Set(tk.busyRepos)
   const est = tk.budget.fixEstimateUsd
   for (const it of tk.fixCandidates) {
@@ -422,15 +434,13 @@ async function step7AgentItems(tk) {
     const g = check(tk, 'claude', est)
     if (!g.ok) { it.rec.result = 'skipped'; it.rec.reason = `claude budget: ${g.reason}`; continue }
     used.add(it.repo.key); tk.spent.claude += est
-    tk.R.agentItems.push({ kind: 'fix', findingId: it.f.id, repo: it.repo.key, ...(await describe(it.repo)), estimateUsd: est })
+    tk.R.agentItems.push({ kind: 'fix', findingId: it.f.id, repo: it.repo.key, ...(await describe(it.repo)), estimateUsd: est, ...mark })
     it.rec.result = tk.dry ? 'would' : 'agent'
   }
-  const byId = new Map(tk.findings.map((x) => [String(x.f.id), x]))
-  for (const [id, e] of Object.entries(tk.ledger.data.findings)) {
-    if (e.stage !== 'awaiting_ci' || !e.pr) continue
+  for (const [id, e] of regates) {
     const x = byId.get(id) // the repo comes from the finding's repository_id, never from the ledger
     if (!x) { tk.R.notes.push(`finding ${id}: awaiting_ci but not an in-scope finding; no regate`); continue }
-    tk.R.agentItems.push({ kind: 'regate', findingId: x.f.id, repo: x.repo.key, pr: e.pr, ...(await describe(x.repo)) })
+    tk.R.agentItems.push({ kind: 'regate', findingId: x.f.id, repo: x.repo.key, pr: e.pr, ...(await describe(x.repo)), ...mark })
   }
 }
 
