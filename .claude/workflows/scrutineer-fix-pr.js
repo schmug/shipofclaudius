@@ -52,8 +52,9 @@
 //   drivers could run code), so both blob relays run git only in a FRESH repo under the scratch dir:
 //   `git init`, then `fetch --no-tags <clone> BASE_SHA CLONE_HEAD` (the clone is only a fetch source),
 //   every git under GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 with hooksPath, fsmonitor and
-//   attributesFile disabled. One relay checks out BASE_SHA detached, prints `hash-object --no-filters`
-//   of Build's ${SCRATCH}fix.diff, runs `apply --index` and `diff --cached --raw --no-abbrev`; the other
+//   attributesFile disabled. One relay copies Build's ${SCRATCH}fix.diff once (regular file, not a
+//   symlink or FIFO) into the fresh repo's .git, checks out BASE_SHA detached, prints `hash-object
+//   --no-filters` of that private copy, runs `apply --index` on it and `diff --cached --raw --no-abbrev`; the other
 //   prints `diff --raw --no-abbrev BASE_SHA CLONE_HEAD` from the fetched objects. Each removes its fresh
 //   repo on every exit path. The script requires the fix file's
 //   blob to equal its own git-blob SHA-1 of suggested_fix (so Build cannot have altered it) and each
@@ -499,11 +500,15 @@ const freshRepoCmd = (repo, body) =>
   `rm -rf "${repo}"; ${SAFE_GIT} init -q "${repo}" && ` +
   `${SAFE_GIT} -C "${repo}" fetch -q --no-tags "${CLONE}" ${BASE_SHA} ${CLONE_HEAD} && ${body}; s=$?; rm -rf "${repo}"; exit $s`
 const FIX_REPO = `${SCRATCH}verify-fix`
+// TOCTOU: Build's fix.diff is read once (a regular file, not a symlink or FIFO) into the fresh repo's .git, which Build
+// never sees; hash-object and both applies read only that private copy, so a leftover Build process cannot swap bytes.
+const FIX_PRIV = `${FIX_REPO}/.git/scrutineer-fix.diff`
 const CLONE_REPO = `${SCRATCH}verify-clone`
 const fixBlobs = await agent(relayPrompt(freshRepoCmd(FIX_REPO,
+  `test -f "${FIX_FILE}" && ! test -L "${FIX_FILE}" && cat "${FIX_FILE}" > "${FIX_PRIV}" && ` +
   `${SAFE_GIT} -C "${FIX_REPO}" checkout -q --detach ${BASE_SHA} && ` +
-  `echo "FIXBLOB $(${SAFE_GIT} -C "${FIX_REPO}" hash-object --no-filters "${FIX_FILE}")" && ` +
-  `${SAFE_GIT} -C "${FIX_REPO}" apply --check --index "${FIX_FILE}" && ${SAFE_GIT} -C "${FIX_REPO}" apply --index "${FIX_FILE}" && echo APPLIED && ` +
+  `echo "FIXBLOB $(${SAFE_GIT} -C "${FIX_REPO}" hash-object --no-filters "${FIX_PRIV}")" && ` +
+  `${SAFE_GIT} -C "${FIX_REPO}" apply --check --index "${FIX_PRIV}" && ${SAFE_GIT} -C "${FIX_REPO}" apply --index "${FIX_PRIV}" && echo APPLIED && ` +
   `${SAFE_GIT} -c core.quotePath=false -C "${FIX_REPO}" diff --cached --raw --no-abbrev ${BASE_SHA}`), false),
   { label: 'relay:fix-blobs', phase: 'Check', agentType: READONLY_AGENT, schema: RELAY_SCHEMA, effort: 'low' })
 const cloneBlobs = await agent(relayPrompt(freshRepoCmd(CLONE_REPO,

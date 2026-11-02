@@ -735,8 +735,15 @@ test('A: blob check — the fix applied at BASE_SHA in a scratch worktree must g
     assert.ok(cmd.trimEnd().endsWith(`s=$?; rm -rf "${repo}"; exit $s`), 'fresh repo removed on every exit path')
   }
   assert.ok(fb.prompt.includes(`-C "${SCR}verify-fix" checkout -q --detach ${SHA}`))
-  assert.ok(fb.prompt.includes(`hash-object --no-filters "${SCR}fix.diff"`))
-  assert.ok(fb.prompt.includes(`apply --check --index "${SCR}fix.diff"`) && fb.prompt.includes(`apply --index "${SCR}fix.diff"`))
+  // TOCTOU: Build's fix.diff is read exactly once (guarded against FIFOs/symlinks) into a copy inside the fresh repo's .git;
+  // hash-object and both applies read only that private copy.
+  const FIXQ = `"${SCR}fix.diff"`, PRIV = `"${SCR}verify-fix/.git/scrutineer-fix.diff"`
+  const fcmd = fb.prompt.split('\n').find((l) => l.includes('git '))
+  assert.ok(fcmd.includes(`test -f ${FIXQ} && ! test -L ${FIXQ} && cat ${FIXQ} > ${PRIV}`), fcmd)
+  assert.equal(fcmd.split(FIXQ).length - 1, 3, 'fix.diff appears only in the guard and the single copy')
+  assert.ok(fcmd.indexOf('cat ') < fcmd.indexOf('hash-object'), 'copy before any read by git')
+  assert.ok(fcmd.includes(`hash-object --no-filters ${PRIV}`))
+  assert.ok(fcmd.includes(`apply --check --index ${PRIV}`) && fcmd.includes(`apply --index ${PRIV}`))
   assert.ok(fb.prompt.includes(`-C "${SCR}verify-fix" diff --cached --raw --no-abbrev ${SHA}`))
   assert.ok(cb.prompt.includes(`-C "${SCR}verify-clone" diff --raw --no-abbrev ${SHA} ${HEAD_SHA}`))
   for (const r of [fb, cb]) assert.ok(!r.prompt.includes('render(escape(q))') && !r.prompt.includes(HOSTILE_FIX_MARK), 'fix text is never in a command')
