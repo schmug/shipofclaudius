@@ -1,0 +1,101 @@
+[
+  {
+    "version": "0.163.0",
+    "pace": {
+      "secondary": {
+        "deltaPercent": -64,
+        "willLastToReset": true,
+        "expectedUsedPercent": 65,
+        "summary": "64% in reserve | Expected 65% used | Lasts until reset | 1.5× headroom",
+        "stage": "farBehind"
+      }
+    },
+    "usage": {
+      "tertiary": null,
+      "loginMethod": "prolite",
+      "providerCost": {
+        "period": "Extra usage",
+        "used": 0,
+        "currencyCode": "Credits",
+        "updatedAt": "2026-11-02T00:42:58Z",
+        "balanceUpdatedAt": "2026-11-02T00:42:58Z",
+        "limit": 0
+      },
+      "updatedAt": "2026-11-02T00:42:58Z",
+      "codexResetCredits": {
+        "availableCount": 3,
+        "updatedAt": "2026-11-02T00:42:58Z",
+        "credits": [
+          {
+            "reset_type": "codex_rate_limits",
+            "description": "Example credit description",
+            "title": "Full reset",
+            "id": "redacted-id",
+            "granted_at": "2026-10-07T23:43:52Z",
+            "expires_at": "2026-11-06T23:43:52Z",
+            "status": "available"
+          },
+          {
+            "reset_type": "codex_rate_limits",
+            "description": "Example credit description",
+            "title": "Full reset",
+            "id": "redacted-id",
+            "granted_at": "2026-10-31T20:19:22Z",
+            "expires_at": "2026-11-30T20:19:22Z",
+            "status": "available"
+          },
+          {
+            "reset_type": "codex_rate_limits",
+            "description": "Example credit description",
+            "title": "Full reset",
+            "id": "redacted-id",
+            "granted_at": "2026-11-01T22:49:38Z",
+            "expires_at": "2026-12-01T22:49:38Z",
+            "status": "available"
+          }
+        ]
+      },
+      "secondary": {
+        "resetsAt": "2026-11-04T11:26:11Z",
+        "resetDescription": "Nov 4 at 6:26 AM",
+        "usedPercent": 1,
+        "windowMinutes": 10080
+      },
+      "identity": {
+        "providerID": "codex",
+        "loginMethod": "prolite",
+        "accountEmail": "user@example.com"
+      },
+      "dataConfidence": "exact",
+      "accountEmail": "user@example.com",
+      "primary": null
+    },
+    "openaiDashboard": {
+      "usageBreakdown": [],
+      "updatedAt": "2026-11-02T00:34:09Z",
+      "creditsRemaining": 0,
+      "accountID": "",
+      "signedInEmail": "user@example.com",
+      "primaryLimit": {
+        "resetsAt": "2026-11-04T11:26:11Z",
+        "resetDescription": "Nov 4 at 6:26 AM",
+        "usedPercent": 1,
+        "windowMinutes": 10080
+      },
+      "dailyBreakdown": [],
+      "creditsAvailable": false,
+      "accountPlan": "Pro 5x",
+      "creditEvents": []
+    },
+    "credits": {
+      "balanceIsWorkspace": false,
+      "creditsAvailable": false,
+      "remaining": 0,
+      "balanceReadSucceeded": true,
+      "events": [],
+      "updatedAt": "2026-11-02T00:42:58Z"
+    },
+    "source": "oauth",
+    "provider": "codex"
+  }
+]
