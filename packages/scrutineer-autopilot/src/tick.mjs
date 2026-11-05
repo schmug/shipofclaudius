@@ -43,7 +43,7 @@ const NOTE_PUBLISHED = 'autopilot: fix PR is the record; no advisory'
 const POST_METHODS = ['runFindingSkill', 'setStatus', 'addNote', 'scanRepo']
 export const RELAY_FIELDS = Object.freeze(['title', 'severity', 'location', 'cwe', 'suggested_fix', 'suggested_fix_commit', 'breaking_change', 'breaking_change_rationale'])
 export const OUTCOMES = Object.freeze(['merged', 'awaiting_ci', 'held', 'stopped', 'failed', 'skipped'])
-export const STOP_RULES = Object.freeze(['security_review', 'breaking_change', 'behaviour', 'no_gate', 'merge_escalated', 'policy_stop'])
+export const STOP_RULES = Object.freeze(['ci_change', 'security_review', 'breaking_change', 'behaviour', 'no_gate', 'merge_escalated', 'policy_stop'])
 export const EXIT = Object.freeze({ ok: 0, paused: 0, locked: 0, 'scrutineer-too-old': 2, 'scrutineer-down': 2, 'budget-unavailable': 2 })
 
 const toMs = (now) => (typeof now === 'function' ? now() : now instanceof Date ? now.getTime() : now ?? Date.now())
