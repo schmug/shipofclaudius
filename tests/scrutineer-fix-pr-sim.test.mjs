@@ -774,6 +774,37 @@ test('A: a mode, deletion or rename header in suggested_fix fails before any wri
   }
 })
 
+// ───────────────────────────── ci_change stop rule (#324) ──────────────────────────────
+const CI_PATH = '.github/workflows/ci.yml'
+const CI_FIX = SUGGESTED_FIX.replaceAll('src/search.js', CI_PATH)
+const ciStubs = () => ({
+  'relay:finding': () => ({ raw: JSON.stringify(relayFinding({ suggested_fix: CI_FIX, location: `${CI_PATH}:12` }), null, 2), nonce: NONCE, exit_code: 0 }),
+  build: () => built({ diff_files: [CI_PATH] }),
+  'relay:diff-files': () => ({ raw: `${CI_PATH}\ntest/search.test.js\n`, exit_code: 0 }),
+  'relay:check-diff': () => ({ raw: fixHunk(CI_PATH) + testHunk('test/search.test.js'), nonce: DNONCE, exit_code: 0 }),
+  'relay:pr-files': () => ({ raw: `${CI_PATH}\ntest/search.test.js\n`, exit_code: 0 }),
+})
+
+test('ci_change: a Scrutineer diff touching .github/workflows/ci.yml is held on public, stopped PR on private, never merged', async () => {
+  const pub = await runScript({ stubs: ciStubs() })
+  assert.equal(pub.result.outcome, 'held')
+  assert.equal(pub.result.stop_rule, 'ci_change')
+  assert.ok(!labels(pub.calls).includes('ship'))
+  assert.equal(pub.calls.workflows.length, 0)
+  const priv = await runScript({ args: { ...BASE_ARGS, visibility: 'private' }, stubs: ciStubs() })
+  assert.equal(priv.result.outcome, 'stopped')
+  assert.equal(priv.result.stop_rule, 'ci_change')
+  assert.ok(labels(priv.calls).includes('ship'))
+  assert.equal(priv.calls.workflows.length, 0)
+})
+
+test('ci_change: regate on a CI-touching Scrutineer diff stops without calling merge-pr-with-gate', async () => {
+  const { result, calls } = await runScript({ args: { ...BASE_ARGS, mode: 'regate', pr: 88 }, stubs: ciStubs() })
+  assert.equal(result.outcome, 'stopped')
+  assert.equal(result.stop_rule, 'ci_change')
+  assert.equal(calls.workflows.length, 0)
+})
+
 let failed = 0
 for (const [name, fn] of tests) {
   try { await fn(); console.log(`PASS ${name}`) } catch (e) { failed++; console.log(`FAIL ${name}\n  ${e && e.stack ? e.stack.split('\n').slice(0, 3).join('\n  ') : e}`) }

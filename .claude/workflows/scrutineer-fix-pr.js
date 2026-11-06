@@ -22,7 +22,7 @@
 //   args.readonlyAgent  agentType for the read-only relays and Check (default 'Explore').
 //
 // Returns { outcome: merged|awaiting_ci|held|stopped|failed|skipped, pr_url, merge_sha,
-//           held_path, stop_rule: null|security_review|breaking_change|behaviour|no_gate|merge_escalated|policy_stop,
+//           held_path, stop_rule: null|ci_change|security_review|breaking_change|behaviour|no_gate|merge_escalated|policy_stop,
 //           reason }. Build's red/green test output is never returned, persisted or put in a prompt.
 //           Once a PR has been opened, no path returns 'failed': any later failure is 'stopped' / merge_escalated
 //           (reason kept), so the tick waits on the PR instead of parking the finding.
@@ -372,6 +372,9 @@ if (!FIX.trim()) return done('failed', { reason: 'finding has no suggested_fix' 
 // SCRUT_FILES_RAW is compared only as data, never placed in a command; prompts get safePath forms.
 const SCRUT_FILES_RAW = [...new Set([...FIX.matchAll(/^\+\+\+ "?b\/(.*?)"?[ \t]*$/gm)].map((m) => m[1]).filter(Boolean))].sort()
 if (SCRUT_FILES_RAW.length === 0) return done('failed', { reason: 'no files in suggested_fix' })
+// A fix that edits CI or workflow config could change the very check that gates its own merge: never merge it.
+const CI_CHANGE = SCRUT_FILES_RAW.some(isDeniedPath)
+if (MODE === 'regate' && CI_CHANGE) return done('stopped', { pr_url: REGATE_URL, stop_rule: 'ci_change', reason: 'Scrutineer diff edits CI or workflow config' })
 // Every file in FIX is a Scrutineer file: a mode, deletion or rename/copy header is outside what the blob check covers.
 if (/^(new mode|old mode|deleted file mode|similarity index|rename from|copy from) |^\+\+\+ \/dev\/null/m.test(FIX)) return done('failed', { reason: 'fix hunks differ from suggested_fix' })
 
@@ -546,7 +549,8 @@ phase('Ship')
 const bc = check && ['none', 'changed', 'unknown'].includes(check.behaviour_change) ? check.behaviour_change : 'unknown'
 const securityFlag = !check || check.weakened_control !== false || check.suspicious_change !== false
 const breaking = str(F.breaking_change).trim().toLowerCase()
-const STOP = securityFlag ? 'security_review'
+const STOP = CI_CHANGE ? 'ci_change'
+  : securityFlag ? 'security_review'
   : (breaking && breaking !== 'non_breaking') ? 'breaking_change' // M4: anything but empty or non_breaking stops
   : bc !== 'none' ? 'behaviour' : null
 if ((STOP && PUBLIC) || (POLICY === 'stop' && PUBLIC)) {
@@ -559,7 +563,7 @@ if ((STOP && PUBLIC) || (POLICY === 'stop' && PUBLIC)) {
     `Return { status: HELD | FAILED, path, detail }.`,
     { label: 'hold', phase: 'Ship', schema: { type: 'object', additionalProperties: false, required: ['status', 'path', 'detail'], properties: { status: { enum: ['HELD', 'FAILED'] }, path: { type: 'string' }, detail: { type: 'string' } } } })
   if (!hold || hold.status !== 'HELD') return done('failed', { stop_rule: rule, reason: `could not move clone to ${HELD_PATH}: ${safePath(hold && hold.detail)}` })
-  return done('held', { held_path: HELD_PATH, stop_rule: rule, reason: rule === 'behaviour' ? `behaviour_change ${bc}` : rule })
+  return done('held', { held_path: HELD_PATH, stop_rule: rule, reason: rule === 'behaviour' ? `behaviour_change ${bc}` : rule === 'ci_change' ? 'Scrutineer diff edits CI or workflow config' : rule })
 }
 
 // Title and body are a fixed template over enums and sanitized values only (no red/green output,
