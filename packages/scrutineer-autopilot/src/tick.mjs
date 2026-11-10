@@ -6,7 +6,8 @@
 //   or if its repository_id does not map to an allowlisted <owner>/<name> key (spec §11). The ledger's
 //   own `repo` field is never trusted for a write.
 // - Dry run and paused do every GET, no POST and no ledger save; the client is wrapped by dryRunClient so a
-//   stray POST throws. Aborts (scrutineer-down / -too-old / budget-unavailable) save nothing and write no run file.
+//   stray POST throws. Aborts (scrutineer-down / -too-old / budget-unavailable) save nothing and write no run file; they only bump
+//   the last-abort.json repeat marker (skipped on dry run and paused).
 // - The operator token lives only inside the client; nothing here can see it.
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -15,7 +16,7 @@ import { ScrutineerTooOld } from './client.mjs'
 import { verifyOutcome, latestPatch, patchAttemptCount, patchRefusal, reattackStatus, skillAttempts } from './reports.mjs'
 import { readUsage, estimate, calibrate, canStart } from './budget.mjs'
 import { nextAction } from './lifecycle.mjs'
-import { openLedger, acquireLock, isPaused, writeRun } from './ledger.mjs'
+import { openLedger, acquireLock, isPaused, writeRun, recordAbort, clearAbort, stampAbortNotified } from './ledger.mjs'
 import { pollRepo, requiredChecks, prForBranch } from './github.mjs'
 import { chooseTiers, dueScan } from './tiers.mjs'
 
@@ -103,6 +104,17 @@ export async function markDigestSent(stateDir, { now = Date.now() } = {}) {
   }
 }
 
+// `tick.mjs --abort-notified`: the skill sends at most one repeat-abort notification per day, tracked in the marker.
+export async function markAbortNotified(stateDir, { now = Date.now() } = {}) {
+  const lock = await acquireLock(stateDir, { now: toMs(now) })
+  if (!lock.ok) throw new Error('a tick is running (locked); retry after it finishes')
+  try {
+    return await stampAbortNotified(stateDir, toMs(now))
+  } finally {
+    await lock.release()
+  }
+}
+
 // Backstop for dry runs: every POST method throws instead of reaching Scrutineer.
 export function dryRunClient(client) {
   const refuse = (m) => async () => { throw new Error(`dry-run: refused POST via ${m}`) }
@@ -132,7 +144,11 @@ export async function runTick({ config, client, exec, now = Date.now(), dryRun =
       ?? await step3Budget(tk)
       ?? await step4Repos(tk)
       ?? await step5Lifecycle(tk)
-    if (abort) return { ...R, status: abort }
+    if (abort) {
+      if (!tk.dry) R.abort = await recordAbort(config.stateDir, abort, R.notes[R.notes.length - 1] ?? '', t)
+      return { ...R, status: abort }
+    }
+    if (!tk.dry) await clearAbort(config.stateDir)
     await step6Rescans(tk)
     await step7AgentItems(tk)
     await step8Persist(tk)

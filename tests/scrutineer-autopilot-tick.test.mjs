@@ -94,6 +94,7 @@ async function world(w) {
     'POST /findings/{id}/notes': (req) => { bump(req.params.id); return { status: 303, headers: { Location: `/findings/${req.params.id}` } } },
     'POST /findings/{id}/{skill}': () => ({ status: 303, headers: { Location: `/scans/${scanSeq++}` } }),
     'POST /repositories/{id}/scan': (req) => ({ status: 303, headers: { Location: `/repositories/${req.params.id}` } }),
+    ...(w.routes ?? {}), // a same-keyed override replaces the default handler (key order, and so match order, is unchanged)
   })
   const stateDir = await mkdtemp(join(tmpdir(), 'sa-tick-'))
   const tokenPath = join(stateDir, 'token')
@@ -655,6 +656,67 @@ test('B: a fixing entry whose branch shows an older merged PR is not marked fixe
   await W.stub.close()
   assert.equal(r2.actions.find((a) => a.findingId === 7).type, 'mark_fixed')
   assert.equal(W.posts().find((p) => p.path === '/findings/7/status').body.status, 'fixed')
+})
+
+test('#326: a 200 text/html answer at baseUrl -> scrutineer-down with a content-type note, body never quoted', async () => {
+  const BODY = '<!doctype html><title>SECRET-BODY-MARKER</title>'
+  const W = await world({ findings: [], scans: [], routes: { 'GET /api/v1/findings': () => ({ status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, body: BODY }) } })
+  const r = await tick(W)
+  await W.stub.close()
+  assert.equal(r.status, 'scrutineer-down')
+  assert.equal(r.notes.at(-1), `baseUrl ${W.config.baseUrl} answered text/html; not a Scrutineer API`)
+  assert.ok(!JSON.stringify(r).includes('SECRET-BODY-MARKER'))
+  assert.equal(await exists(join(W.stateDir, 'runs')), false, 'an abort still writes no run file')
+})
+
+test('#326: a non-JSON non-HTML body gets the same note shape without the body', async () => {
+  const W = await world({ findings: [], scans: [], routes: { 'GET /api/v1/findings': () => ({ status: 200, headers: { 'Content-Type': 'text/plain' }, body: 'SECRET-BODY-MARKER' }) } })
+  const r = await tick(W)
+  await W.stub.close()
+  assert.equal(r.status, 'scrutineer-down')
+  assert.equal(r.notes.at(-1), `baseUrl ${W.config.baseUrl} answered text/plain; not a Scrutineer API`)
+})
+
+test('#326: connection refused keeps its own note', async () => {
+  const W = await world({ findings: [], scans: [] })
+  await W.stub.close()
+  const r = await tick(W)
+  assert.equal(r.status, 'scrutineer-down')
+  assert.ok(!r.notes.at(-1).includes('not a Scrutineer API'))
+})
+
+test('#326: two identical aborts leave one marker with count 2; a different note restarts; success clears', async () => {
+  const html = { 'GET /api/v1/findings': () => ({ status: 200, headers: { 'Content-Type': 'text/html' }, body: '<html>' }) }
+  const W = await world({ findings: [], scans: [], routes: html })
+  const r1 = await tick(W, { now: NOW })
+  const r2 = await tick(W, { now: NOW + 3600e3 })
+  const file = join(W.stateDir, 'last-abort.json')
+  assert.equal(r1.abort.count, 1)
+  assert.equal(r2.abort.count, 2)
+  const m = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(m.count, 2)
+  assert.equal(m.status, 'scrutineer-down')
+  assert.equal(m.firstSeen, iso(NOW))
+  assert.equal(m.lastSeen, iso(NOW + 3600e3))
+  assert.equal((await readdir(W.stateDir)).filter((f) => f.startsWith('last-abort')).length, 1)
+  await tick(W, { now: NOW + 7200e3, dryRun: true })
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).count, 2, 'dry run does not bump the marker')
+  await W.stub.close()
+  const r3 = await tick(W, { now: NOW + 7200e3 }) // refused: a different note
+  assert.equal(r3.abort.count, 1)
+  assert.notEqual(JSON.parse(await readFile(file, 'utf8')).note, m.note)
+})
+
+test('#326: a healthy tick clears the marker; --abort-notified stamps notifiedAt', async () => {
+  const W = await world({ findings: [finding(1)], scans: [deepDive()] })
+  await writeFile(join(W.stateDir, 'last-abort.json'), JSON.stringify({ status: 'scrutineer-down', note: 'x', firstSeen: iso(NOW), lastSeen: iso(NOW), count: 3 }))
+  const { markAbortNotified } = await import('../packages/scrutineer-autopilot/src/tick.mjs')
+  const at = await markAbortNotified(W.stateDir, { now: NOW + 1000 })
+  assert.equal(at, iso(NOW + 1000))
+  assert.equal(JSON.parse(await readFile(join(W.stateDir, 'last-abort.json'), 'utf8')).notifiedAt, at)
+  await tick(W)
+  await W.stub.close()
+  assert.equal(await exists(join(W.stateDir, 'last-abort.json')), false)
 })
 
 let failed = 0

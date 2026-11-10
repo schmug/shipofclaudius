@@ -100,3 +100,42 @@ export async function recentRuns(stateDir, n) {
   names = names.filter((f) => f.endsWith('.json')).sort().reverse().slice(0, n)
   return Promise.all(names.map(async (f) => JSON.parse(await readFile(join(dir, f), 'utf8'))))
 }
+
+// Repeat-abort marker (stateDir/last-abort.json). An abort writes no run file, so without this a long outage
+// leaves nothing behind and every tick re-diagnoses it. The same status and note again bumps `count`; a different
+// one starts over. The note is cut to a plain character set because the skill may put it in a notification.
+const ABORT = 'last-abort.json'
+const plain = (s) => String(s).replace(/[^A-Za-z0-9 ._:/;,()'-]/g, '?').slice(0, 300)
+
+export async function recordAbort(stateDir, status, note, now) {
+  const file = join(stateDir, ABORT)
+  const at = new Date(toMs(now)).toISOString()
+  const n = plain(note)
+  let prev = null
+  try { prev = JSON.parse(await readFile(file, 'utf8')) } catch { /* none or unreadable: start over */ }
+  const same = prev && prev.status === status && prev.note === n && Number.isInteger(prev.count)
+  const marker = same
+    ? { ...prev, count: prev.count + 1, lastSeen: at }
+    : { status, note: n, firstSeen: at, lastSeen: at, count: 1 }
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(`${file}.tmp`, JSON.stringify(marker, null, 2))
+  await rename(`${file}.tmp`, file)
+  return marker
+}
+
+export async function clearAbort(stateDir) {
+  await unlink(join(stateDir, ABORT)).catch((e) => { if (e.code !== 'ENOENT') throw e })
+}
+
+export async function readAbort(stateDir) {
+  try { return JSON.parse(await readFile(join(stateDir, ABORT), 'utf8')) } catch { return null }
+}
+
+export async function stampAbortNotified(stateDir, now) {
+  const m = await readAbort(stateDir)
+  if (!m) return null
+  m.notifiedAt = new Date(toMs(now)).toISOString()
+  await writeFile(`${join(stateDir, ABORT)}.tmp`, JSON.stringify(m, null, 2))
+  await rename(`${join(stateDir, ABORT)}.tmp`, join(stateDir, ABORT))
+  return m.notifiedAt
+}

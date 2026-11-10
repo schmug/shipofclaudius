@@ -2,6 +2,7 @@
 // One autopilot tick. Usage: tick.mjs [--dry-run] [--json] [--config <path>] [--state-dir <path>] [--only <findingId>]
 //        tick.mjs --record <findingId> [<outcome-json>; stdin when omitted] [--state-dir <path>]   store a scrutineer-fix-pr outcome as the ledger stage (exit 2 on invalid input)
 //        tick.mjs --digest-sent [--state-dir <path>]                       stamp lastDigestAt in the ledger
+//        tick.mjs --abort-notified [--state-dir <path>]                    stamp notifiedAt in last-abort.json
 // Prints the TickResult. Exit 0 for ok/paused/locked, 2 for scrutineer-too-old/-down/budget-unavailable, 1 on error.
 // --dry-run also wraps fetch so any non-GET request throws before it leaves the process.
 import { execFile } from 'node:child_process'
@@ -9,13 +10,13 @@ import { promisify } from 'node:util'
 import { readFile } from 'node:fs/promises'
 import { loadConfig, DEFAULT_CONFIG_PATH, DEFAULTS } from '../src/config.mjs'
 import { createClient } from '../src/client.mjs'
-import { runTick, dryRunFetch, recordOutcome, markDigestSent, RecordError, EXIT } from '../src/tick.mjs'
+import { runTick, dryRunFetch, recordOutcome, markDigestSent, markAbortNotified, RecordError, EXIT } from '../src/tick.mjs'
 
 const pexec = promisify(execFile)
 const exec = async (cmd, args) => (await pexec(cmd, args, { maxBuffer: 64 << 20 })).stdout
 
 function parseArgs(argv) {
-  const o = { dryRun: false, json: false, config: DEFAULT_CONFIG_PATH, stateDir: null, record: null, digestSent: false }
+  const o = { dryRun: false, json: false, config: DEFAULT_CONFIG_PATH, stateDir: null, record: null, digestSent: false, abortNotified: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--dry-run') o.dryRun = true
@@ -28,6 +29,7 @@ function parseArgs(argv) {
       o.record = [id, argv[i + 1] != null && !argv[i + 1].startsWith('--') ? argv[++i] : null] // no JSON argument: read stdin
     }
     else if (a === '--digest-sent') o.digestSent = true
+    else if (a === '--abort-notified') o.abortNotified = true
     else if (a === '--only') {
       const id = argv[++i]
       if (!/^\d+$/.test(id ?? '')) throw new Error('--only needs a numeric finding id')
@@ -61,11 +63,12 @@ async function stateDirFor(o) {
 
 try {
   const o = parseArgs(process.argv.slice(2))
-  if (o.record || o.digestSent) {
+  if (o.record || o.digestSent || o.abortNotified) {
     const dir = await stateDirFor(o)
     if (o.record) {
       const json = o.record[1] ?? await readStdin()
       const e = await recordOutcome(dir, o.record[0], json); console.log(`recorded ${o.record[0]}: ${e.stage}`) }
+    else if (o.abortNotified) console.log(`notifiedAt ${await markAbortNotified(dir)}`)
     else console.log(`lastDigestAt ${await markDigestSent(dir)}`)
     process.exit(0)
   }
