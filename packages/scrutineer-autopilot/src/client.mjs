@@ -26,6 +26,17 @@ export class ScrutineerTooOld extends Error {
   }
 }
 
+// The answer at baseUrl is not Scrutineer's API (an HTML app, a wrong port). The note quotes the media type only,
+// never the response body: that is attacker-influenceable text.
+export class NotScrutineerApi extends Error {
+  constructor(baseUrl, contentType) {
+    super(`baseUrl ${baseUrl} answered ${contentType || 'a non-JSON body'}; not a Scrutineer API`)
+    this.name = 'NotScrutineerApi'
+  }
+}
+
+const mediaType = (res) => String(res.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase().replace(/[^a-z0-9.+/-]/g, '').slice(0, 60)
+
 const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function parseJsonl(text) {
@@ -51,6 +62,11 @@ export function createClient({ baseUrl, tokenPath, readFile = fsReadFile, fetch 
       init.body = new URLSearchParams(form).toString()
     }
     const res = await fetch(url, init)
+    // GET only: a UI redirect (POST 302/303) may legitimately carry a text/html body.
+    if (method === 'GET' && mediaType(res) === 'text/html') {
+      await res.text?.().catch(() => {})
+      throw new NotScrutineerApi(baseUrl, 'text/html')
+    }
     if (method === 'POST' ? res.status !== 302 && res.status !== 303 : !res.ok) {
       await res.text?.().catch(() => {})
       throw new ScrutineerError(res.status, path)
@@ -68,11 +84,18 @@ export function createClient({ baseUrl, tokenPath, readFile = fsReadFile, fetch 
     throw new ScrutineerError(res.status, path, 'unexpected redirect')
   }
 
-  const getJsonl = async (path, query) => parseJsonl(await (await request('GET', path, { query })).text())
+  // A body that does not parse is never quoted: JSON.parse's message embeds a snippet of it.
+  const notApi = (res) => new NotScrutineerApi(baseUrl, mediaType(res))
+  const getJsonl = async (path, query) => {
+    const res = await request('GET', path, { query })
+    try { return parseJsonl(await res.text()) } catch { throw notApi(res) }
+  }
 
   return {
     async getFinding(id) {
-      const f = await (await request('GET', `/api/v1/findings/${encodeURIComponent(id)}`)).json()
+      const res = await request('GET', `/api/v1/findings/${encodeURIComponent(id)}`)
+      let f
+      try { f = await res.json() } catch { throw notApi(res) }
       const missing = REQUIRED_FIELDS.filter((k) => !(k in f))
       if (missing.length) throw new ScrutineerTooOld(missing)
       return f

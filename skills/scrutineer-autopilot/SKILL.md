@@ -26,8 +26,15 @@ ledger's `pr` (see `tick` step 4), never from workflow output.
 
 ## tick
 
-1. Run `node "BIN/tick.mjs" --json`. Exit 1 means an error: report stderr and stop. Exit 2 means Scrutineer is down or too old, or budget is
-   unavailable: report the note and stop. Exit 0 with `status` of `paused` or `locked` emits no items.
+1. Run `node "BIN/tick.mjs" --json`. Exit 1 means an error: report stderr and stop. Exit 0 with `status` of `paused` or `locked` emits no items.
+   Exit 2 means Scrutineer is down or too old, or budget is unavailable. The run is read-only for config: never edit `config.json`
+   and never ask a question in chat, because an unattended tick has nobody to answer. Print the note, then:
+   - If the result's `abort.count` is 1, stop (a first occurrence is not yet a repeat).
+   - If `abort.count` is above 1, send one `PushNotification` carrying `abort.note` (the tick has already cut it to a plain
+     character set; it quotes at most a content-type, never a response body) and the count, and say the config needs a human.
+     Send it only when `abort.notifiedAt` is absent or over 24 hours old, then run `node "BIN/tick.mjs" --abort-notified`.
+     The marker is `~/.claude/scrutineer-autopilot/last-abort.json`.
+   Stop after that; do not run steps 2 to 5.
 2. For each `agentItems` entry, serially, skipping any entry with `would: true`:
    ```
    Workflow({ name: 'shipofclaudius:scrutineer-fix-pr',
