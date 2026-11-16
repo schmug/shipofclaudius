@@ -187,6 +187,13 @@ Body:   - [ ] <concern one>
 `session_id` and `transcript_path` both arrive in the hook input (§4.3) but the agent has them
 from its own context; nothing needs to be threaded through the hook.
 
+**2026-11-16 update (#329): search before create.** A cause that persists across sessions opened
+one issue per session (16 for one misconfig, schmug/agent-notes#240–#261). Before
+`gh issue create`, the skill searches open `concern` issues for the same cause and, on a clear
+match, adds the concern as a `gh issue comment` in the same checkbox shape. Matching is the
+filing agent's judgment, biased toward a new issue; a failed search falls through to create.
+One issue per session still holds for concerns with no match.
+
 ### 4.3 Stop hook input — observed, not assumed
 
 Captured from a real run (§10). The keys present:

@@ -34,6 +34,48 @@ the vent tool).
 session is what the question board produced on 2026-08-29, and it is the wrong
 shape for review.
 
+### First, look for an open issue with the same cause
+
+A cause that persists across sessions (a misconfig an hourly unattended tick
+hits every run) would otherwise open one issue per session: 16 near-identical
+issues, schmug/agent-notes#240–#261, came from one `baseUrl` misconfig in four
+days. Before creating, search the open `concern` issues for that cause:
+
+```bash
+gh issue list -R schmug/agent-notes --label concern --state open \
+  --search "<keywords> in:title,body" --limit 20 \
+  --json number,title,body
+```
+
+Use two or three distinctive keywords from the cause (a config key, a port, an
+error string, a file path), not the symptom words every concern shares.
+
+**Comment only when the cause is clearly the same** — the same broken thing,
+not the same area or a similar-sounding symptom. Matching is your judgment, not
+a string match, and the bias is toward a new issue: a false merge hides a
+concern inside someone else's issue, a false split costs one extra issue. When
+it matches, add the concern as a comment in the same checkbox shape, and stop
+there for that concern:
+
+```bash
+gh issue comment <number> -R schmug/agent-notes \
+  --body "- [ ] <concern, restated for this session>
+
+Session: <session id>
+Transcript: <transcript path>"
+```
+
+Concerns with no clear match go into this session's one issue below, as usual.
+A comment on a matching issue does not use up that one issue, and a session
+whose concerns all matched creates none.
+
+**The search never blocks the turn.** If `gh issue list` fails or returns
+nothing usable, skip it and create the issue below — the same fall-through as
+any other `gh` failure. If `gh issue comment` fails, spool that concern
+(see "When `gh` fails").
+
+### Otherwise, create this session's issue
+
 ```bash
 gh issue create -R schmug/agent-notes \
   --title "concerns: <repo-or-cwd> $(date +%F)" \

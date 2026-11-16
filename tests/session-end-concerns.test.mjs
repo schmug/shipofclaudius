@@ -51,6 +51,31 @@ test('file-concerns: files one issue per session to the agreed sink', async () =
     'states the one-issue-per-session rule, un-inverted')
 })
 
+test('file-concerns: searches open concern issues and comments on a same-cause match before creating (#329)', async () => {
+  const md = await read('skills/file-concerns/SKILL.md')
+  // One persistent misconfig opened 16 concern issues in four days, one per hourly tick,
+  // because the skill only knew `gh issue create`.
+  const search = md.match(/gh issue list[^`]*?(-R|--repo) schmug\/agent-notes[^`]*?--label concern[^`]*?--state open[^`]*?--search "[^"]*in:title,body"[^`]*?--json number,title,body/)
+  assert.ok(search, 'documents the exact search command against the sink, open concern issues only')
+  const comment = md.match(/gh issue comment <number> (-R|--repo) schmug\/agent-notes/)
+  assert.ok(comment, 'documents the exact comment command against the sink')
+  const create = md.indexOf('gh issue create')
+  assert.ok(search.index < create && comment.index < create, 'search and comment come before create')
+  // The comment uses the issue body's checkbox shape (the shape #277 proposed for the
+  // same-session case), so triage reads one format whichever path recorded it.
+  assert.match(md.slice(comment.index, create), /--body "- \[ \] </, 'comment body is a checkbox line')
+  // Bias: a false merge hides a concern; a false split costs one issue.
+  assert.match(md, /\*\*Comment only when the cause is clearly the same\*\*/, 'states the clearly-same bias')
+  assert.match(md, /not\s+a\s+string match/i, 'matching is judgment, not string equality')
+  assert.match(md, /false merge hides a\s+concern[^.]*false split costs one extra issue/i, 'states which error is worse')
+  // The search must not become a new way to fail the turn.
+  assert.match(md, /\*\*The search never blocks the turn\.\*\*\s+If `gh issue list` fails[^.]*skip it and create the issue/,
+    'a failed search falls through to create')
+  assert.match(md, /If `gh issue comment` fails, spool that concern/, 'a failed comment falls through to the spool')
+  // Distinct causes still share this session's one issue.
+  assert.match(md, /no clear match go into this session's one issue/, 'unmatched concerns keep one issue per session')
+})
+
 test('file-concerns: never fails the turn', async () => {
   const md = await read('skills/file-concerns/SKILL.md')
   assert.match(md, /(~|\$HOME)\/\.claude\/concerns-spool\.jsonl/, 'names the spool path')
