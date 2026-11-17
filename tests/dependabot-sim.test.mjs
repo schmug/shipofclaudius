@@ -50,9 +50,10 @@ function defaultIngest() { return { alerts: ALERTS, repoResolved: 'o/r', totalOp
 // What triage-finding hands back (we only stub enough that dependabot can surface it).
 const TRIAGE_RESULT = { target: '.', source: 'inline', total: 3, counts: { confirmed: 1, not_actionable: 1, needs_review: 1 }, confirmed: [{ id: 'GHSA-aaaa-bbbb-cccc' }], missing: [], handoff: null, spineVersion: '1.0.0' }
 
-async function runScript({ args, ingest, triageResult, triageThrows } = {}) {
+async function runScript({ args, ingest, triageResult, triageThrows, onCalls } = {}) {
   const src = (await readFile(SRC_PATH, 'utf8')).replace('export const meta', 'const meta')
   const calls = { phases: [], logs: [], agents: [], workflowCalls: [] }
+  if (onCalls) onCalls(calls)
   const agent = async (prompt, opts = {}) => {
     calls.agents.push({ prompt, opts })
     if (opts.schema) assertSatisfiable(opts.schema, opts.label || '?')
@@ -203,6 +204,101 @@ test('max caps the triaged set and logs the truncation', async () => {
   assert.equal(result.included, 2, 'included reflects the cap')
   assert.equal(result.truncated, true, 'truncated flag set')
   assert.ok(calls.logs.some((l) => /truncat/i.test(l)), 'truncation is logged (no silent cap)')
+})
+
+// ============================ SERVER-SIDE FILTERS + SHORT INGEST (#331) ============================
+
+// The alerts URL the relay is told to fetch (the first quoted path in the prompt).
+const alertsQuery = (calls) => {
+  const m = ingestAgents(calls)[0].prompt.match(/"(\/repos\/[^"]*dependabot\/alerts\?[^"]*)"/)
+  assert.ok(m, 'the ingest prompt names a quoted dependabot/alerts URL')
+  return new URLSearchParams(m[1].split('?')[1])
+}
+
+test('no filters -> the query carries only state and per_page', async () => {
+  const q = alertsQuery((await runScript({ args: {} })).calls)
+  assert.equal(q.get('state'), 'open')
+  assert.equal(q.get('per_page'), '100')
+  for (const k of ['severity', 'scope', 'ecosystem', 'package']) assert.equal(q.has(k), false, `${k} absent without its filter`)
+})
+
+test('minSeverity/scope/ecosystem/package are pushed into the alerts query string', async () => {
+  const q = alertsQuery((await runScript({ args: { minSeverity: 'high', scope: 'runtime', ecosystem: 'npm', package: 'foo' } })).calls)
+  assert.equal(q.get('severity'), 'high,critical', 'minSeverity=high -> severity=high,critical')
+  assert.equal(q.get('scope'), 'runtime')
+  assert.equal(q.get('ecosystem'), 'npm')
+  assert.equal(q.get('package'), 'foo')
+  const all = alertsQuery((await runScript({ args: { scope: 'all', minSeverity: 'bogus' } })).calls)
+  assert.equal(all.has('scope'), false, 'scope=all is not pushed')
+  assert.equal(all.has('severity'), false, 'an unknown minSeverity is not pushed')
+})
+
+test('filter values are URL-encoded so they cannot break out of the quoted URL', async () => {
+  const { calls } = await runScript({ args: { package: '@scope/pkg" ; rm -rf ~ #' } })
+  const p = ingestAgents(calls)[0].prompt
+  assert.ok(!p.includes('rm -rf ~'), 'raw value never reaches the command')
+  assert.equal(alertsQuery(calls).get('package'), '@scope/pkg" ; rm -rf ~ #', 'the encoded value round-trips')
+})
+
+test('the relay counts the same query and reports it as totalOpen', async () => {
+  const { calls } = await runScript({ args: { minSeverity: 'critical' } })
+  const p = ingestAgents(calls)[0].prompt
+  assert.ok(/--jq '\.\[\]\.number' \| wc -l/.test(p), 'a fixed count command runs')
+  const urls = [...p.matchAll(/"(\/repos\/[^"]*)"/g)].map((m) => m[1])
+  assert.equal(urls.length, 2, 'fetch + count')
+  assert.equal(urls[0], urls[1], 'the count uses the same filtered query as the fetch')
+})
+
+// 50 open alerts, newest first; only #40 is critical. The stub plays the API: it applies
+// the query string the relay was given, then returns at most 32 rows (the cap the 11-16
+// run hit). Before #331 the query had no severity filter, so #40 fell past the cap.
+const FIFTY = Array.from({ length: 50 }, (_, i) => ({
+  number: 50 - i, state: 'open', ghsa_id: `GHSA-${i + 1}`, cve_id: '', summary: `alert at position ${i + 1}`,
+  severity: i + 1 === 40 ? 'critical' : 'medium', cwes: [], ecosystem: 'npm', package: `p${i + 1}`,
+  vulnerable_version_range: '< 1', first_patched_version: '1', scope: 'runtime', manifest_path: 'package-lock.json', html_url: 'u',
+}))
+// getCalls returns the run's calls record (set via runScript's onCalls hook before ingest runs).
+function cappedApiIngest(getCalls) {
+  return () => {
+    const q = alertsQuery(getCalls())
+    const sev = q.get('severity') ? q.get('severity').split(',') : null
+    const hit = FIFTY.filter((a) => (!sev || sev.includes(a.severity)) && (!q.get('package') || q.get('package') === a.package))
+    return { alerts: hit.slice(0, 32), repoResolved: 'o/r', totalOpen: hit.length }
+  }
+}
+test('>32 alerts: a critical alert at position 40 reaches triage under minSeverity=critical', async () => {
+  let callsSeen
+  const { calls, result } = await runScript({
+    args: { minSeverity: 'critical' },
+    ingest: cappedApiIngest(() => callsSeen),
+    onCalls: (c) => { callsSeen = c },
+  })
+  const ids = findingsDelegated(calls).map((f) => f.id)
+  assert.deepEqual(ids, ['GHSA-40'], 'the position-40 critical alert is the one delegated')
+  assert.equal(result.ingestTruncated, false, 'the filtered set fit, so nothing was short')
+  assert.equal(result.totalOpen, 1)
+  assert.equal(result.fetched, 1)
+})
+
+test('a short ingest (totalOpen > returned) is reported in the result, not silent', async () => {
+  let callsSeen
+  const { calls, result } = await runScript({
+    args: {},
+    ingest: cappedApiIngest(() => callsSeen),
+    onCalls: (c) => { callsSeen = c },
+  })
+  assert.equal(result.totalOpen, 50, 'totalOpen is the count the query matched')
+  assert.equal(result.fetched, 32, 'fetched is what the relay returned')
+  assert.equal(result.ingestTruncated, true, 'the shortfall is flagged')
+  assert.ok(/32 of 50/.test(result.note), 'the result note names returned vs total')
+  assert.ok(calls.logs.some((l) => /WARNING/.test(l) && /32 of 50/.test(l)), 'the shortfall is logged')
+  assert.equal(findingsDelegated(calls).length, 32, 'what was returned still reaches triage')
+})
+
+test('a short ingest is reported on the empty early-return path too', async () => {
+  const { result } = await runScript({ args: {}, ingest: () => ({ alerts: [], repoResolved: 'o/r', totalOpen: 7 }) })
+  assert.equal(result.ingestTruncated, true)
+  assert.ok(/0 of 7/.test(result.note), 'the empty-path note carries the shortfall')
 })
 
 // ============================ DELEGATION (to triage-finding) ============================

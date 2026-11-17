@@ -30,6 +30,9 @@
 //   - args.scope:        "runtime" | "development" | "all" (default "all").
 //   - args.ecosystem:    keep only this package ecosystem (e.g. npm, pip).
 //   - args.package:      keep only this package name.
+//   (minSeverity / scope / ecosystem / package are pushed into the alerts API query
+//   string so the server narrows the set before the relay returns it (#331); the same
+//   filters still run client-side as a backstop.)
 //   - args.max:          cap the number of alerts triaged (default 200; truncation is logged).
 //   - args.target:       repo root the findings are triaged against (default "."; passthrough).
 //   - args.handoff:      "ghsa" | "issue" | "auto" (passthrough to triage-finding).
@@ -69,6 +72,22 @@ const SPINE_VERSION = '1.0.0'
 const str = (v) => (typeof v === 'string' ? v.trim() : (v == null ? '' : String(v)))
 const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 }
 
+// ---- Server-side filters (#331) ----
+// The relay's returned array can come back shorter than what the API holds (a run saw
+// it stop at 32, newest first), and an older critical alert was dropped before the
+// client-side filters ever saw it. The Dependabot alerts API supports
+// severity/scope/ecosystem/package, so the query string carries them and the server
+// narrows the set first. Values are URL-encoded so they cannot break out of the
+// quoted URL in the relay's command.
+const MIN_RANK = SEV_RANK[str(A.minSeverity).toLowerCase()] || 0
+const QUERY_PARAMS = [`state=${encodeURIComponent(STATE)}`]
+if (MIN_RANK) QUERY_PARAMS.push(`severity=${Object.keys(SEV_RANK).filter((k) => SEV_RANK[k] >= MIN_RANK).join(',')}`)
+if (SCOPE !== 'all') QUERY_PARAMS.push(`scope=${encodeURIComponent(SCOPE)}`)
+if (ECOSYSTEM) QUERY_PARAMS.push(`ecosystem=${encodeURIComponent(ECOSYSTEM)}`)
+if (PACKAGE) QUERY_PARAMS.push(`package=${encodeURIComponent(A.package.trim())}`)
+QUERY_PARAMS.push('per_page=100')
+const ALERTS_PATH = `/repos/<owner>/<repo>/dependabot/alerts?${QUERY_PARAMS.join('&')}`
+
 // ---- Schemas ----
 const ALERT_ITEM = {
   type: 'object',
@@ -97,9 +116,9 @@ const INGEST_SCHEMA = {
   additionalProperties: false,
   required: ['alerts'],
   properties: {
-    alerts: { type: 'array', items: ALERT_ITEM, description: 'Every fetched Dependabot alert projected to the fields above. Empty array is valid (the workflow then exits cleanly).' },
+    alerts: { type: 'array', items: ALERT_ITEM, description: 'EVERY fetched Dependabot alert projected to the fields above — all of them, not a sample. Empty array is valid (the workflow then exits cleanly).' },
     repoResolved: { type: 'string', description: 'The "owner/name" actually queried (echo args.repo, or what `gh repo view` resolved).' },
-    totalOpen: { type: 'integer', description: 'Count of alerts returned by the query, before the script\'s client-side filtering.' },
+    totalOpen: { type: 'integer', description: 'The integer printed by the count command (step 3), copied verbatim: how many alerts the query matches. The script compares it with alerts.length to detect a short return.' },
     note: { type: 'string', description: 'One-line ingest summary: how many alerts of which state were fetched (or why zero).' },
   },
 }
@@ -113,11 +132,15 @@ const repoClause = REPO
 const ingested = await agent(
   `You are a READ-ONLY Dependabot-alert INGEST relay. Do exactly the following and NOTHING else:\n` +
   `1. ${repoClause}\n` +
-  `2. Fetch the repo's Dependabot alerts (state="${STATE}") READ-ONLY:\n` +
-  `   \`gh api --paginate "/repos/<owner>/<repo>/dependabot/alerts?state=${STATE}&per_page=100"\`\n` +
+  `2. Fetch the repo's Dependabot alerts (state="${STATE}") READ-ONLY, using this query string exactly ` +
+  `(its filters are applied by the server — do not drop or change them):\n` +
+  `   \`gh api --paginate "${ALERTS_PATH}"\`\n` +
   `   (This needs a token with Dependabot-alerts / security-events READ scope. If the API returns 403/404, ` +
   `return an empty alerts array with a note explaining the access gap — do NOT try to escalate.)\n` +
-  `3. Project EACH alert to a record with these fields (copy values verbatim; do NOT transform or judge):\n` +
+  `3. Count what the same query matches, READ-ONLY, and return the printed integer as totalOpen:\n` +
+  `   \`gh api --paginate "${ALERTS_PATH}" --jq '.[].number' | wc -l\`\n` +
+  `4. Project EACH alert to a record with these fields (copy values verbatim; do NOT transform or judge). ` +
+  `Return every alert the query returned, not a sample or the first page:\n` +
   `   number=.number, state=.state, ghsa_id=.security_advisory.ghsa_id, cve_id=.security_advisory.cve_id, ` +
   `summary=.security_advisory.summary, severity=.security_advisory.severity, ` +
   `cwes=[.security_advisory.cwes[].cwe_id], ecosystem=.security_vulnerability.package.ecosystem, ` +
@@ -135,6 +158,13 @@ const REPO_RESOLVED = REPO || (ingested && str(ingested.repoResolved)) || ''
 const allAlerts = (ingested && Array.isArray(ingested.alerts)) ? ingested.alerts : []
 const totalOpen = (ingested && Number.isInteger(ingested.totalOpen)) ? ingested.totalOpen : allAlerts.length
 log(`Fetched ${allAlerts.length} Dependabot alert(s) (state=${STATE})${REPO_RESOLVED ? ` for ${REPO_RESOLVED}` : ''}${ingested && ingested.note ? ` — ${ingested.note}` : ''}.`)
+// Short return (#331): the query matched more alerts than the relay handed back, so
+// some never reached the filters. Say so in the result instead of dropping them silently.
+const ingestTruncated = totalOpen > allAlerts.length
+const INGEST_NOTE = ingestTruncated
+  ? `ingest returned ${allAlerts.length} of ${totalOpen} alert(s) matching the query — ${totalOpen - allAlerts.length} were never seen; narrow the filters (minSeverity/scope/ecosystem/package) and re-run`
+  : ''
+if (ingestTruncated) log(`WARNING: ${INGEST_NOTE}.`)
 
 // ---- Deterministic filter + map (pure JS — the unit-tested core) ----
 function passesState(s) { const v = str(s).toLowerCase(); return !v || v === STATE }
@@ -200,6 +230,8 @@ if (findings.length === 0) {
     repo: REPO_RESOLVED,
     state: STATE,
     totalOpen,
+    fetched: allAlerts.length,
+    ingestTruncated,
     considered: matched.length,
     included: 0,
     truncated: false,
@@ -207,7 +239,7 @@ if (findings.length === 0) {
     findings: [],
     delegated: false,
     triage: null,
-    note: 'no Dependabot alerts matched the filters',
+    note: ['no Dependabot alerts matched the filters', INGEST_NOTE].filter(Boolean).join('; '),
     spineVersion: SPINE_VERSION,
   }
 }
@@ -233,6 +265,8 @@ try {
     repo: REPO_RESOLVED,
     state: STATE,
     totalOpen,
+    fetched: allAlerts.length,
+    ingestTruncated,
     considered: matched.length,
     included: findings.length,
     truncated,
@@ -240,7 +274,7 @@ try {
     findings,
     delegated: false,
     triage: null,
-    note: 'delegation to triage-finding failed; normalized findings returned for a manual run',
+    note: ['delegation to triage-finding failed; normalized findings returned for a manual run', INGEST_NOTE].filter(Boolean).join('; '),
     spineVersion: SPINE_VERSION,
   }
 }
@@ -249,6 +283,8 @@ return {
   repo: REPO_RESOLVED,
   state: STATE,
   totalOpen,
+  fetched: allAlerts.length,
+  ingestTruncated,
   considered: matched.length,
   included: findings.length,
   truncated,
@@ -256,5 +292,6 @@ return {
   findings,
   delegated: true,
   triage,
+  ...(INGEST_NOTE ? { note: INGEST_NOTE } : {}),
   spineVersion: SPINE_VERSION,
 }
